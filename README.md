@@ -170,6 +170,28 @@ count, and the winning glitch profile (every `g` parameter, as in
 `v_dip_mv` with `campaign --v-dip`. The file holds your card's serial; keep it out of
 anything you publish.
 
+## Fuse Console (web GUI)
+
+For monitoring and driving the whole flow from a browser — live fuse/register
+viewing, glitch campaigns, guarded burns, driver load/unload/blacklist, and
+GPU status as tabs in one dark console:
+
+```sh
+sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
+# then open http://<host>:8790
+```
+
+Burns are gated behind a typed arm phrase, pure 0→1 payload checks, row-state
+matching, and the full Goldilocks guard chain (re-verified server-side).
+Full dumps are also available headless:
+
+```sh
+sudo python3 -m ga100vfi fusedump --bdf 0000:1a:00.0
+```
+
+See [docs/CONSOLE.md](docs/CONSOLE.md) for the API, safety model, and a
+systemd unit.
+
 ## The glitch
 
 `t = 0` is the `PEX_RST` release edge.
@@ -233,10 +255,15 @@ host/
     adaptive.py    `campaign --adaptive` v_dip planner (Thompson sampling)
     sim.py         simulated cards for tuning the planner (`python -m ga100vfi.sim`)
     cli.py         `ga100vfi` CLI (`campaign`, `attempt`, `classify`, `baseline`, `revert`)
+    fusedump.py    full read-only fuse dump (rows 0–487 via CMD_READ)
+    console/       web console: `python -m ga100vfi console`
+      service.py   HTTP service + glitch/burn/driver/gpu endpoints
+      gui.py       the tabbed dark GUI (static + live HTML generator)
 docs/
   ADAPTIVE.md      `campaign --adaptive`: how it picks v_dip, flags, hardware and sim results
   BUILD.md         prerequisites, per-family build, flashing, verification
   PROTOCOL.md      serial command set and firmware safety invariants
+  CONSOLE.md       the Fuse Console: tabs, API, burn safety model, systemd unit
   images/          wiring diagram and tap-point photos
 ```
 
