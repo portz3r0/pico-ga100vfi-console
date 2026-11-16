@@ -1,0 +1,785 @@
+"""ga100vfi.console.service — GA100 CMP 170HX fuse surgery console service.
+
+Endpoints:
+  GET  /                 tabbed GUI (Fuse Explorer / Glitch & Burn / Drivers / GPU)
+  GET  /api/live         fast probe: status + shadow regs. PURE reads, safe any time.
+  GET  /api/full         full 488-row dump via CMD_READ + hex window (manual only).
+  GET  /api/glitch/status  campaign stats + log tail
+  POST /api/glitch/start   {params..., mode, records[], token}  (token needed to burn)
+  POST /api/glitch/stop
+  GET  /api/burn/check?row=&value=&mirror=   guards + current row value (dry)
+  POST /api/burn           {row, value, old, mirror, confirm, token}
+  POST /api/arm            {phrase: "BURN"} -> 120s arm token
+  GET  /api/driver         driver/modules/blacklist state
+  POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
+  GET  /api/gpu            nvidia-smi + lspci link state
+
+Safety model:
+  * /api/live never writes to the card.
+  * /api/full only issues fuse CMD_READs (FUSEWDATA never written).
+  * Burns require: armed token (typed phrase, 120s TTL), current row value
+    matching the expected old value, pure 0->1 bit transition, and all
+    hardware guards (CRC=0x55, DSOV=0, SBFE=0, EFP=1, PLMs open, RWL=0,
+    FUSECTRL idle) — i.e. a live Goldilocks window. Standalone burns outside
+    a window are structurally refused by the guards.
+  * The glitch campaign can burn records IN-PROCESS on the first Goldilocks
+    (the PCIe window dies seconds after the campaign loop returns, so a
+    separate burn call would miss it). Campaign/burn logic mirrors
+    cli.py's campaign + the proven glitch_and_burn.py flow.
+
+Run:  sudo python3 -m ga100vfi.console --bdf 0000:41:00.0 --port 8790
+      (or the ga100vfi-console script after `pip install -e host/`)
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import mmap
+import os
+import re
+import struct
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .. import fusedump as fd
+from .gui import STUB, build_html, load_dump
+
+CFG = {
+    "bdf": "0000:41:00.0",
+    "rows": list(range(0, 488)),
+    "state_dir": os.path.expanduser("~/ga100-fuse-view"),
+    "html": None,
+    "mock": None,
+}
+
+STATE: dict = {"ts": None, "status": None, "shadow": None,
+              "error": "service starting — no probe yet"}
+state_lock = threading.Lock()
+card_lock = threading.Lock()
+
+ARM: dict = {"token": None, "expires": 0.0}
+
+# fuse macro registers (mirror fusedump; burn path is the only writer)
+FUSECTRL, FUSEADDR, FUSERDATA, FUSEWDATA = 0x820000, 0x820004, 0x820008, 0x82000C
+EN_SW_OVERRIDE, DEBUGCTRL, CRC_STATUS, EFP, DSOV = (0x820040, 0x820060, 0x820070,
+                                                    0x820078, 0x820084)
+FUSEWDATA_PLM, FUSECTRL_PLM, SBFE = 0x8200F4, 0x8200F8, 0x821108
+CMD_READ, CMD_WRITE = 1, 2
+
+MODULES = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
+BLACKLIST_FILE = "/etc/modprobe.d/ga100-fuse-blacklist.conf"
+
+
+def sh(cmd, timeout=15):
+    try:
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           timeout=timeout)
+        return (p.stdout + p.stderr).strip()
+    except Exception as e:
+        return f"<<{cmd}: {e}>>"
+
+
+def driver_of(bdf):
+    try:
+        return os.path.basename(os.readlink(f"/sys/bus/pci/devices/{bdf}/driver"))
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------- probe
+def probe(bdf):
+    """Pure-read probe: status + shadow + TPC registers. Zero register writes."""
+    path = f"/sys/bus/pci/devices/{bdf}/resource0"
+    f = os.open(path, os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
+    try:
+        mm = mmap.mmap(f, fd.MAP_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
+        try:
+            def rd(o):
+                return struct.unpack_from("<I", mm, o)[0]
+            if rd(FUSECTRL) == 0xFFFFFFFF:
+                return {"error": "BAR0 unreadable — bus hung or PCIe link down "
+                                 "(normal mid-glitch / after reset)"}
+            status = {k: rd(o) for k, o in fd.STATUS_REGS.items()}
+            shadow = {k: rd(o) for k, o in fd.SHADOW_REGS.items()}
+            for i in range(8):
+                shadow[f"TPC_DISABLE_{i}"] = rd(fd.TPC_DISABLE_BASE + 4 * i)
+                shadow[f"CTRL_TPC_GPC{i}"] = rd(fd.CTRL_TPC_BASE + 4 * i)
+            return {"status": status, "shadow": shadow, "driver": driver_of(bdf),
+                    "bdf": bdf, "ts": datetime.now().isoformat(timespec="seconds")}
+        finally:
+            mm.close()
+    finally:
+        os.close(f)
+
+
+def poller(interval):
+    while True:
+        if not card_lock.acquire(timeout=0.5):
+            time.sleep(interval)
+            continue
+        try:
+            if CFG["mock"]:
+                with open(CFG["mock"]) as f:
+                    snap = json.load(f)
+                snap["ts"] = datetime.now().isoformat(timespec="seconds")
+            else:
+                try:
+                    snap = probe(CFG["bdf"])
+                except Exception as e:
+                    snap = {"error": f"probe failed: {e}"}
+        finally:
+            card_lock.release()
+        with state_lock:
+            STATE.clear()
+            STATE.update(snap)
+        time.sleep(interval)
+
+
+# ---------------------------------------------------------------- full dump
+def parse_hexwindow(hw):
+    hexnon = []
+    if os.path.exists(hw):
+        for ln in open(hw):
+            m = re.match(r"0x([0-9A-Fa-f]+)\s+0x([0-9A-Fa-f]+)", ln)
+            if m and int(m.group(2), 16):
+                hexnon.append([int(m.group(1), 16), int(m.group(2), 16)])
+    return hexnon
+
+
+def dumps_dir():
+    return os.path.join(CFG["state_dir"], "dumps")
+
+
+def full_dump():
+    if not card_lock.acquire(timeout=1.0):
+        return {"error": "card busy — another full dump is running"}
+    try:
+        if CFG["mock"]:
+            with open(CFG["mock"]) as f:
+                d = json.load(f)
+            hw = os.path.join(os.path.dirname(CFG["mock"]), "hex_window_0x820000.txt")
+        else:
+            out = os.path.join(dumps_dir(),
+                               datetime.now().strftime("%Y%m%d-%H%M%S"))
+            os.makedirs(out, exist_ok=True)
+            logs = []
+            d = fd.dump_card(CFG["bdf"], out, CFG["rows"], True,
+                             lambda m, flush=True: logs.append(m))
+            d["log"] = logs[-30:]
+            hw = os.path.join(out, "hex_window_0x820000.txt")
+        d.pop("hexnonzero", None)
+        d["hexnonzero"] = parse_hexwindow(hw)
+        return d
+    finally:
+        card_lock.release()
+
+
+# ---------------------------------------------------------------- burn core
+def read_row_via(rd, wr, row):
+    """CMD_READ a row through an (rd, wr) pair. Only ever issues CMD_READ."""
+    wr(FUSEADDR, row)
+    c = rd(FUSECTRL)
+    wr(FUSECTRL, (c & ~0x3) | CMD_READ)
+    t0 = time.time()
+    while time.time() - t0 < 2.0:
+        c = rd(FUSECTRL)
+        if ((c >> 16) & 0x1F) == 4 and (c & 3) == 0:
+            return rd(FUSERDATA)
+        time.sleep(0.001)
+    raise RuntimeError(f"CMD_READ timeout row {row}")
+
+
+def burn_guards(rd):
+    checks = []
+    for name, off, want in (("CRC_STATUS", CRC_STATUS, 0x55),
+                            ("DSOV", DSOV, 0),
+                            ("SBFE", SBFE, 0),
+                            ("EFP", EFP, 1),
+                            ("FUSEWDATA_PLM", FUSEWDATA_PLM, 0xFFFFFFFF),
+                            ("FUSECTRL_PLM", FUSECTRL_PLM, 0xFFFFFFFF)):
+        v = rd(off)
+        checks.append({"name": name, "value": v, "want": want, "ok": v == want})
+    ctrl = rd(FUSECTRL)
+    checks.append({"name": "FUSECTRL idle", "value": ctrl,
+                   "ok": ((ctrl >> 16) & 0x1F) == 4 and (ctrl & 3) == 0})
+    rwl = (rd(DEBUGCTRL) >> 1) & 1
+    checks.append({"name": "DEBUGCTRL RWL", "value": rwl, "ok": rwl == 0})
+    return all(c["ok"] for c in checks), checks
+
+
+def burn_execute(rd, wr, row, value, old):
+    """Guarded single-row burn. Returns report dict. NEVER retries."""
+    rep = {"row": row, "value": value, "old": old}
+    ok, checks = burn_guards(rd)
+    rep["guards"] = checks
+    if not ok:
+        rep["result"] = "ABORT — guard failure (no Goldilocks window)"
+        return rep
+    en_sw = rd(EN_SW_OVERRIDE)
+    wr(EN_SW_OVERRIDE, 0)
+    time.sleep(0.05)
+    try:
+        cur = read_row_via(rd, wr, row)
+        rep["row_before"] = cur
+        if cur != old:
+            rep["result"] = (f"ABORT — row {row} reads 0x{cur:08X}, "
+                             f"expected old 0x{old:08X}")
+            return rep
+        wr(FUSECTRL, 0)
+        wr(FUSEADDR, row)
+        wr(FUSEWDATA, value)
+        wr(FUSECTRL, CMD_WRITE)
+        t0 = time.time()
+        while time.time() - t0 < 2.0:
+            c = rd(FUSECTRL)
+            if ((c >> 16) & 0x1F) == 4 and (c & 3) == 0:
+                break
+            time.sleep(0.001)
+        else:
+            rep["result"] = "ABORT — CMD_WRITE did not return to IDLE"
+            return rep
+        wr(EN_SW_OVERRIDE, 0)
+        time.sleep(0.05)
+        rb = read_row_via(rd, wr, row)
+        rep["readback"] = rb
+        rep["result"] = ("VERIFY OK" if rb == value else
+                         "VERIFY FAIL — readback does not match")
+        return rep
+    finally:
+        wr(EN_SW_OVERRIDE, en_sw)
+        time.sleep(0.05)
+
+
+def burn_check(row, value, mirror):
+    """Dry check: current row value, purity, live guard states. No fuse writes."""
+    if CFG["mock"]:
+        return {"error": "burn check not available in mock mode"}
+    if not card_lock.acquire(timeout=1.0):
+        return {"error": "card busy"}
+    try:
+        bar = fd.Bar(CFG["bdf"])
+        try:
+            rd, wr = bar.rd, bar.wr
+            en_sw = rd(EN_SW_OVERRIDE)
+            if en_sw != 0:
+                wr(EN_SW_OVERRIDE, 0)
+                time.sleep(0.05)
+            try:
+                cur = read_row_via(rd, wr, row)
+            finally:
+                if en_sw != 0:
+                    wr(EN_SW_OVERRIDE, en_sw)
+                    time.sleep(0.05)
+            ok, checks = burn_guards(rd)
+            pure = (value & cur) == cur and value != cur
+            rows = [row]
+            if mirror:
+                rows.append(row + 1 if row % 2 == 0 else row - 1)
+            note = "guards require a live Goldilocks window (DSOV=0); " \
+                   "use the campaign burn-on-goldilocks mode"
+            if not (222 <= row <= 487):
+                note = ("⚠ row outside the FF record region (222–487) — "
+                        "burning record-format values in the main array / FPF "
+                        "region has bricked cards. " + note)
+            return {"row": row, "current": cur, "value": value,
+                    "pure_0to1": pure, "guards_ok": ok, "guards": checks,
+                    "rows_to_burn": rows, "note": note}
+        finally:
+            bar.close()
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        card_lock.release()
+
+
+def burn_api(body):
+    """Standalone burn — only works inside a live Goldilocks window."""
+    if CFG["mock"]:
+        return {"error": "burn not available in mock mode"}
+    try:
+        row = int(body["row"])
+        value = int(str(body["value"]), 0)
+        old = int(str(body.get("old", "0")), 0)
+    except (KeyError, ValueError, TypeError):
+        return {"error": "row/value/old required (int / 0x-hex)"}
+    if not (0 <= row <= 487) or not (0 <= value <= 0xFFFFFFFF):
+        return {"error": "row out of range or value not 32-bit"}
+    if not (value & old) == old or value == old:
+        return {"error": "not a pure 0->1 transition (new must be a superset of old)"}
+    confirm = bool(body.get("confirm"))
+    token = body.get("token")
+    if confirm and not (token and ARM["token"] == token and
+                        time.time() < ARM["expires"]):
+        return {"error": "not armed (or arm token expired) — arm first, 120s TTL"}
+    if not confirm:
+        return burn_check(row, value, bool(body.get("mirror")))
+    if not card_lock.acquire(timeout=1.0):
+        return {"error": "card busy"}
+    try:
+        bar = fd.Bar(CFG["bdf"])
+        try:
+            rep = burn_execute(bar.rd, bar.wr, row, value, old)
+            if rep.get("result") == "VERIFY OK" and body.get("mirror"):
+                mrow = row + 1 if row % 2 == 0 else row - 1
+                rep["mirror"] = burn_execute(bar.rd, bar.wr, mrow, value, old)
+            return rep
+        finally:
+            bar.close()
+    finally:
+        card_lock.release()
+
+
+def arm_api(body):
+    if str(body.get("phrase", "")).strip().upper() != "BURN":
+        return {"error": 'phrase must be "BURN"'}
+    ARM["token"] = uuid.uuid4().hex
+    ARM["expires"] = time.time() + 120
+    return {"token": ARM["token"], "expires_in": 120,
+            "note": "armed for 120s — burns still require a Goldilocks window"}
+
+
+# ---------------------------------------------------------------- glitch campaign
+GLITCH: dict = {"running": False, "log": [], "stats": {}, "params": None,
+                "error": None, "finished": None, "result": None}
+glitch_lock = threading.Lock()
+glitch_stop = threading.Event()
+
+
+def glog(line):
+    ts = datetime.now().strftime("%H:%M:%S")
+    with glitch_lock:
+        GLITCH["log"].append(f"{ts}  {line}")
+        del GLITCH["log"][:-400]
+
+
+def vrm_unlock(card, retries=15):
+    """VRM unlock via single-transaction PMBus commands (same as cli.py's
+    _ensure_unlocked: bypasses the multi-transaction u/z firmware commands
+    which fail when any single I2C read NACKs)."""
+    for _ in range(retries):
+        try:
+            cml = card.read(0x25, 0x7E, 1)
+            if cml[0] & 0x08:
+                return True
+            break
+        except IOError:
+            time.sleep(0.05)
+    for reg, val in ((0xF2, b"\x25\x7c"), (0x13, b"\x00"), (0x46, b"\x29\x12")):
+        for _ in range(retries):
+            try:
+                card.write(0x25, reg, val)
+                break
+            except IOError:
+                time.sleep(0.05)
+        else:
+            return False
+    return True
+
+
+def campaign_worker(params, records):
+    stats = {"attempts": 0, "valid": 0, "lost": 0, "nack": 0,
+             "dsov_zero": 0, "goldilocks": False, "burned": []}
+    with glitch_lock:
+        GLITCH["stats"] = stats
+    try:
+        from ..glitch import Card, Attempt          # lazy: needs pyserial + pico
+        from ..bar0 import Bar0, restore
+        from ..classify import classify
+    except Exception as e:
+        glog(f"ABORT — ga100vfi import failed: {e}")
+        with glitch_lock:
+            GLITCH["running"] = False
+            GLITCH["error"] = str(e)
+        return
+    try:
+        card = Card(params.get("port", "/dev/ttyACM0"))
+    except Exception as e:
+        glog(f"ABORT — cannot open pico serial: {e}")
+        with glitch_lock:
+            GLITCH["running"] = False
+            GLITCH["error"] = str(e)
+        return
+    try:
+        card.cmd("@q", 0.3)
+        card.cmd("@F 1000000", 0.3)
+        glog("pico firmware: " + card.cmd("v", 0.5).strip())
+        if records:
+            glog(f"ARMED burn-on-goldilocks: {len(records)} record(s): " +
+                 ", ".join(f"row {r['row']} <- 0x{r['value']:08X}" for r in records))
+        for n in range(1, params.get("max_attempts", 100) + 1):
+            if glitch_stop.is_set():
+                glog("STOPPED by user")
+                break
+            stats["attempts"] = n
+            if not vrm_unlock(card):
+                glog("VRM unlock failed — stopping")
+                break
+            att = Attempt(v_dip_mv=params.get("v_dip", 354), t_dip_us=-60,
+                          v_restore_mv=750, t_restore_us=-20, t_revert_us=0,
+                          fast=1, hold_ms=0, pulses=params.get("pulses", 3),
+                          pw=params.get("pw", 198), gap=params.get("gap", 150),
+                          delay=params.get("delay", 117), revert=0)
+            try:
+                rep = card.attempt(att)
+            except IOError as e:
+                glog(f"[{n}] glitch err {e}")
+                continue
+            if rep.writes_failed > 0:
+                stats["nack"] += 1
+                glog(f"[{n}] nack wf={rep.writes_failed}")
+                continue
+            if not restore(CFG["bdf"], wait_s=2.0):
+                stats["lost"] += 1
+                glog(f"[{n}] link lost")
+                continue
+            with card_lock:
+                try:
+                    with Bar0(CFG["bdf"]) as bar:
+                        if bar.rd32(0x00) == 0xFFFFFFFF:
+                            glog(f"[{n}] ffff")
+                            continue
+                        v = classify(bar)
+                except Exception as e:
+                    glog(f"[{n}] classify err {e}")
+                    continue
+                stats["valid"] += 1
+                if v.dsov == 0:
+                    stats["dsov_zero"] += 1
+                glog(f"[{n}] dsov={v.dsov} crc=0x{v.crc_status:x} "
+                     f"priv=0x{v.priv_mask:08x}" +
+                     ("  << GOLDILOCKS" if v.passed else ""))
+                if v.passed:
+                    stats["goldilocks"] = True
+                    if records:
+                        glog(">>> GOLDILOCKS — burning records now "
+                             "(same process, no further restore)")
+                        for rec in records:
+                            rrep = burn_execute(bar.rd32, bar.wr32,
+                                                rec["row"], rec["value"],
+                                                rec.get("old", 0))
+                            glog(f"    row {rec['row']}: {rrep.get('result')}")
+                            stats["burned"].append(
+                                {"row": rec["row"], "result": rrep.get("result")})
+                    break
+    except Exception as e:
+        glog(f"ABORT — {e}")
+        with glitch_lock:
+            GLITCH["error"] = str(e)
+    finally:
+        try:
+            card.close()
+        except Exception:
+            pass
+        with glitch_lock:
+            GLITCH["running"] = False
+            GLITCH["finished"] = datetime.now().isoformat(timespec="seconds")
+            GLITCH["result"] = ("goldilocks" if stats["goldilocks"] else
+                                "stopped" if glitch_stop.is_set() else "exhausted")
+
+
+def glitch_start(body):
+    with glitch_lock:
+        if GLITCH["running"]:
+            return {"error": "campaign already running"}
+    params = {
+        "v_dip": int(body.get("v_dip", 354)),
+        "pulses": int(body.get("pulses", 3)),
+        "pw": int(body.get("pw", 198)),
+        "gap": int(body.get("gap", 150)),
+        "delay": int(body.get("delay", 117)),
+        "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
+        "port": body.get("port", "/dev/ttyACM0"),
+    }
+    records = []
+    if body.get("mode") == "burn":
+        recs = body.get("records", [])
+        token = body.get("token")
+        if not recs:
+            return {"error": "burn mode needs at least one record "
+                             "(set + check the burn payload first)"}
+        if not (token and ARM["token"] == token and time.time() < ARM["expires"]):
+            return {"error": "burn mode requires a valid arm token "
+                             "(type BURN in the burn panel, 120s TTL)"}
+        for rec in recs:
+            try:
+                row = int(rec["row"])
+                value = int(str(rec["value"]), 0)
+                old = int(str(rec.get("old", "0")), 0)
+            except (KeyError, ValueError):
+                return {"error": f"bad record: {rec}"}
+            if not (0 <= row <= 487) or not (0 <= value <= 0xFFFFFFFF):
+                return {"error": f"record out of range: row {row}"}
+            if (value & old) != old or value == old:
+                return {"error": f"row {row}: not a pure 0->1 transition"}
+            records.append({"row": row, "value": value, "old": old})
+            if rec.get("mirror"):
+                m = row + 1 if row % 2 == 0 else row - 1
+                records.append({"row": m, "value": value, "old": old})
+    glitch_stop.clear()
+    with glitch_lock:
+        GLITCH.update({"running": True, "log": [], "stats": {}, "params": params,
+                       "error": None, "finished": None, "result": None})
+    t = threading.Thread(target=campaign_worker, args=(params, records), daemon=True)
+    t.start()
+    glog(f"campaign started — v_dip={params['v_dip']} pulses={params['pulses']} "
+         f"pw={params['pw']} gap={params['gap']} delay={params['delay']} "
+         f"max={params['max_attempts']} mode={body.get('mode', 'classify')}")
+    return {"started": True, "params": params, "records": len(records)}
+
+
+def glitch_status():
+    with glitch_lock:
+        return {"running": GLITCH["running"], "stats": GLITCH["stats"],
+                "error": GLITCH["error"], "finished": GLITCH["finished"],
+                "result": GLITCH["result"], "params": GLITCH["params"],
+                "log": GLITCH["log"][-120:]}
+
+
+# ---------------------------------------------------------------- drivers
+def driver_state():
+    bdf = CFG["bdf"]
+    loaded = [l.split()[0] for l in sh("lsmod").splitlines()
+              if l.startswith(("nvidia", "nouveau"))]
+    version = sh("modinfo -F version nvidia 2>/dev/null") or ""
+    bl_files = sorted(f for f in os.listdir("/etc/modprobe.d")
+                      if re.search(r"nvidia|nouveau|vfi|cmp", f))
+    our_bl = os.path.exists(BLACKLIST_FILE)
+    return {"bdf": bdf, "bound": driver_of(bdf), "loaded": loaded,
+            "version": version, "blacklist_active": our_bl,
+            "blacklist_file": BLACKLIST_FILE,
+            "other_modprobe_d": [f for f in bl_files
+                                 if f != os.path.basename(BLACKLIST_FILE)]}
+
+
+def driver_op_api(body):
+    op = body.get("op")
+    confirm = bool(body.get("confirm"))
+    if op == "blacklist":
+        if not confirm:
+            return {"error": "confirm required"}
+        with open(BLACKLIST_FILE, "w") as f:
+            f.write("# written by ga100vfi console\n"
+                    "blacklist nvidia\nblacklist nvidia_drm\n"
+                    "blacklist nvidia_modeset\nblacklist nvidia_uvm\n"
+                    "blacklist nouveau\n")
+        return {"ok": True, "note": "blacklist active — prevents autoload at boot; "
+                "manual modprobe still works. Unload now or reboot to apply."}
+    if op == "unblacklist":
+        try:
+            os.remove(BLACKLIST_FILE)
+        except FileNotFoundError:
+            pass
+        return {"ok": True, "note": "blacklist removed"}
+    if op == "unload":
+        if not confirm:
+            return {"error": "confirm required"}
+        bdf = CFG["bdf"]
+        bound = driver_of(bdf)
+        if bound:
+            sh(f"echo {bdf} > /sys/bus/pci/drivers/{bound}/unbind 2>/dev/null")
+        results = []
+        for m in MODULES + ["nvidia"]:
+            r = sh(f"rmmod {m} 2>&1")
+            results.append(f"{m}: {r.splitlines()[-1] if r else 'ok'}")
+        return {"ok": True, "log": results, "state": driver_state()}
+    if op == "load":
+        r = sh("modprobe nvidia 2>&1")
+        return {"ok": not r or "already" in r.lower(),
+                "log": [f"modprobe nvidia: {r or 'ok'}"], "state": driver_state()}
+    return {"error": f"unknown op {op!r}"}
+
+
+# ---------------------------------------------------------------- gpu info
+GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
+              "utilization.gpu", "temperature.gpu", "power.draw", "power.limit",
+              "fan.speed", "pcie.link.gen.current", "pcie.link.gen.max",
+              "clocks.sm", "clocks.mem", "pstate"]
+
+
+def gpu_info():
+    bdf = CFG["bdf"]
+    slot = bdf.split(":", 1)[1] if bdf.count(":") == 3 else bdf
+    q = ",".join(GPU_FIELDS)
+    out = sh(f"nvidia-smi --query-gpu={q} --format=csv,noheader,nounits 2>&1",
+             timeout=10)
+    nvidia = {}
+    first = out.splitlines()[0] if out else ""
+    if "," in first and not first.lower().startswith(("no devices", "nvidia-smi")):
+        vals = [v.strip() for v in first.split(",")]
+        nvidia = dict(zip(GPU_FIELDS, vals))
+    else:
+        nvidia = {"error": first or "nvidia-smi failed"}
+    link = [l.strip() for l in sh(f"lspci -s {slot} -vv 2>/dev/null").splitlines()
+            if "LnkSta:" in l or "LnkCap:" in l]
+    return {"nvidia": nvidia, "link": link,
+            "ts": datetime.now().isoformat(timespec="seconds")}
+
+
+# ---------------------------------------------------------------- http
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ga100vfi-console/1.0"
+
+    def _send(self, code, body, ctype):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        qs = {}
+        if "?" in self.path:
+            qs = dict(p.split("=", 1) for p in self.path.split("?")[1].split("&")
+                      if "=" in p)
+        try:
+            if path in ("/", "/index.html"):
+                with open(CFG["html"], "rb") as f:
+                    self._send(200, f.read(), "text/html; charset=utf-8")
+            elif path == "/api/live":
+                with state_lock:
+                    snap = dict(STATE)
+                if "error" in snap or snap.get("status") is None:
+                    self._send(200, json.dumps(
+                        {"error": snap.get("error", "no probe yet")}),
+                        "application/json")
+                else:
+                    self._send(200, json.dumps(snap), "application/json")
+            elif path == "/api/full":
+                self._send(200, json.dumps(full_dump(), default=str),
+                           "application/json")
+            elif path == "/api/glitch/status":
+                self._send(200, json.dumps(glitch_status(), default=str),
+                           "application/json")
+            elif path == "/api/burn/check":
+                try:
+                    row = int(qs.get("row", "-1"))
+                    value = int(qs.get("value", "0"), 0)
+                except ValueError:
+                    row, value = -1, 0
+                self._send(200, json.dumps(burn_check(row, value,
+                                                      qs.get("mirror") == "1"),
+                                           default=str), "application/json")
+            elif path == "/api/driver":
+                self._send(200, json.dumps(driver_state(), default=str),
+                           "application/json")
+            elif path == "/api/gpu":
+                self._send(200, json.dumps(gpu_info(), default=str),
+                           "application/json")
+            else:
+                self._send(404, '{"error": "not found"}', "application/json")
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            try:
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
+            except Exception:
+                pass
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        except Exception:
+            body = {}
+        try:
+            if path == "/api/glitch/start":
+                resp = glitch_start(body)
+            elif path == "/api/glitch/stop":
+                glitch_stop.set()
+                resp = {"stopping": True}
+            elif path == "/api/burn":
+                resp = burn_api(body)
+            elif path == "/api/arm":
+                resp = arm_api(body)
+            elif path == "/api/driver/op":
+                resp = driver_op_api(body)
+            else:
+                resp = {"error": "not found"}
+            self._send(200, json.dumps(resp, default=str), "application/json")
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            try:
+                self._send(500, json.dumps({"error": str(e)}), "application/json")
+            except Exception:
+                pass
+
+    def log_message(self, format, *args):   # noqa: A002 — stdlib signature
+        sys.stdout.write("%s %s\n" % (datetime.now().strftime("%H:%M:%S"),
+                                      format % args))
+        sys.stdout.flush()
+
+
+# ---------------------------------------------------------------- startup
+def latest_seed():
+    """Newest full-dump JSON in the state dir, for instant paint on boot."""
+    candidates = sorted(glob.glob(os.path.join(dumps_dir(), "*", "dump.json")))
+    if not candidates:
+        return dict(STUB)
+    try:
+        return load_dump(os.path.dirname(candidates[-1]))
+    except Exception:
+        return dict(STUB)
+
+
+def prepare_html():
+    """Generate live.html into the state dir (unless --html overrides)."""
+    if CFG["html"]:
+        return
+    CFG["html"] = os.path.join(CFG["state_dir"], "live.html")
+    payload = latest_seed()
+    payload["live"] = True
+    with open(CFG["html"], "w") as f:
+        f.write(build_html(payload, live=True))
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="ga100vfi-console",
+        description="GA100 CMP 170HX fuse surgery console (web GUI + service)")
+    ap.add_argument("--bdf", default="0000:41:00.0")
+    ap.add_argument("--port", type=int, default=8790)
+    ap.add_argument("--poll", type=float, default=1.0,
+                    help="server probe interval s")
+    ap.add_argument("--state-dir", default=None,
+                    help="state dir for dumps + generated live.html")
+    ap.add_argument("--html", default=None, help="serve this HTML instead of generating")
+    ap.add_argument("--rows", default="0-487")
+    ap.add_argument("--mock", default=None,
+                    help="serve a dump.json instead of a real card (testing)")
+    a = ap.parse_args(argv)
+
+    CFG["bdf"] = a.bdf
+    CFG["mock"] = a.mock
+    if a.state_dir:
+        CFG["state_dir"] = a.state_dir
+    if a.html:
+        CFG["html"] = a.html
+    s, e = (int(x) for x in a.rows.split("-"))
+    CFG["rows"] = list(range(s, e + 1))
+    os.makedirs(dumps_dir(), exist_ok=True)
+    prepare_html()
+
+    t = threading.Thread(target=poller, args=(a.poll,), daemon=True)
+    t.start()
+
+    srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
+    print(f"ga100vfi fuse console on 0.0.0.0:{a.port}  bdf={CFG['bdf']}  "
+          f"html={CFG['html']}  dumps={dumps_dir()}  poll={a.poll}s  "
+          f"mock={bool(a.mock)}", flush=True)
+    srv.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
