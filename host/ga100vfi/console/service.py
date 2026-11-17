@@ -365,9 +365,14 @@ def ff_layout(bdf=None):
     }
 
 
-def ff_policy(layout, row, mirror=False):
+def ff_policy(layout, row, mirror=False, value=None):
     """Placement-policy verdict for a candidate burn row. Returns a list of
-    issues (empty = compliant). Hard-enforced on every burn path."""
+    issues (empty = compliant). Hard-enforced on every burn path.
+
+    With `value`, also refuses IFF records in the FF region: bit 5 of an FF
+    word is the invalidation flag — a bit5-set record is not a chain/block/
+    data record but an IFF marker, and a stray one can truncate the FF pool
+    (a canary burned as 0x00010020 was read back as IFF chain=0 iff=1)."""
     issues = []
     L = layout
     zs, ze = L["burn_zone"]
@@ -376,6 +381,11 @@ def ff_policy(layout, row, mirror=False):
                       f"({FF_START}-{FF_END}) — record-format values in the "
                       f"main array / FPF region brick cards")
     else:
+        if value is not None and (value >> 5) & 1:
+            issues.append(f"value 0x{value:08X} has bit 5 set — that is the "
+                          f"IFF (invalidation) flag, not an FF record; IFF "
+                          f"writes are prohibited (a stray IFF can truncate "
+                          f"the FF pool)")
         if row <= L["last_occupied"]:
             issues.append(f"row {row} is OCCUPIED — boot FFs end at row "
                           f"{L['last_occupied']} ({L['occupied_count']} records)")
@@ -395,7 +405,7 @@ def ff_policy(layout, row, mirror=False):
                               f"{L['sm_zone'][1]})")
     if mirror:
         mrow = row + 1 if row % 2 == 0 else row - 1
-        for issue in ff_policy(layout, mrow, False):
+        for issue in ff_policy(layout, mrow, False, value):
             issues.append(f"mirror {mrow}: {issue[0].lower()}{issue[1:]}")
     return issues
 
@@ -431,7 +441,7 @@ def burn_check(row, value, mirror, bdf=None):
             rows = [row]
             if mirror:
                 rows.append(row + 1 if row % 2 == 0 else row - 1)
-            issues = ff_policy(layout, row, mirror)
+            issues = ff_policy(layout, row, mirror, value)
             policy = {"ok": not issues, "issues": issues, "layout": layout}
             note = "guards require a live Goldilocks window (DSOV=0); " \
                    "use the campaign burn-on-goldilocks mode"
@@ -482,7 +492,7 @@ def burn_api(body):
     layout = ff_layout(bdf)
     if "error" in layout:
         return {"error": f"cannot scan FF region: {layout['error']}"}
-    issues = ff_policy(layout, row, bool(body.get("mirror")))
+    issues = ff_policy(layout, row, bool(body.get("mirror")), value)
     if issues:
         return {"error": "burn placement policy: " + "; ".join(issues),
                 "policy": {"ok": False, "issues": issues, "layout": layout}}
@@ -762,7 +772,9 @@ def glitch_start(body):
         if "error" in layout:
             return {"error": "cannot scan FF region: " + layout["error"]}
         for rec in recs:
-            issues = ff_policy(layout, int(rec["row"]), bool(rec.get("mirror")))
+            rec_value = int(str(rec["value"]), 0)
+            issues = ff_policy(layout, int(rec["row"]),
+                               bool(rec.get("mirror")), rec_value)
             if issues:
                 return {"error": "burn placement policy: " + "; ".join(issues)}
     glitch_stop.clear()

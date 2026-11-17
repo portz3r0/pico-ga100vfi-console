@@ -778,6 +778,9 @@ LIVEBOOT = r"""
         the budget below, corrections included.</li>
         <li><b>The SM reserve stays free</b> so you can re-disable SMs that
         turn out to be actually bad after unlocking.</li>
+        <li><b>Never burn a value with bit 5 set</b> — that is the IFF
+        (invalidation) flag, not an FF record; a stray IFF can truncate the
+        whole FF pool. Refused on every burn path.</li>
       </ol>
       <div class="ffmap" id="gb-ffmap"></div>
       <div class="frow" style="margin-top:8px">

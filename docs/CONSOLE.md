@@ -230,6 +230,11 @@ The FF record region (rows 222–487) is laid out and enforced live
 
 - **Burn only into blank rows** in the FF region — occupied rows, the main
   array and the FPF region are refused.
+- **IFF records are refused outright**: bit 5 of an FF word is the
+  invalidation flag. A value with bit 5 set is not a chain/block/data
+  record — a stray IFF can truncate the FF pool (a canary burned as
+  `0x00010020` read back as IFF chain=0 iff=1). The check applies to the
+  value and its mirror on every burn path.
 - **A buffer (default 4 rows) is kept after the last boot FF** so new
   records cannot interfere with the boot chain.
 - **The revert tail (default 12 rows) stays empty** — a wrong value can only
