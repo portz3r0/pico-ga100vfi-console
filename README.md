@@ -315,6 +315,8 @@ are choosing to modify your own hardware.
 
 ## Support
 
-If this project helped you, you may donate through here if you'd like:
+This repository is a fork — the glitch toolchain and firmware are the original
+work of [dalzyu](https://github.com/dalzyu). If this project helped you,
+consider donating to the original developer:
 
-<a href="https://buymeacoffee.com/dalzy"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="220"></a>
+<https://buymeacoffee.com/dalzy>
