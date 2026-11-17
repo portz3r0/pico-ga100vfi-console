@@ -82,6 +82,13 @@ Below it: the **burn placement policy** (rules + a live row map of the FF
 region + the remaining burn budget), the **burn payload** form, and the
 **campaign** controls. See the workflows below for the full sequence.
 
+The burn payload form has a **value source** selector: *typed hex*, or
+*from dump row* — enter the row of an existing record and the console
+grabs its value from the loaded dump and shows it decoded
+(`FF ch·blk·data`, known block names, IFF flagged) for verification, so
+burn values never have to be typed by hand. Blank or missing source rows
+warn instead of proposing a burn of zero.
+
 ![Glitch & Burn tab](../images/console-glitch-burn.png)
 
 ### Drivers
@@ -201,6 +208,7 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 | target GPU pill | `● Goldilocks — burn window open` · `locked (DSOV=1) — glitch first` · `⚠ unreadable` |
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
 | row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve` · `✗ revert tail` |
+| value source decode | `dump row N → 0x…` + decoded `FF ch·blk·data` (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | budget pill | safe zone rows, free count, last boot FF row |
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase |
 | Burn now button | enabled only when armed **and** the selected GPU is currently Goldilocks |

@@ -37,6 +37,9 @@ sudo python3 -m ga100vfi console --port 8790
 - Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
   **Drivers**, **GPU Info**
+- Burn values can be typed **or grabbed from a dump row** — the console
+  shows the record decoded (`chain/block/data`, known block names) for
+  verification, so hex never has to be hand-typed
 - Burns are gated behind a typed arm phrase, pure 0→1 payload checks,
   row-state matching, the Goldilocks guard chain, and a hard FF placement
   policy (boot-FF buffer, SM re-disable reserve, revert tail) — all
