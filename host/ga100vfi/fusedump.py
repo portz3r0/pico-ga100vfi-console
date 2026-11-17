@@ -148,8 +148,11 @@ class Bar:
         return struct.unpack_from("<I", self.mm, o)[0]
 
     def wr(self, o, v):
-        assert not (o == FUSECTRL and (v & 0x2)), \
-            "REFUSING: FUSECTRL write with CMD_WRITE/SENSE bits set"
+        if o == FUSECTRL and (v & 0x2):
+            # assert would be stripped under `python -O`; this is a hard
+            # invariant — fusedump must never issue CMD_WRITE or SENSE_CTRL
+            raise RuntimeError(
+                "REFUSING: FUSECTRL write with CMD_WRITE/SENSE bits set")
         struct.pack_into("<I", self.mm, o, v & 0xFFFFFFFF)
 
     def idle(self, timeout=1.0):

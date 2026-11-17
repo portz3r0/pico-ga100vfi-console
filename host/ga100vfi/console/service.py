@@ -226,7 +226,7 @@ def burn_guards(rd):
     return all(c["ok"] for c in checks), checks
 
 
-def burn_execute(rd, wr, row, value, old):
+def burn_execute(rd, wr, row, value, old) -> dict:
     """Guarded single-row burn. Returns report dict. NEVER retries."""
     rep = {"row": row, "value": value, "old": old}
     ok, checks = burn_guards(rd)
@@ -468,16 +468,13 @@ def burn_api(body):
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
-        bar = fd.Bar(bdf)
-        try:
-            rep = burn_execute(bar.rd, bar.wr, row, value, old)
+        with Bar0(bdf) as bar:
+            rep = burn_execute(bar.rd32, bar.wr32, row, value, old)
             if rep.get("result") == "VERIFY OK" and body.get("mirror"):
                 mrow = row + 1 if row % 2 == 0 else row - 1
-                rep["mirror"] = burn_execute(bar.rd, bar.wr, mrow, value, old)
+                rep["mirror"] = burn_execute(bar.rd32, bar.wr32, mrow, value, old)
             rep["bdf"] = bdf
             return rep
-        finally:
-            bar.close()
     finally:
         card_lock.release()
 
