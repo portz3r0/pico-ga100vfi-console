@@ -87,15 +87,24 @@ bricked.
 |---|---|---|
 | GET | `/api/live` | fast probe (pure reads) |
 | GET | `/api/full` | full row dump + hex window |
+| GET | `/api/ports` | serial ports present on the host (pico selector) |
+| GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state |
 | GET | `/api/glitch/status` | campaign stats + log tail |
-| POST | `/api/glitch/start` | start campaign (`mode: classify\|burn`) |
+| POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`) |
 | POST | `/api/glitch/stop` | stop campaign |
-| GET | `/api/burn/check?row=&value=&mirror=` | dry burn check |
-| POST | `/api/burn` | burn (needs `confirm: true` + arm token) |
+| GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check |
+| POST | `/api/burn` | burn (needs `confirm: true` + arm token + Goldilocks target) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link |
+
+Multi-GPU: burns target a specific GPU (`bdf`); with more than one GA100 on
+the host the UI only enables the standalone burn when the selected GPU is
+currently in the Goldilocks state (`/api/gpus` reports it live), and the
+server-side guards enforce it regardless. The pico port is a dropdown
+populated from the host's serial devices (`/dev/ttyACM*`, `/dev/ttyUSB*`,
+with `/dev/serial/by-id` names when available).
 
 POST bodies are JSON. There is no authentication — the service binds
 `0.0.0.0` for LAN convenience; run it on a trusted network or front it with
