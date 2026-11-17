@@ -48,6 +48,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .. import fusedump as fd
@@ -97,13 +98,15 @@ BLACKLIST_FILE = "/etc/modprobe.d/ga100-fuse-blacklist.conf"
 SERIAL_CACHE: dict = {}
 
 
-def sh(cmd, timeout=15):
+def sh(argv, timeout=15):
+    """Run a command with an argv list (no shell, no interpolation) and
+    return combined output — stderr merged so error text reaches callers."""
     try:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+        p = subprocess.run(argv, shell=False, capture_output=True, text=True,
                            timeout=timeout)
         return (p.stdout + p.stderr).strip()
     except Exception as e:
-        return f"<<{cmd}: {e}>>"
+        return f"<<{argv}: {e}>>"
 
 
 def driver_of(bdf):
@@ -900,9 +903,9 @@ def valid_bdf(bdf):
 # ---------------------------------------------------------------- drivers
 def driver_state():
     bdf = CFG["bdf"]
-    loaded = [l.split()[0] for l in sh("lsmod").splitlines()
+    loaded = [l.split()[0] for l in sh(["lsmod"]).splitlines()
               if l.startswith(("nvidia", "nouveau"))]
-    version = sh("modinfo -F version nvidia 2>/dev/null") or ""
+    version = sh(["modinfo", "-F", "version", "nvidia"]) or ""
     bl_files = sorted(f for f in os.listdir("/etc/modprobe.d")
                       if re.search(r"nvidia|nouveau|vfi|cmp", f))
     our_bl = os.path.exists(BLACKLIST_FILE)
@@ -938,14 +941,17 @@ def driver_op_api(body):
         bdf = CFG["bdf"]
         bound = driver_of(bdf)
         if bound:
-            sh(f"echo {bdf} > /sys/bus/pci/drivers/{bound}/unbind 2>/dev/null")
+            try:      # sysfs unbind — plain write, no shell
+                Path(f"/sys/bus/pci/drivers/{bound}/unbind").write_text(bdf)
+            except OSError:
+                pass
         results = []
         for m in MODULES:              # nvidia is MODULES[-1]; rmmod order is
-            r = sh(f"rmmod {m} 2>&1")  # drm, modeset, uvm, nvidia
+            r = sh(["rmmod", m])       # drm, modeset, uvm, nvidia
             results.append(f"{m}: {r.splitlines()[-1] if r else 'ok'}")
         return {"ok": True, "log": results, "state": driver_state()}
     if op == "load":
-        r = sh("modprobe nvidia 2>&1")
+        r = sh(["modprobe", "nvidia"])
         return {"ok": not r or "already" in r.lower(),
                 "log": [f"modprobe nvidia: {r or 'ok'}"], "state": driver_state()}
     return {"error": f"unknown op {op!r}"}
@@ -964,8 +970,8 @@ def gpu_info():
     nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     q = ",".join(GPU_FIELDS)
-    out = sh(f"nvidia-smi --id={nvml_id} --query-gpu={q} "
-             f"--format=csv,noheader,nounits 2>&1", timeout=10)
+    out = sh(["nvidia-smi", "--id=" + nvml_id, "--query-gpu=" + q,
+              "--format=csv,noheader,nounits"], timeout=10)
     nvidia = {}
     first = out.splitlines()[0] if out else ""
     if "," in first and not first.lower().startswith(("no devices", "nvidia-smi")):
@@ -973,7 +979,7 @@ def gpu_info():
         nvidia = dict(zip(GPU_FIELDS, vals))
     else:
         nvidia = {"error": first or "nvidia-smi failed"}
-    link = [l.strip() for l in sh(f"lspci -s {slot} -vv 2>/dev/null").splitlines()
+    link = [l.strip() for l in sh(["lspci", "-s", slot, "-vv"]).splitlines()
             if "LnkSta:" in l or "LnkCap:" in l]
     return {"nvidia": nvidia, "link": link,
             "ts": datetime.now().isoformat(timespec="seconds")}

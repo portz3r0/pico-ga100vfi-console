@@ -104,13 +104,14 @@ def bits(mask):
     return sorted(i for i in range(32) if (mask >> i) & 1)
 
 
-def sh(cmd, timeout=15):
+def sh(argv, timeout=15):
+    """Run a command with an argv list (no shell) and return combined output."""
     try:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+        p = subprocess.run(argv, shell=False, capture_output=True, text=True,
                            timeout=timeout)
         return (p.stdout + p.stderr).strip()
     except Exception as e:
-        return f"<<{cmd}: {e}>>"
+        return f"<<{argv}: {e}>>"
 
 
 def find_ga100s():
@@ -204,16 +205,18 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
     log(f"PCI      : {res.get('vendor')}:{res.get('device')} rev {res.get('revision')} "
         f"class {res.get('class')} driver={res['driver']} BAR0={res['bar0_size']}")
     slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf  # strip domain
-    lspci_vv = sh(f"lspci -s {slot} -vv")
+    lspci_vv = sh(["lspci", "-s", slot, "-vv"])
     res["lspci_vv"] = lspci_vv
     for ln in lspci_vv.splitlines():
         if "LnkSta:" in ln or "LnkCap:" in ln:
             log("  " + ln.strip())
-    res["dmesg_tail"] = sh(
-        "dmesg 2>/dev/null | grep -iE 'nvrm|nvidia|gsp' | tail -n 25", timeout=20)
-    res["nvidia_smi"] = sh(
-        "nvidia-smi --query-gpu=name,memory.total --format=csv 2>&1 | head -3",
-        timeout=10)
+    dmesg = [l for l in sh(["dmesg"]).splitlines()
+             if "nvrm" in l.lower() or "nvidia" in l.lower()
+             or "gsp" in l.lower()]
+    res["dmesg_tail"] = "\n".join(dmesg[-25:])
+    nvr = sh(["nvidia-smi", "--query-gpu=name,memory.total",
+              "--format=csv"], timeout=10)
+    res["nvidia_smi"] = "\n".join(nvr.splitlines()[:3])
 
     # ---- open BAR0
     try:
