@@ -182,15 +182,19 @@ sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
 ```
 
 Burns are gated behind a typed arm phrase, pure 0→1 payload checks, row-state
-matching, and the full Goldilocks guard chain (re-verified server-side).
+matching, the full Goldilocks guard chain, and a hard FF placement policy
+(boot-FF buffer, SM re-disable reserve, revert tail — all enforced
+server-side). Campaigns can use a fixed `v_dip` or the Thompson-sampling
+adaptive planner, and refuse to start while a driver is bound to the card.
 Full dumps are also available headless:
 
 ```sh
 sudo python3 -m ga100vfi fusedump --bdf 0000:1a:00.0
 ```
 
-See [docs/CONSOLE.md](docs/CONSOLE.md) for the API, safety model, and a
-systemd unit.
+See [docs/CONSOLE.md](docs/CONSOLE.md) for the full user guide — requirements,
+step-by-step workflows (explore → prep drivers → glitch → burn → verify),
+an indicator reference, the HTTP API, a systemd unit, and troubleshooting.
 
 ## The glitch
 
