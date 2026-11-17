@@ -291,6 +291,10 @@ def ff_layout(bdf=None):
       * rows are reserved for re-disabling SMs that turn out actually bad.
     """
     bdf = bdf or CFG["bdf"]
+    if bdf != CFG["bdf"] and not valid_bdf(bdf):
+        # ff_layout writes EN_SW_OVERRIDE + FUSECTRL CMD_READs through
+        # fd.Bar — never point those at an arbitrary PCI device
+        return {"error": f"{bdf} is not a GA100 on this host"}
     occupied = []
     if CFG["mock"]:
         try:
