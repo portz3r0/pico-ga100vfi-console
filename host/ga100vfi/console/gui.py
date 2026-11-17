@@ -756,6 +756,7 @@ LIVEBOOT = r"""
       <div class="frow">
         <div class="field"><label>GPU</label><select id="gb-gpu"><option>scanning…</option></select></div>
         <span class="pill" id="gb-gpustate">checking…</span>
+        <span class="pill" id="gb-gpuserial">—</span>
       </div>
       <div class="note" style="margin-top:6px">Standalone burns are only allowed on a
       GPU currently in the <b>Goldilocks</b> state (DSOV=0, CRC=0x55, PLMs open) —
@@ -810,6 +811,13 @@ LIVEBOOT = r"""
         <div class="field"><label>gap µs</label><input type="number" id="gc-gap" value="150"></div>
         <div class="field"><label>delay</label><input type="number" id="gc-delay" value="117"></div>
         <div class="field"><label>max attempts</label><input type="number" id="gc-max" value="100"></div>
+        <div class="field"><label>v_dip strategy</label>
+          <select id="gc-strategy">
+            <option value="fixed">fixed v_dip</option>
+            <option value="adaptive">adaptive (Thompson)</option>
+          </select></div>
+        <div class="field"><label>adaptive v min mV</label><input type="number" id="gc-vmin" value="300"></div>
+        <div class="field"><label>adaptive v max mV</label><input type="number" id="gc-vmax" value="380"></div>
       </div>
       <div class="frow">
         <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
@@ -883,6 +891,9 @@ LIVEBOOT = r"""
       pill.textContent = "locked (DSOV=" + g.dsov + ") — glitch first";
       pill.className = "pill"; targetGoldilocks = false;
     }
+    $("gb-gpuserial").innerHTML =
+      (g.serial ? "SN " + esc(g.serial) : "no serial") +
+      (g.driver ? " · driver " + esc(g.driver) : " · no driver");
     updateArmState();
   }
   $("gb-gpu").onchange = () => {
@@ -1055,7 +1066,9 @@ LIVEBOOT = r"""
   }
   $("gc-start").onclick = async () => {
     const mode = $("gc-mode").value;
-    const body = {bdf: targetBdf || undefined,
+    const adaptive = $("gc-strategy").value === "adaptive";
+    const body = {bdf: targetBdf || undefined, adaptive,
+      min_v: +$("gc-vmin").value, max_v: +$("gc-vmax").value,
       v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode};

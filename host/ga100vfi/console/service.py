@@ -48,6 +48,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .. import fusedump as fd
+from ..bar0 import Bar0, brd_serial
 from .gui import STUB, build_html, load_dump
 
 CFG = {
@@ -82,6 +83,9 @@ FF_START, FF_END = 222, 487
 
 MODULES = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
 BLACKLIST_FILE = "/etc/modprobe.d/ga100-fuse-blacklist.conf"
+
+# board serials read once per BDF (InfoROM BRD object via the BAR0 PROM shadow)
+SERIAL_CACHE: dict = {}
 
 
 def sh(cmd, timeout=15):
@@ -524,6 +528,27 @@ def vrm_unlock(card, retries=15):
     return True
 
 
+def _log_goldilocks(bdf, bar, adaptive, attempts, v_dip, params):
+    """Append to goldilocks.jsonl in the state dir (same log as the CLI)."""
+    try:
+        serial = SERIAL_CACHE.get(bdf)
+        if serial is None:
+            serial = brd_serial(bar)
+            SERIAL_CACHE[bdf] = serial
+        entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                 "serial": serial, "bdf": bdf, "adaptive": adaptive,
+                 "attempts": attempts,
+                 "profile": {"v_dip": v_dip, "pulses": params.get("pulses", 3),
+                             "pw": params.get("pw", 198),
+                             "gap": params.get("gap", 150),
+                             "delay": params.get("delay", 117)}}
+        with open(os.path.join(CFG["state_dir"], "goldilocks.jsonl"), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        glog(f"goldilocks logged (serial={serial})")
+    except Exception as e:
+        glog(f"warn: goldilocks.jsonl append failed: {e}")
+
+
 def campaign_worker(params, records):
     stats = {"attempts": 0, "valid": 0, "lost": 0, "nack": 0,
              "dsov_zero": 0, "goldilocks": False, "burned": []}
@@ -533,6 +558,7 @@ def campaign_worker(params, records):
         from ..glitch import Card, Attempt          # lazy: needs pyserial + pico
         from ..bar0 import Bar0, restore
         from ..classify import classify
+        from ..adaptive import Planner
     except Exception as e:
         glog(f"ABORT — ga100vfi import failed: {e}")
         with glitch_lock:
@@ -555,6 +581,13 @@ def campaign_worker(params, records):
         if records:
             glog(f"ARMED burn-on-goldilocks: {len(records)} record(s): " +
                  ", ".join(f"row {r['row']} <- 0x{r['value']:08X}" for r in records))
+        planner = None
+        v_dip = params.get("v_dip", 354)
+        if params.get("adaptive"):
+            planner = Planner(params.get("min_v", 300), params.get("max_v", 380))
+            glog(f"adaptive: Thompson sampling over "
+                 f"{params.get('min_v', 300)}-{params.get('max_v', 380)} mV "
+                 f"(fixed v_dip ignored)")
         for n in range(1, params.get("max_attempts", 100) + 1):
             if glitch_stop.is_set():
                 glog("STOPPED by user")
@@ -563,7 +596,9 @@ def campaign_worker(params, records):
             if not vrm_unlock(card):
                 glog("VRM unlock failed — stopping")
                 break
-            att = Attempt(v_dip_mv=params.get("v_dip", 354), t_dip_us=-60,
+            if planner:
+                v_dip = planner.next_mv()
+            att = Attempt(v_dip_mv=v_dip, t_dip_us=-60,
                           v_restore_mv=750, t_restore_us=-20, t_revert_us=0,
                           fast=1, hold_ms=0, pulses=params.get("pulses", 3),
                           pw=params.get("pw", 198), gap=params.get("gap", 150),
@@ -579,36 +614,51 @@ def campaign_worker(params, records):
                 continue
             if not restore(bdf, wait_s=2.0):
                 stats["lost"] += 1
+                if planner:      # a lost link reads as a too-deep shot
+                    planner.record(v_dip, "lost")
                 glog(f"[{n}] link lost")
                 continue
             with card_lock:
+                outcome = "lost"
                 try:
                     with Bar0(bdf) as bar:
                         if bar.rd32(0x00) == 0xFFFFFFFF:
                             glog(f"[{n}] ffff")
-                            continue
-                        v = classify(bar)
+                        else:
+                            v = classify(bar)
+                            outcome = ("goldilocks" if v.passed else
+                                       "hit" if v.dsov == 0 and v.crc_status == 0x55
+                                       else "over" if v.dsov == 0 else "under")
+                            stats["valid"] += 1
+                            if v.dsov == 0:
+                                stats["dsov_zero"] += 1
+                            glog(f"[{n}] v_dip={v_dip} {outcome} dsov={v.dsov} "
+                                 f"crc=0x{v.crc_status:x} "
+                                 f"priv=0x{v.priv_mask:08x}" +
+                                 ("  << GOLDILOCKS" if v.passed else ""))
+                            if v.passed:
+                                stats["goldilocks"] = True
+                                _log_goldilocks(bdf, bar, bool(planner), n,
+                                                v_dip, params)
+                                if records:
+                                    glog(">>> GOLDILOCKS — burning records now "
+                                         "(same process, no further restore)")
+                                    for rec in records:
+                                        rrep = burn_execute(bar.rd32, bar.wr32,
+                                                            rec["row"], rec["value"],
+                                                            rec.get("old", 0))
+                                        glog(f"    row {rec['row']}: "
+                                             f"{rrep.get('result')}")
+                                        stats["burned"].append(
+                                            {"row": rec["row"],
+                                             "result": rrep.get("result")})
                 except Exception as e:
                     glog(f"[{n}] classify err {e}")
-                    continue
-                stats["valid"] += 1
-                if v.dsov == 0:
-                    stats["dsov_zero"] += 1
-                glog(f"[{n}] dsov={v.dsov} crc=0x{v.crc_status:x} "
-                     f"priv=0x{v.priv_mask:08x}" +
-                     ("  << GOLDILOCKS" if v.passed else ""))
-                if v.passed:
-                    stats["goldilocks"] = True
-                    if records:
-                        glog(">>> GOLDILOCKS — burning records now "
-                             "(same process, no further restore)")
-                        for rec in records:
-                            rrep = burn_execute(bar.rd32, bar.wr32,
-                                                rec["row"], rec["value"],
-                                                rec.get("old", 0))
-                            glog(f"    row {rec['row']}: {rrep.get('result')}")
-                            stats["burned"].append(
-                                {"row": rec["row"], "result": rrep.get("result")})
+                if planner and outcome != "goldilocks":
+                    planner.record(v_dip, outcome)
+                if outcome == "lost":
+                    stats["lost"] += 1
+                if outcome == "goldilocks":
                     break
     except Exception as e:
         glog(f"ABORT — {e}")
@@ -632,8 +682,21 @@ def glitch_start(body):
             return {"error": "campaign already running"}
     if body.get("bdf") and not valid_bdf(body["bdf"]):
         return {"error": f"{body['bdf']} is not a GA100 on this host"}
+    target = body.get("bdf") or CFG["bdf"]
+    if not CFG["mock"]:
+        bound = driver_of(target)
+        if bound:
+            # AGENTS.md rule 6: bar0.restore() writes PCI COMMAND + BAR0; doing
+            # that under a bound driver has corrupted later GSP boots.
+            return {"error": f"driver '{bound}' is bound to {target} — every glitch "
+                    "attempt reprograms PCI COMMAND/BAR0 via bar0.restore(), which "
+                    "corrupts GSP boots under a bound driver. Unload it from the "
+                    "Drivers tab first."}
     params = {
-        "bdf": body.get("bdf") or CFG["bdf"],
+        "bdf": target,
+        "adaptive": bool(body.get("adaptive")),
+        "min_v": max(int(body.get("min_v", 300)), 200),
+        "max_v": min(int(body.get("max_v", 380)), 500),
         "v_dip": int(body.get("v_dip", 354)),
         "pulses": int(body.get("pulses", 3)),
         "pw": int(body.get("pw", 198)),
@@ -754,6 +817,7 @@ def gpu_list():
         crc = s.get("CRC_STATUS") == 0x55
         priv = s.get("PRIV_MASK") == 0xFFFFFFFF
         return {"gpus": [{"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock",
+                          "serial": None,
                           "dsov": dsov, "crc_ok": crc, "priv_open": priv,
                           "fpf_readable": True,
                           "goldilocks": dsov == 0 and crc and priv}],
@@ -769,6 +833,13 @@ def gpu_list():
                 except Exception as ex:
                     e.update({"error": str(ex), "goldilocks": False,
                               "dsov": None})
+                if bdf not in SERIAL_CACHE:
+                    try:
+                        with Bar0(bdf) as bar:
+                            SERIAL_CACHE[bdf] = brd_serial(bar)
+                    except Exception:
+                        SERIAL_CACHE[bdf] = None
+                e["serial"] = SERIAL_CACHE.get(bdf)
                 out.append(e)
         finally:
             card_lock.release()

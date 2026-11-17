@@ -35,13 +35,21 @@ State (full dumps + the generated `live.html`) lives under
 - **Burn payload**: row + value (+ optional mirror row). *Check* reads the
   current row, verifies the 0→1 purity, and shows every hardware guard.
   *Arm* requires typing `BURN` (120 s token).
-- **Glitch campaign**: pico parameters (`v_dip`, `pulses`, `pw`, `gap`,
-  `delay`, `max attempts`, serial port), live attempt log with per-shot
+- **Glitch campaign**: pico parameters, live attempt log with per-shot
   classification, stat chips (attempts / valid / lost / nack / dsov=0 /
-  goldilocks).
+  goldilocks). **v_dip strategy**: fixed, or **adaptive** — upstream's
+  Thompson-sampling planner (`ga100vfi.adaptive`) explores the v range
+  (default 300–380 mV) and converges on the card's Goldilocks window,
+  learning from under/hit/over/lost outcomes per shot.
 - Modes: **classify only** (observe) or **burn payload on first Goldilocks**.
   The burn runs in the campaign process — the PCIe window dies seconds after
   the loop returns, so a separate burn call would miss it.
+- A campaign refuses to start while a driver is **bound** to the target GPU:
+  every attempt reprograms PCI COMMAND/BAR0 via `bar0.restore()`, which
+  corrupts GSP boots under a bound driver (AGENTS.md rule 6). Unload from
+  the Drivers tab first.
+- Successful campaigns append to `<state-dir>/goldilocks.jsonl` with the
+  card's board serial (same log format as the CLI campaign).
 
 ### Drivers
 Live driver state (bound driver, module list, version, blacklist status) plus
