@@ -737,7 +737,17 @@ LIVEBOOT = r"""
 
   // ---------- Glitch & Burn pane ----------
   $("tab-glitch").innerHTML = `
-    <div class="card" id="gb-burn">
+    <div class="card" id="gb-target">
+      <h3>Target</h3>
+      <div class="frow">
+        <div class="field"><label>GPU</label><select id="gb-gpu"><option>scanning…</option></select></div>
+        <span class="pill" id="gb-gpustate">checking…</span>
+      </div>
+      <div class="note" style="margin-top:6px">Standalone burns are only allowed on a
+      GPU currently in the <b>Goldilocks</b> state (DSOV=0, CRC=0x55, PLMs open) —
+      the campaign's burn-on-goldilocks mode creates that state on the selected GPU.</div>
+    </div>
+    <div class="card" id="gb-burn" style="margin-top:12px">
       <h3>Burn payload</h3>
       <div class="frow">
         <div class="field"><label>row</label><input type="number" id="gb-row" value="306" min="0" max="487"></div>
@@ -751,7 +761,7 @@ LIVEBOOT = r"""
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
         <button class="btn danger" id="gb-arm">Arm (120 s)</button>
         <span class="pill" id="gb-armstate">not armed</span>
-        <button class="btn danger" id="gb-burnnow" disabled>Burn now (needs live Goldilocks window)</button>
+        <button class="btn danger" id="gb-burnnow" disabled>Burn now (Goldilocks GPU only)</button>
       </div>
     </div>
     <div class="card" id="gb-campaign" style="margin-top:12px">
@@ -763,9 +773,10 @@ LIVEBOOT = r"""
         <div class="field"><label>gap µs</label><input type="number" id="gc-gap" value="150"></div>
         <div class="field"><label>delay</label><input type="number" id="gc-delay" value="117"></div>
         <div class="field"><label>max attempts</label><input type="number" id="gc-max" value="100"></div>
-        <div class="field"><label>pico port</label><input type="text" id="gc-port" value="/dev/ttyACM0" class="mono" style="width:130px"></div>
       </div>
       <div class="frow">
+        <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
+        <button class="btn" id="gc-ports-refresh" title="rescan serial ports">⟳ rescan</button>
         <div class="field"><label>mode</label>
           <select id="gc-mode">
             <option value="classify">classify only — observe glitch states</option>
@@ -781,7 +792,8 @@ LIVEBOOT = r"""
     <div class="dangerstrip">
       Glitching dips NVVDD via the pico; burns are <b>irreversible OTP writes</b>.
       Burn mode requires an armed token, a pure 0→1 payload, matching row state and a
-      live Goldilocks window — all verified again server-side before CMD_WRITE.
+      live Goldilocks window on the target GPU — all verified again server-side
+      before CMD_WRITE.
       FF records belong at rows 222–487 (chain=bits[4:0], iff=bit5, block=bits[15:6],
       data=bits[31:16]); a bit-exact readback does NOT prove the shadow latch followed —
       after any burn, watch STATUS_OPT_* on the Fuse Explorer tab.
@@ -790,18 +802,88 @@ LIVEBOOT = r"""
     </div>`;
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
+  let targetBdf = null, targetGoldilocks = false;
+
+  // ---- target GPU selector (live Goldilocks state) ----
+  function gpuOption(g) {
+    const badge = g.goldilocks ? "● Goldilocks" :
+                  g.error ? "⚠ unreadable" : "locked";
+    return `<option value="${esc(g.bdf)}">${esc(g.bdf)} — ${badge}</option>`;
+  }
+  async function loadGpus() {
+    try {
+      const j = await jget("/api/gpus");
+      if (j.error && !(j.gpus || []).length) {
+        const p = $("gb-gpustate");
+        p.textContent = "⚠ " + j.error; p.className = "pill badl";
+        return;
+      }
+      const sel = $("gb-gpu");
+      const prev = targetBdf || j.default;
+      const sig = (j.gpus || []).map(g => g.bdf + (g.goldilocks ? "+" : "-")).join();
+      if (sel.dataset.sig !== sig) {           // rebuild only when the set changes
+        sel.dataset.sig = sig;
+        sel.innerHTML = (j.gpus || []).map(gpuOption).join("");
+        const match = (j.gpus || []).find(g => g.bdf === prev) || (j.gpus || [])[0];
+        if (match) { sel.value = match.bdf; targetBdf = match.bdf; }
+      }
+      updateGpuState(j);
+    } catch (e) {}
+  }
+  function updateGpuState(j) {
+    const g = (j.gpus || []).find(x => x.bdf === targetBdf);
+    const pill = $("gb-gpustate");
+    if (!g) {
+      pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
+      targetGoldilocks = false;
+    } else if (g.goldilocks) {
+      pill.textContent = "● Goldilocks — burn window open";
+      pill.className = "pill okl"; targetGoldilocks = true;
+    } else if (g.error) {
+      pill.textContent = "⚠ " + g.error; pill.className = "pill badl";
+      targetGoldilocks = false;
+    } else {
+      pill.textContent = "locked (DSOV=" + g.dsov + ") — glitch first";
+      pill.className = "pill"; targetGoldilocks = false;
+    }
+    updateArmState();
+  }
+  $("gb-gpu").onchange = () => {
+    targetBdf = $("gb-gpu").value; payloadChecked = null;
+    $("gb-checkresult").innerHTML = "";
+    loadGpus();
+  };
+  setInterval(loadGpus, 2000);
+  loadGpus();
+
+  // ---- pico port selector ----
+  async function loadPorts() {
+    try {
+      const j = await jget("/api/ports");
+      const sel = $("gc-port");
+      const cur = (sel.value && sel.value.indexOf("scanning") < 0) ?
+                  sel.value : (j.default || "/dev/ttyACM0");
+      const opts = (j.ports || []).map(p =>
+        `<option value="${esc(p.path)}" ${p.path === cur ? "selected" : ""}>` +
+        (p.byid ? `${esc(p.byid)} (${esc(p.path)})` : esc(p.path)) + `</option>`).join("");
+      sel.innerHTML = opts ||
+        `<option value="/dev/ttyACM0">/dev/ttyACM0 (not detected)</option>`;
+    } catch (e) {}
+  }
+  $("gc-ports-refresh").onclick = loadPorts;
+  loadPorts();
 
   function updateArmState() {
     const el = $("gb-armstate");
-    if (armToken && Date.now() < armExpiry) {
+    const armed = armToken && Date.now() < armExpiry;
+    if (armed) {
       el.textContent = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
       el.className = "pill okl";
-      $("gb-burnnow").disabled = false;
     } else {
       armToken = null;
       el.textContent = "not armed"; el.className = "pill";
-      $("gb-burnnow").disabled = true;
     }
+    $("gb-burnnow").disabled = !armed || !targetGoldilocks;
   }
   setInterval(updateArmState, 1000);
 
@@ -818,9 +900,9 @@ LIVEBOOT = r"""
     const mirror = $("gb-mirror").checked;
     const res = $("gb-checkresult");
     res.innerHTML = "checking…";
-    const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}`);
+    const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
-    payloadChecked = {row, value, old: j.current, mirror};
+    payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
     $("gb-old").value = fmt(j.current);
     const guards = (j.guards || []).map(g =>
       `<div class="guardrow"><span class="gs ${g.ok ? "ok" : "bad"}">${g.ok ? "✓" : "✗"}</span>` +
@@ -831,7 +913,8 @@ LIVEBOOT = r"""
       `<div class="warn" style="margin-top:6px">⚠ row ${row} is OUTSIDE the FF record region (222–487) — ` +
       `burning record-format values in the main array / FPF region is how cards get bricked.</div>`;
     res.innerHTML =
-      `<div>row ${j.row} currently reads <span class="mono">${fmt(j.current)}</span> · ` +
+      `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
+      `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
       ffNote +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
@@ -841,8 +924,10 @@ LIVEBOOT = r"""
 
   $("gb-burnnow").onclick = async () => {
     if (!payloadChecked) { alert("Check the payload first"); return; }
+    if (!targetGoldilocks) { alert("Selected GPU is not in the Goldilocks state — " +
+      "run a glitch campaign first"); return; }
     if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
-                 payloadChecked.value + "?")) return;
+                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) + "?")) return;
     const j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
     $("gb-checkresult").innerHTML =
       `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
@@ -877,18 +962,25 @@ LIVEBOOT = r"""
   }
   $("gc-start").onclick = async () => {
     const mode = $("gc-mode").value;
-    const body = {v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
+    const body = {bdf: targetBdf || undefined,
+      v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
-      max_attempts: +$("gc-max").value, port: $("gc-port").value.trim(), mode};
+      max_attempts: +$("gc-max").value, port: $("gc-port").value, mode};
     if (mode === "burn") {
       if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
       if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
+      if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
+        alert("Burn payload was checked on " + payloadChecked.bdf +
+              " but the target is " + targetBdf + " — re-check first"); return;
+      }
       body.records = [{row: payloadChecked.row, value: payloadChecked.value,
-                       old: payloadChecked.old, mirror: payloadChecked.mirror}];
+                       old: payloadChecked.old, mirror: payloadChecked.mirror,
+                       bdf: targetBdf}];
       body.token = armToken;
       if (!confirm("Start glitching and BURN the payload on first Goldilocks?\n" +
-        "row " + payloadChecked.row + " ← " + payloadChecked.value +
-        " (mirror: " + payloadChecked.mirror + ")\nOTP burns are IRREVERSIBLE.")) return;
+        "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
+        payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
+        "OTP burns are IRREVERSIBLE.")) return;
     }
     const j = await jpost("/api/glitch/start", body);
     if (j.error) alert(j.error);

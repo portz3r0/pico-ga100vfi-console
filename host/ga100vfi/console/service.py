@@ -69,7 +69,8 @@ ARM: dict = {"token": None, "expires": 0.0}
 FUSECTRL, FUSEADDR, FUSERDATA, FUSEWDATA = 0x820000, 0x820004, 0x820008, 0x82000C
 EN_SW_OVERRIDE, DEBUGCTRL, CRC_STATUS, EFP, DSOV = (0x820040, 0x820060, 0x820070,
                                                     0x820078, 0x820084)
-FUSEWDATA_PLM, FUSECTRL_PLM, SBFE = 0x8200F4, 0x8200F8, 0x821108
+FUSEWDATA_PLM, FUSECTRL_PLM, SBFE, PRIV_MASK = (0x8200F4, 0x8200F8, 0x821108,
+                                                0x8200FC)
 CMD_READ, CMD_WRITE = 1, 2
 
 MODULES = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
@@ -256,14 +257,17 @@ def burn_execute(rd, wr, row, value, old):
         time.sleep(0.05)
 
 
-def burn_check(row, value, mirror):
+def burn_check(row, value, mirror, bdf=None):
     """Dry check: current row value, purity, live guard states. No fuse writes."""
     if CFG["mock"]:
         return {"error": "burn check not available in mock mode"}
+    bdf = bdf or CFG["bdf"]
+    if not valid_bdf(bdf):
+        return {"error": f"{bdf} is not a GA100 on this host"}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
-        bar = fd.Bar(CFG["bdf"])
+        bar = fd.Bar(bdf)
         try:
             rd, wr = bar.rd, bar.wr
             en_sw = rd(EN_SW_OVERRIDE)
@@ -287,7 +291,7 @@ def burn_check(row, value, mirror):
                 note = ("⚠ row outside the FF record region (222–487) — "
                         "burning record-format values in the main array / FPF "
                         "region has bricked cards. " + note)
-            return {"row": row, "current": cur, "value": value,
+            return {"row": row, "current": cur, "value": value, "bdf": bdf,
                     "pure_0to1": pure, "guards_ok": ok, "guards": checks,
                     "rows_to_burn": rows, "note": note}
         finally:
@@ -299,9 +303,14 @@ def burn_check(row, value, mirror):
 
 
 def burn_api(body):
-    """Standalone burn — only works inside a live Goldilocks window."""
+    """Standalone burn — only works inside a live Goldilocks window.
+    With multiple GPUs on the host, the target must currently be in the
+    Goldilocks state (guards enforce this; /api/gpus reports it)."""
     if CFG["mock"]:
         return {"error": "burn not available in mock mode"}
+    bdf = body.get("bdf") or CFG["bdf"]
+    if not valid_bdf(bdf):
+        return {"error": f"{bdf} is not a GA100 on this host"}
     try:
         row = int(body["row"])
         value = int(str(body["value"]), 0)
@@ -322,12 +331,13 @@ def burn_api(body):
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
-        bar = fd.Bar(CFG["bdf"])
+        bar = fd.Bar(bdf)
         try:
             rep = burn_execute(bar.rd, bar.wr, row, value, old)
             if rep.get("result") == "VERIFY OK" and body.get("mirror"):
                 mrow = row + 1 if row % 2 == 0 else row - 1
                 rep["mirror"] = burn_execute(bar.rd, bar.wr, mrow, value, old)
+            rep["bdf"] = bdf
             return rep
         finally:
             bar.close()
@@ -405,6 +415,7 @@ def campaign_worker(params, records):
             GLITCH["running"] = False
             GLITCH["error"] = str(e)
         return
+    bdf = params.get("bdf", CFG["bdf"])
     try:
         card.cmd("@q", 0.3)
         card.cmd("@F 1000000", 0.3)
@@ -434,13 +445,13 @@ def campaign_worker(params, records):
                 stats["nack"] += 1
                 glog(f"[{n}] nack wf={rep.writes_failed}")
                 continue
-            if not restore(CFG["bdf"], wait_s=2.0):
+            if not restore(bdf, wait_s=2.0):
                 stats["lost"] += 1
                 glog(f"[{n}] link lost")
                 continue
             with card_lock:
                 try:
-                    with Bar0(CFG["bdf"]) as bar:
+                    with Bar0(bdf) as bar:
                         if bar.rd32(0x00) == 0xFFFFFFFF:
                             glog(f"[{n}] ffff")
                             continue
@@ -487,7 +498,10 @@ def glitch_start(body):
     with glitch_lock:
         if GLITCH["running"]:
             return {"error": "campaign already running"}
+    if body.get("bdf") and not valid_bdf(body["bdf"]):
+        return {"error": f"{body['bdf']} is not a GA100 on this host"}
     params = {
+        "bdf": body.get("bdf") or CFG["bdf"],
         "v_dip": int(body.get("v_dip", 354)),
         "pulses": int(body.get("pulses", 3)),
         "pw": int(body.get("pw", 198)),
@@ -527,7 +541,8 @@ def glitch_start(body):
                        "error": None, "finished": None, "result": None})
     t = threading.Thread(target=campaign_worker, args=(params, records), daemon=True)
     t.start()
-    glog(f"campaign started — v_dip={params['v_dip']} pulses={params['pulses']} "
+    glog(f"campaign started — target {params.get('bdf', CFG['bdf'])} "
+         f"v_dip={params['v_dip']} pulses={params['pulses']} "
          f"pw={params['pw']} gap={params['gap']} delay={params['delay']} "
          f"max={params['max_attempts']} mode={body.get('mode', 'classify')}")
     return {"started": True, "params": params, "records": len(records)}
@@ -539,6 +554,93 @@ def glitch_status():
                 "error": GLITCH["error"], "finished": GLITCH["finished"],
                 "result": GLITCH["result"], "params": GLITCH["params"],
                 "log": GLITCH["log"][-120:]}
+
+
+# ---------------------------------------------------------------- ports + gpus
+def serial_ports():
+    """Serial devices present on this host (for the pico port selector)."""
+    ports = []
+    for pat in ("/dev/ttyACM*", "/dev/ttyUSB*"):
+        for p in sorted(glob.glob(pat)):
+            ports.append({"path": p})
+    byid = {}
+    for p in glob.glob("/dev/serial/by-id/*"):
+        try:
+            byid[os.path.realpath(p)] = os.path.basename(p)
+        except OSError:
+            pass
+    for entry in ports:
+        entry["byid"] = byid.get(os.path.realpath(entry["path"]))
+    default = next((p["path"] for p in ports if "ttyACM" in p["path"]),
+                   ports[0]["path"] if ports else "/dev/ttyACM0")
+    return {"ports": ports, "default": default}
+
+
+def gpu_state(bdf):
+    """Pure-read Goldilocks approximation for one GPU (4 of the 5 checks;
+    the DSOV_SET writeback check needs a write and is skipped here — the burn
+    guards re-verify everything before any CMD_WRITE)."""
+    path = f"/sys/bus/pci/devices/{bdf}/resource0"
+    f = os.open(path, os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
+    try:
+        mm = mmap.mmap(f, fd.MAP_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
+        try:
+            def rd(o):
+                return struct.unpack_from("<I", mm, o)[0]
+            if rd(FUSECTRL) == 0xFFFFFFFF:
+                return {"error": "BAR0 unreadable (link down / mid-glitch)"}
+            dsov = rd(DSOV) & 1
+            crc = (rd(CRC_STATUS) & 0xFF) == 0x55
+            priv = rd(PRIV_MASK) == 0xFFFFFFFF
+            fpf = rd(0x824314) != 0xFFFFFFFF
+            return {"dsov": dsov, "crc_ok": crc, "priv_open": priv,
+                    "fpf_readable": fpf,
+                    "goldilocks": dsov == 0 and crc and priv and fpf}
+        finally:
+            mm.close()
+    finally:
+        os.close(f)
+
+
+def gpu_list():
+    """All GA100 GPUs on this host with their live Goldilocks state."""
+    if CFG["mock"]:
+        try:
+            with open(CFG["mock"]) as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        s = d.get("status", {})
+        dsov = (s.get("DSOV") if isinstance(s.get("DSOV"), int) else 1) & 1
+        crc = s.get("CRC_STATUS") == 0x55
+        priv = s.get("PRIV_MASK") == 0xFFFFFFFF
+        return {"gpus": [{"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock",
+                          "dsov": dsov, "crc_ok": crc, "priv_open": priv,
+                          "fpf_readable": True,
+                          "goldilocks": dsov == 0 and crc and priv}],
+                "default": CFG["bdf"]}
+    bdfs = fd.find_ga100s() or [CFG["bdf"]]
+    out = []
+    if card_lock.acquire(timeout=2.0):
+        try:
+            for bdf in bdfs:
+                e = {"bdf": bdf, "driver": driver_of(bdf)}
+                try:
+                    e.update(gpu_state(bdf))
+                except Exception as ex:
+                    e.update({"error": str(ex), "goldilocks": False,
+                              "dsov": None})
+                out.append(e)
+        finally:
+            card_lock.release()
+    else:
+        return {"error": "card busy (campaign or dump in progress)",
+                "gpus": out, "default": CFG["bdf"]}
+    return {"gpus": out, "default": CFG["bdf"]}
+
+
+def valid_bdf(bdf):
+    return bdf == CFG["bdf"] or bdf in fd.find_ga100s()
 
 
 # ---------------------------------------------------------------- drivers
@@ -666,8 +768,15 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     row, value = -1, 0
                 self._send(200, json.dumps(burn_check(row, value,
-                                                      qs.get("mirror") == "1"),
+                                                      qs.get("mirror") == "1",
+                                                      qs.get("bdf")),
                                            default=str), "application/json")
+            elif path == "/api/ports":
+                self._send(200, json.dumps(serial_ports(), default=str),
+                           "application/json")
+            elif path == "/api/gpus":
+                self._send(200, json.dumps(gpu_list(), default=str),
+                           "application/json")
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
