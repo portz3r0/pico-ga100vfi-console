@@ -146,9 +146,12 @@ def poller(interval):
             continue
         try:
             if CFG["mock"]:
-                with open(CFG["mock"]) as f:
-                    snap = json.load(f)
-                snap["ts"] = datetime.now().isoformat(timespec="seconds")
+                try:
+                    with open(CFG["mock"]) as f:
+                        snap = json.load(f)
+                    snap["ts"] = datetime.now().isoformat(timespec="seconds")
+                except Exception as e:        # a bad mock path must not kill
+                    snap = {"error": f"mock failed: {e}"}  # the poll thread
             else:
                 try:
                     snap = probe(CFG["bdf"])
@@ -925,8 +928,8 @@ def driver_op_api(body):
         if bound:
             sh(f"echo {bdf} > /sys/bus/pci/drivers/{bound}/unbind 2>/dev/null")
         results = []
-        for m in MODULES + ["nvidia"]:
-            r = sh(f"rmmod {m} 2>&1")
+        for m in MODULES:              # nvidia is MODULES[-1]; rmmod order is
+            r = sh(f"rmmod {m} 2>&1")  # drm, modeset, uvm, nvidia
             results.append(f"{m}: {r.splitlines()[-1] if r else 'ok'}")
         return {"ok": True, "log": results, "state": driver_state()}
     if op == "load":
@@ -945,10 +948,12 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
 
 def gpu_info():
     bdf = CFG["bdf"]
-    slot = bdf.split(":", 1)[1] if bdf.count(":") == 3 else bdf
+    # NVML wants the 8-hex-digit domain form for --id; slot keeps lspci happy
+    nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
+    slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     q = ",".join(GPU_FIELDS)
-    out = sh(f"nvidia-smi --query-gpu={q} --format=csv,noheader,nounits 2>&1",
-             timeout=10)
+    out = sh(f"nvidia-smi --id={nvml_id} --query-gpu={q} "
+             f"--format=csv,noheader,nounits 2>&1", timeout=10)
     nvidia = {}
     first = out.splitlines()[0] if out else ""
     if "," in first and not first.lower().startswith(("no devices", "nvidia-smi")):
@@ -1065,7 +1070,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?")[0]
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = min(int(self.headers.get("Content-Length") or 0),
+                         1 << 20)     # cap at 1 MiB; JSON bodies are tiny
             body = json.loads(self.rfile.read(length) or b"{}") if length else {}
         except Exception:
             body = {}

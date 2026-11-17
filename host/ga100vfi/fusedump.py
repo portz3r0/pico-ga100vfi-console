@@ -203,7 +203,7 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         res["bar0_size"] = None
     log(f"PCI      : {res.get('vendor')}:{res.get('device')} rev {res.get('revision')} "
         f"class {res.get('class')} driver={res['driver']} BAR0={res['bar0_size']}")
-    slot = bdf.split(":", 1)[1] if bdf.count(":") == 3 else bdf
+    slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf  # strip domain
     lspci_vv = sh(f"lspci -s {slot} -vv")
     res["lspci_vv"] = lspci_vv
     for ln in lspci_vv.splitlines():
