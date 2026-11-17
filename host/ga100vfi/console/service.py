@@ -46,6 +46,7 @@ import time
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from .. import fusedump as fd
 from ..bar0 import Bar0, brd_serial
@@ -947,11 +948,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        path = self.path.split("?")[0]
-        qs = {}
-        if "?" in self.path:
-            qs = dict(p.split("=", 1) for p in self.path.split("?")[1].split("&")
-                      if "=" in p)
+        parts = urlsplit(self.path)
+        path = parts.path
+        qs = {k: v[0] for k, v in
+              parse_qs(parts.query, keep_blank_values=True).items()}
         try:
             if path in ("/", "/index.html"):
                 with open(CFG["html"], "rb") as f:
