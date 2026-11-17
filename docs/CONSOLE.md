@@ -145,9 +145,13 @@ your own auth proxy.
 ```ini
 [Unit]
 Description=ga100vfi fuse console (GA100 CMP 170HX)
-After=multi-user.target
+# network.target, NOT multi-user.target — the console binds early and does
+# not need to wait for wait-online / other multi-user services (a unit
+# ordered after multi-user.target can come up minutes late on slow boots).
+After=network.target
 
 [Service]
+Type=simple
 WorkingDirectory=/opt/ga100-fuse-view
 ExecStart=/usr/bin/python3 -m ga100vfi.console --bdf 0000:41:00.0 --port 8790 --state-dir /opt/ga100-fuse-view
 Restart=always
