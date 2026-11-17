@@ -41,6 +41,9 @@ Never run a glitch campaign to test a code change.
 | Glitch timeline and defaults | `firmware/pwmvid.c` (`glitch_cmd`) | README "The glitch", `docs/PROTOCOL.md` "Glitch" |
 | Debug vs normal build behaviour | `firmware/CMakeLists.txt`, `#ifdef DEBUG` in `pwmvid.c` | README "Debug build", `docs/BUILD.md` debug/normal table |
 | CLI flags and defaults | `host/ga100vfi/cli.py` | README "Host usage", `docs/ADAPTIVE.md` flag table |
+| Console HTTP API + service flags | `host/ga100vfi/console/service.py` | `docs/CONSOLE.md` API table + flags table |
+| Console GUI tabs, indicators, wording | `host/ga100vfi/console/gui.py` | `docs/CONSOLE.md` tab tour + indicator table |
+| Burn guards + FF placement policy (incl. IFF refusal) | `service.py` `burn_guards`/`ff_policy` | `docs/CONSOLE.md` burn safety model |
 
 If code and docs disagree, stop and resolve which is right; do not pick one silently.
 
