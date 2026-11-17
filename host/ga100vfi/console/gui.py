@@ -353,7 +353,8 @@ const fmt = v => "0x" + ((v ?? 0) >>> 0).toString(16).toUpperCase().padStart(8, 
 const bitsOf = v => { const b = []; v = (v ?? 0) >>> 0;
   for (let i = 0; i < 32; i++) if ((v >>> i) & 1) b.push(i); return b; };
 const pop = v => bitsOf(v).length;
-const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 // verified FF-record field map: chain=bits[4:0], iff=bit5, block=bits[15:6], data=bits[31:16]
 const ffDecode = v => ({ ch: v & 0x1F, iff: (v >> 5) & 1,
                          blk: (v >> 6) & 0x3FF, data: (v >>> 16) & 0xFFFF });
@@ -1218,7 +1219,10 @@ def build_html(payload, live):
     (live). `live` selects the fetch layer + live bar."""
     livebar = LIVEBAR if live else ""
     liveboot = LIVEBOOT if live else ""
-    return (HTML.replace("__PAYLOAD__", json.dumps(payload, separators=(",", ":")))
+    # escape </ so a dump string (dmesg, lspci, serial) can never break out
+    # of the <script type="application/json"> block; JSON.parse is unaffected
+    payload_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    return (HTML.replace("__PAYLOAD__", payload_json)
                 .replace("__LIVEBAR__", livebar)
                 .replace("__LIVEBOOT__", liveboot))
 

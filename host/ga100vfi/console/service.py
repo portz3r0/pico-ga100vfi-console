@@ -120,8 +120,8 @@ def driver_of(bdf):
 def probe(bdf):
     """Pure-read probe: status + shadow + TPC registers. Zero register writes."""
     path = f"/sys/bus/pci/devices/{bdf}/resource0"
-    f = os.open(path, os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
-    try:
+    f = os.open(path, os.O_RDONLY | os.O_SYNC | os.O_CLOEXEC)   # OS-enforced
+    try:                                                         # read-only
         mm = mmap.mmap(f, fd.MAP_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
         try:
             def rd(o):
@@ -830,7 +830,7 @@ def gpu_state(bdf):
     the DSOV_SET writeback check needs a write and is skipped here — the burn
     guards re-verify everything before any CMD_WRITE)."""
     path = f"/sys/bus/pci/devices/{bdf}/resource0"
-    f = os.open(path, os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
+    f = os.open(path, os.O_RDONLY | os.O_SYNC | os.O_CLOEXEC)   # pure read
     try:
         mm = mmap.mmap(f, fd.MAP_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
         try:
