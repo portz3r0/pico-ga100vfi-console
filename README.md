@@ -12,6 +12,38 @@ Credits:
 
 MIT licensed. See `LICENSE`.
 
+## Fuse Console (this fork's addition)
+
+A self-contained web console for the whole GA100 fuse workflow — live
+register/fuse viewing, glitch campaigns, guarded burns, driver
+load/unload/blacklist, and GPU status, served from the `ga100vfi` package:
+
+```sh
+sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
+# open http://<host>:8790
+```
+
+- Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
+  488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
+  **Drivers**, **GPU Info**
+- Burns are gated behind a typed arm phrase, pure 0→1 payload checks,
+  row-state matching, the Goldilocks guard chain, and a hard FF placement
+  policy (boot-FF buffer, SM re-disable reserve, revert tail) — all
+  enforced server-side
+- Campaigns use a fixed `v_dip` or the Thompson-sampling adaptive planner,
+  and can burn the checked payload in-process on the first Goldilocks
+- Campaigns refuse to start while a driver is bound to the card
+- Full user guide — requirements, step-by-step workflows
+  (explore → prep drivers → glitch → burn → verify), indicator reference,
+  HTTP API, systemd unit, troubleshooting:
+  **[docs/CONSOLE.md](docs/CONSOLE.md)**
+
+Headless equivalents: `sudo python3 -m ga100vfi fusedump --bdf 0000:1a:00.0`
+(full dump) and `ga100vfi-console` (the service) after `pip install -e host/`.
+
+Everything below is the upstream `pico-ga100vfi` toolchain documentation,
+kept intact.
+
 ## What it does
 
 A GA100 samples its fuse block once, early in power-on reset. Dropping NVVDD below
@@ -169,32 +201,6 @@ count, and the winning glitch profile (every `g` parameter, as in
 `host/ga100vfi/glitch.py` `Attempt`). Replay a profile with `attempt`, or reuse its
 `v_dip_mv` with `campaign --v-dip`. The file holds your card's serial; keep it out of
 anything you publish.
-
-## Fuse Console (web GUI)
-
-For monitoring and driving the whole flow from a browser — live fuse/register
-viewing, glitch campaigns, guarded burns, driver load/unload/blacklist, and
-GPU status as tabs in one dark console:
-
-```sh
-sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
-# then open http://<host>:8790
-```
-
-Burns are gated behind a typed arm phrase, pure 0→1 payload checks, row-state
-matching, the full Goldilocks guard chain, and a hard FF placement policy
-(boot-FF buffer, SM re-disable reserve, revert tail — all enforced
-server-side). Campaigns can use a fixed `v_dip` or the Thompson-sampling
-adaptive planner, and refuse to start while a driver is bound to the card.
-Full dumps are also available headless:
-
-```sh
-sudo python3 -m ga100vfi fusedump --bdf 0000:1a:00.0
-```
-
-See [docs/CONSOLE.md](docs/CONSOLE.md) for the full user guide — requirements,
-step-by-step workflows (explore → prep drivers → glitch → burn → verify),
-an indicator reference, the HTTP API, a systemd unit, and troubleshooting.
 
 ## The glitch
 
