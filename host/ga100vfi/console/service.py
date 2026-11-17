@@ -760,6 +760,8 @@ def glitch_start(body):
                 return {"error": "burn placement policy: " + "; ".join(issues)}
     glitch_stop.clear()
     with glitch_lock:
+        if GLITCH["running"]:        # re-check: validation above released the
+            return {"error": "campaign already running"}  # lock for seconds
         GLITCH.update({"running": True, "log": [], "stats": {}, "params": params,
                        "error": None, "finished": None, "result": None})
     t = threading.Thread(target=campaign_worker, args=(params, records), daemon=True)
