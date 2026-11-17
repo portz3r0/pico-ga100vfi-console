@@ -38,6 +38,7 @@ import json
 import mmap
 import os
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -664,6 +665,10 @@ def campaign_worker(params, records):
             GLITCH["error"] = str(e)
     finally:
         try:
+            card.revert()          # AGENTS.md rule 5: hand PMBus control back
+        except Exception as e:
+            glog(f"warn: VRM revert failed: {e}")
+        try:
             card.close()
         except Exception:
             pass
@@ -740,6 +745,8 @@ def glitch_start(body):
         GLITCH.update({"running": True, "log": [], "stats": {}, "params": params,
                        "error": None, "finished": None, "result": None})
     t = threading.Thread(target=campaign_worker, args=(params, records), daemon=True)
+    with glitch_lock:
+        GLITCH["thread"] = t
     t.start()
     glog(f"campaign started — target {params.get('bdf', CFG['bdf'])} "
          f"v_dip={params['v_dip']} pulses={params['pulses']} "
@@ -1073,6 +1080,10 @@ def main(argv=None) -> int:
                          "host, or the first of several; burns and campaigns "
                          "pick any GA100 at runtime)")
     ap.add_argument("--port", type=int, default=8790)
+    ap.add_argument("--listen", default="0.0.0.0",
+                    help="bind address (use 127.0.0.1 to keep the console "
+                         "host-local; combine with an ssh -L tunnel for "
+                         "remote access)")
     ap.add_argument("--poll", type=float, default=1.0,
                     help="server probe interval s")
     ap.add_argument("--state-dir", default=None,
@@ -1121,8 +1132,29 @@ def main(argv=None) -> int:
     t = threading.Thread(target=poller, args=(a.poll,), daemon=True)
     t.start()
 
-    srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
-    print(f"ga100vfi fuse console on 0.0.0.0:{a.port}  bdf={CFG['bdf']}  "
+    srv = ThreadingHTTPServer((a.listen, a.port), Handler)
+
+    def _sigterm(signum, frame):
+        # systemd sends SIGTERM (Restart=always unit); a bare finally would
+        # never run — stop the campaign (its finally reverts the VRM), then
+        # shut the HTTP server down from a second thread (serve_forever may
+        # not be shutdown from its own thread).
+        sys.stdout.write("SIGTERM: stopping campaign, reverting VRM, exiting\n")
+        sys.stdout.flush()
+        glitch_stop.set()
+
+        def _stopper():
+            with glitch_lock:
+                worker = GLITCH.get("thread")
+            if worker and worker.is_alive():
+                worker.join(timeout=10.0)
+            srv.shutdown()
+
+        threading.Thread(target=_stopper, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _sigterm)
+
+    print(f"ga100vfi fuse console on {a.listen}:{a.port}  bdf={CFG['bdf']}  "
           f"html={CFG['html']}  dumps={dumps_dir()}  poll={a.poll}s  "
           f"mock={bool(a.mock)}", flush=True)
     srv.serve_forever()
