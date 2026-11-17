@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -543,20 +544,18 @@ def vrm_unlock(card, retries=15):
     return True
 
 
-def _log_goldilocks(bdf, bar, adaptive, attempts, v_dip, params):
-    """Append to goldilocks.jsonl in the state dir (same log as the CLI)."""
+def _log_goldilocks(bdf, bar, att, attempts, v_dip, params):
+    """Append to goldilocks.jsonl in the state dir (same log format as the CLI:
+    the profile is the full Attempt dataclass, all g parameters)."""
     try:
         serial = SERIAL_CACHE.get(bdf)
         if serial is None:
             serial = brd_serial(bar)
             SERIAL_CACHE[bdf] = serial
         entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
-                 "serial": serial, "bdf": bdf, "adaptive": adaptive,
+                 "serial": serial, "bdf": bdf, "adaptive": bool(params.get("adaptive")),
                  "attempts": attempts,
-                 "profile": {"v_dip": v_dip, "pulses": params.get("pulses", 3),
-                             "pw": params.get("pw", 198),
-                             "gap": params.get("gap", 150),
-                             "delay": params.get("delay", 117)}}
+                 "profile": asdict(att)}
         with open(os.path.join(CFG["state_dir"], "goldilocks.jsonl"), "a") as f:
             f.write(json.dumps(entry) + "\n")
         glog(f"goldilocks logged (serial={serial})")
@@ -653,8 +652,7 @@ def campaign_worker(params, records):
                                  ("  << GOLDILOCKS" if v.passed else ""))
                             if v.passed:
                                 stats["goldilocks"] = True
-                                _log_goldilocks(bdf, bar, bool(planner), n,
-                                                v_dip, params)
+                                _log_goldilocks(bdf, bar, att, n, v_dip, params)
                                 if records:
                                     glog(">>> GOLDILOCKS — burning records now "
                                          "(same process, no further restore)")
