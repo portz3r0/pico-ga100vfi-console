@@ -56,6 +56,10 @@ CFG = {
     "state_dir": os.path.expanduser("~/ga100-fuse-view"),
     "html": None,
     "mock": None,
+    # burn placement policy (see docs/CONSOLE.md — the Nov-16 brick rules)
+    "ff_buffer": 4,        # empty rows between last boot FF and first burn
+    "ff_tail_reserve": 12, # revert/correction space at the end of the FF region
+    "ff_sm_reserve": 16,   # rows kept for re-disabling SMs that turn out bad
 }
 
 STATE: dict = {"ts": None, "status": None, "shadow": None,
@@ -72,6 +76,9 @@ EN_SW_OVERRIDE, DEBUGCTRL, CRC_STATUS, EFP, DSOV = (0x820040, 0x820060, 0x820070
 FUSEWDATA_PLM, FUSECTRL_PLM, SBFE, PRIV_MASK = (0x8200F4, 0x8200F8, 0x821108,
                                                 0x8200FC)
 CMD_READ, CMD_WRITE = 1, 2
+
+# FF record region (chain/block/value records; last record per block wins)
+FF_START, FF_END = 222, 487
 
 MODULES = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
 BLACKLIST_FILE = "/etc/modprobe.d/ga100-fuse-blacklist.conf"
@@ -257,6 +264,116 @@ def burn_execute(rd, wr, row, value, old):
         time.sleep(0.05)
 
 
+# ---------------------------------------------------------------- FF placement policy
+def ff_layout(bdf=None):
+    """Scan the FF record region (rows 222-487) and compute the safe burn
+    layout: boot FFs | buffer | BURN ZONE | SM re-disable reserve | revert tail.
+
+    The rules this encodes (each one learned the hard way):
+      * burns go only into blank rows — never touch boot FFs
+      * a buffer after the last boot FF keeps new records clear of the boot
+        chain
+      * the tail stays empty for corrections/reverts — a wrong value can only
+        be fixed by burning a LATER record (last record per block wins), so
+        attempts are finite
+      * rows are reserved for re-disabling SMs that turn out actually bad.
+    """
+    bdf = bdf or CFG["bdf"]
+    occupied = []
+    if CFG["mock"]:
+        try:
+            with open(CFG["mock"]) as f:
+                rows = json.load(f).get("rows", {})
+        except Exception:
+            rows = {}
+        for k, v in rows.items():
+            try:
+                r = int(k)
+            except ValueError:
+                continue
+            if FF_START <= r <= FF_END and isinstance(v, int) \
+                    and v not in (0, 0xFFFFFFFF):
+                occupied.append(r)
+    else:
+        if not card_lock.acquire(timeout=2.0):
+            return {"error": "card busy (campaign or dump in progress)"}
+        try:
+            bar = fd.Bar(bdf)
+            try:
+                rd, wr = bar.rd, bar.wr
+                en_sw = rd(EN_SW_OVERRIDE)
+                if en_sw != 0:
+                    wr(EN_SW_OVERRIDE, 0)
+                    time.sleep(0.05)
+                try:
+                    for r in range(FF_START, FF_END + 1):
+                        try:
+                            v = read_row_via(rd, wr, r)
+                        except RuntimeError:
+                            continue
+                        if v not in (0, 0xFFFFFFFF):
+                            occupied.append(r)
+                finally:
+                    if en_sw != 0:
+                        wr(EN_SW_OVERRIDE, en_sw)
+                        time.sleep(0.05)
+            finally:
+                bar.close()
+        finally:
+            card_lock.release()
+    last_occ = max(occupied) if occupied else FF_START - 1
+    tail = CFG["ff_tail_reserve"]
+    sm = CFG["ff_sm_reserve"]
+    zone_start = last_occ + 1 + CFG["ff_buffer"]
+    sm_start = FF_END - tail - sm + 1
+    zone_end = sm_start - 1
+    return {
+        "bdf": bdf,
+        "ff_start": FF_START, "ff_end": FF_END,
+        "occupied_count": len(occupied), "last_occupied": last_occ,
+        "buffer": CFG["ff_buffer"], "sm_reserve": sm, "tail_reserve": tail,
+        "burn_zone": [zone_start, zone_end],
+        "sm_zone": [sm_start, FF_END - tail],
+        "revert_zone": [FF_END - tail + 1, FF_END],
+        "free_in_zone": max(0, zone_end - zone_start + 1),
+    }
+
+
+def ff_policy(layout, row, mirror=False):
+    """Placement-policy verdict for a candidate burn row. Returns a list of
+    issues (empty = compliant). Hard-enforced on every burn path."""
+    issues = []
+    L = layout
+    zs, ze = L["burn_zone"]
+    if row < FF_START or row > FF_END:
+        issues.append(f"row {row} is outside the FF record region "
+                      f"({FF_START}-{FF_END}) — record-format values in the "
+                      f"main array / FPF region brick cards")
+    else:
+        if row <= L["last_occupied"]:
+            issues.append(f"row {row} is OCCUPIED — boot FFs end at row "
+                          f"{L['last_occupied']} ({L['occupied_count']} records)")
+        elif row < zs:
+            issues.append(f"row {row} is inside the boot-FF buffer — keep "
+                          f">={L['buffer']} empty rows clear after the last "
+                          f"boot FF (row {L['last_occupied']})")
+        if row > ze:
+            if row >= L["revert_zone"][0]:
+                issues.append(f"row {row} is inside the reserved REVERT tail "
+                              f"(rows {L['revert_zone'][0]}-{L['revert_zone'][1]}) "
+                              f"— that space corrects mistakes; burning it "
+                              f"removes your recovery budget")
+            elif row >= L["sm_zone"][0]:
+                issues.append(f"row {row} is inside the reserved SM "
+                              f"re-disable zone (rows {L['sm_zone'][0]}-"
+                              f"{L['sm_zone'][1]})")
+    if mirror:
+        mrow = row + 1 if row % 2 == 0 else row - 1
+        for issue in ff_policy(layout, mrow, False):
+            issues.append(f"mirror {mrow}: {issue[0].lower()}{issue[1:]}")
+    return issues
+
+
 def burn_check(row, value, mirror, bdf=None):
     """Dry check: current row value, purity, live guard states. No fuse writes."""
     if CFG["mock"]:
@@ -264,6 +381,9 @@ def burn_check(row, value, mirror, bdf=None):
     bdf = bdf or CFG["bdf"]
     if not valid_bdf(bdf):
         return {"error": f"{bdf} is not a GA100 on this host"}
+    layout = ff_layout(bdf)          # own card_lock pass — scan the FF region
+    if "error" in layout:
+        return {"error": "FF region scan failed: " + layout["error"]}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
@@ -285,14 +405,19 @@ def burn_check(row, value, mirror, bdf=None):
             rows = [row]
             if mirror:
                 rows.append(row + 1 if row % 2 == 0 else row - 1)
+            issues = ff_policy(layout, row, mirror)
+            policy = {"ok": not issues, "issues": issues, "layout": layout}
             note = "guards require a live Goldilocks window (DSOV=0); " \
                    "use the campaign burn-on-goldilocks mode"
-            if not (222 <= row <= 487):
+            if policy["issues"]:
+                note = "PLACEMENT POLICY: " + "; ".join(policy["issues"])
+            elif not (222 <= row <= 487):
                 note = ("⚠ row outside the FF record region (222–487) — "
                         "burning record-format values in the main array / FPF "
                         "region has bricked cards. " + note)
             return {"row": row, "current": cur, "value": value, "bdf": bdf,
                     "pure_0to1": pure, "guards_ok": ok, "guards": checks,
+                    "policy": policy,
                     "rows_to_burn": rows, "note": note}
         finally:
             bar.close()
@@ -327,7 +452,14 @@ def burn_api(body):
                         time.time() < ARM["expires"]):
         return {"error": "not armed (or arm token expired) — arm first, 120s TTL"}
     if not confirm:
-        return burn_check(row, value, bool(body.get("mirror")))
+        return burn_check(row, value, bool(body.get("mirror")), bdf)
+    layout = ff_layout(bdf)
+    if "error" in layout:
+        return {"error": f"cannot scan FF region: {layout['error']}"}
+    issues = ff_policy(layout, row, bool(body.get("mirror")))
+    if issues:
+        return {"error": "burn placement policy: " + "; ".join(issues),
+                "policy": {"ok": False, "issues": issues, "layout": layout}}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
@@ -535,6 +667,13 @@ def glitch_start(body):
             if rec.get("mirror"):
                 m = row + 1 if row % 2 == 0 else row - 1
                 records.append({"row": m, "value": value, "old": old})
+        layout = ff_layout(params["bdf"])
+        if "error" in layout:
+            return {"error": "cannot scan FF region: " + layout["error"]}
+        for rec in recs:
+            issues = ff_policy(layout, int(rec["row"]), bool(rec.get("mirror")))
+            if issues:
+                return {"error": "burn placement policy: " + "; ".join(issues)}
     glitch_stop.clear()
     with glitch_lock:
         GLITCH.update({"running": True, "log": [], "stats": {}, "params": params,
@@ -777,6 +916,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/gpus":
                 self._send(200, json.dumps(gpu_list(), default=str),
                            "application/json")
+            elif path == "/api/ff/layout":
+                self._send(200, json.dumps(
+                    ff_layout(qs.get("bdf") or CFG["bdf"]), default=str),
+                    "application/json")
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
@@ -864,12 +1007,21 @@ def main(argv=None) -> int:
                     help="state dir for dumps + generated live.html")
     ap.add_argument("--html", default=None, help="serve this HTML instead of generating")
     ap.add_argument("--rows", default="0-487")
+    ap.add_argument("--ff-buffer", type=int, default=4,
+                    help="empty rows between last boot FF and first burn")
+    ap.add_argument("--ff-tail-reserve", type=int, default=12,
+                    help="rows reserved at the end for reverts/corrections")
+    ap.add_argument("--ff-sm-reserve", type=int, default=16,
+                    help="rows reserved for re-disabling bad SMs")
     ap.add_argument("--mock", default=None,
                     help="serve a dump.json instead of a real card (testing)")
     a = ap.parse_args(argv)
 
     CFG["bdf"] = a.bdf
     CFG["mock"] = a.mock
+    CFG["ff_buffer"] = a.ff_buffer
+    CFG["ff_tail_reserve"] = a.ff_tail_reserve
+    CFG["ff_sm_reserve"] = a.ff_sm_reserve
     if a.state_dir:
         CFG["state_dir"] = a.state_dir
     if a.html:
