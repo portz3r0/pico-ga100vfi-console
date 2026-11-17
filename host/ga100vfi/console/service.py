@@ -53,6 +53,12 @@ from .. import fusedump as fd
 from ..bar0 import Bar0, brd_serial
 from .gui import STUB, build_html, load_dump
 
+# DNS-rebinding / CSRF guards: the Host must be localhost or an IP literal
+# (a rebound domain resolves to this host but keeps its own name in Host),
+# and a browser POST's Origin must match the Host. LAN browsing via
+# http://<host-ip>:<port> is unaffected.
+_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
 CFG = {
     "bdf": "0000:41:00.0",
     "rows": list(range(0, 488)),
@@ -971,7 +977,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _host_ok(self) -> bool:
+        host = (self.headers.get("Host") or "").split(":")[0].strip("[]")
+        if not host or host == "localhost" or host.startswith("127.") \
+                or _IPV4_RE.match(host) or ":" in host:
+            return True
+        self._send(403, json.dumps(
+            {"error": f"Host {host!r} rejected — use the host IP or "
+                      f"localhost (DNS-rebinding guard)"}), "application/json")
+        return False
+
+    def _origin_ok(self) -> bool:
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True                    # non-browser clients (curl, scripts)
+        host = (self.headers.get("Host") or "").split(":")[0].strip("[]")
+        ohost = origin.split("://", 1)[-1].split(":")[0].strip("[]")
+        if ohost == host:
+            return True
+        self._send(403, json.dumps(
+            {"error": f"cross-origin {origin!r} rejected (CSRF guard)"}),
+            "application/json")
+        return False
+
     def do_GET(self):
+        if not self._host_ok():
+            return
         parts = urlsplit(self.path)
         path = parts.path
         qs = {k: v[0] for k, v in
@@ -1032,6 +1063,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_POST(self):
+        if not self._host_ok() or not self._origin_ok():
+            return
         path = self.path.split("?")[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)

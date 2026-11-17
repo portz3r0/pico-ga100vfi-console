@@ -274,6 +274,23 @@ pico port is a dropdown populated from the host's serial devices
 (`/dev/ttyACM*`, `/dev/ttyUSB*`, with `/dev/serial/by-id` names when
 available).
 
+### Network exposure
+
+There is no login. The default bind is `0.0.0.0` (LAN browsing — pass
+`--listen 127.0.0.1` for host-local use, then reach it through
+`ssh -L 8790:localhost:8790 <host>`). Two browser-specific attacks are
+refused regardless of the bind:
+
+- **DNS rebinding**: the `Host` header must be `localhost`, loopback, or an
+  IP literal — a rebound domain name is rejected with 403.
+- **Cross-site (CSRF) POSTs**: a browser's `Origin` must match the `Host`
+  (a `text/plain` JSON POST is a CORS "simple request", so this is what
+  stops a malicious page from driving `/api/glitch/start` or
+  `/api/driver/op` against your console).
+
+Non-browser clients (curl, scripts) send no `Origin` and are allowed. Run
+on a trusted network or front it with your own auth proxy.
+
 ## Standalone tools (reference)
 
 - Full dump without the GUI:
