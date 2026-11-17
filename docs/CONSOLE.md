@@ -23,9 +23,11 @@ means), and **reference** (burn safety model, HTTP API, systemd, testing).
 ## Starting the console
 
 ```sh
-sudo python3 -m ga100vfi.console --bdf 0000:41:00.0 --port 8790
+sudo python3 -m ga100vfi.console --port 8790
 # or, after `pip install -e host/`:
-sudo ga100vfi-console --bdf 0000:41:00.0 --port 8790
+sudo ga100vfi-console --port 8790
+# the card is auto-detected; pass --bdf only to choose which card the
+# Fuse Explorer watches on a multi-GPU host (burns pick any GA100 at runtime)
 ```
 
 Then open `http://<host>:8790`. The service generates its own `live.html`
@@ -36,7 +38,7 @@ Useful flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--bdf` | `0000:41:00.0` | the card the Fuse Explorer tab watches live |
+| `--bdf` | auto-detected | the card the Fuse Explorer tab watches live |
 | `--port` | `8790` | HTTP port |
 | `--state-dir` | `~/ga100-fuse-view` | full dumps, generated `live.html`, `goldilocks.jsonl` |
 | `--poll` | `1.0` | server-side probe interval (seconds) |
@@ -52,6 +54,8 @@ minutes late on slow boots.
 ### Fuse Explorer
 
 The live view of the card the service was started with.
+
+![Fuse Explorer tab](../images/console-explorer.png)
 
 - **Live poll**: status + shadow registers, refreshed every 1–2 s from
   *pure reads* — safe to leave open at any time, even mid-glitch. Any
@@ -77,6 +81,8 @@ Below it: the **burn placement policy** (rules + a live row map of the FF
 region + the remaining burn budget), the **burn payload** form, and the
 **campaign** controls. See the workflows below for the full sequence.
 
+![Glitch & Burn tab](../images/console-glitch-burn.png)
+
 ### Drivers
 
 Live driver state (bound driver, module list, version, blacklist status) and
@@ -86,11 +92,15 @@ blacklisted — the driver re-locks the VRM and binds the card before you can
 inspect BAR0. The blacklist written here still allows manual `modprobe`, so
 you stay in control.
 
+![Drivers tab](../images/console-drivers.png)
+
 ### GPU Info
 
 nvidia-smi card grid (auto-refresh) + `lspci` link state. Reports the
 `nvidia-smi` error string honestly when the card is GFW-dead — that banner
 is normal until the card boots cleanly.
+
+![GPU Info tab](../images/console-gpu.png)
 
 ## Workflows
 
@@ -293,7 +303,7 @@ WantedBy=multi-user.target
 ```
 
 (Requires the package importable system-wide, e.g.
-`sudo pip install -e /path/to/pico-ga100vfi/host`.)
+`sudo pip install -e /path/to/pico-ga100vfi-console/host`.)
 
 ## Testing without hardware
 

@@ -1070,7 +1070,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="ga100vfi-console",
         description="GA100 CMP 170HX fuse surgery console (web GUI + service)")
-    ap.add_argument("--bdf", default="0000:41:00.0")
+    ap.add_argument("--bdf", default=None,
+                    help="card for the Fuse Explorer live poll "
+                         "(default: auto-detected — the only GA100 on the "
+                         "host, or the first of several; burns and campaigns "
+                         "pick any GA100 at runtime)")
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--poll", type=float, default=1.0,
                     help="server probe interval s")
@@ -1088,7 +1092,22 @@ def main(argv=None) -> int:
                     help="serve a dump.json instead of a real card (testing)")
     a = ap.parse_args(argv)
 
-    CFG["bdf"] = a.bdf
+    if a.bdf:
+        CFG["bdf"] = a.bdf
+    elif a.mock:
+        pass  # no hardware needed; keep the default bdf
+    else:
+        found = fd.find_ga100s()
+        if not found:
+            print("No GA100 CMP 170HX found — pass --bdf explicitly.",
+                  file=sys.stderr)
+            return 1
+        CFG["bdf"] = found[0]
+        if len(found) > 1:
+            print(f"multiple GA100s found ({', '.join(found)}); live poll "
+                  f"watches {found[0]} — pick any of them for burns in the "
+                  f"Target selector", flush=True)
+
     CFG["mock"] = a.mock
     CFG["ff_buffer"] = a.ff_buffer
     CFG["ff_tail_reserve"] = a.ff_tail_reserve

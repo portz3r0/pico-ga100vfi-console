@@ -1,7 +1,9 @@
-# pico-ga100vfi
+# pico-ga100vfi-console
 
-Voltage-glitch toolchain for NVIDIA GA100 boards (CMP 170HX), inspired by
-[`kate-land/ga100vfi`](https://github.com/kate-land/ga100vfi), on generic
+Fuse Console for NVIDIA GA100 boards (CMP 170HX) — a web GUI over the
+[`pico-ga100vfi`](https://github.com/dalzyu/pico-ga100vfi) voltage-glitch
+toolchain (itself inspired by
+[`kate-land/ga100vfi`](https://github.com/kate-land/ga100vfi)), on generic
 RP2350A / RP2350B boards using an I2C-only actuation path.
 
 Credits:
@@ -14,14 +16,23 @@ MIT licensed. See `LICENSE`.
 
 ## Fuse Console (this fork's addition)
 
-A self-contained web console for the whole GA100 fuse workflow — live
-register/fuse viewing, glitch campaigns, guarded burns, driver
-load/unload/blacklist, and GPU status, served from the `ga100vfi` package:
+The Fuse Console is a self-contained web GUI for the whole GA100 fuse
+workflow — live register/fuse viewing, glitch campaigns, guarded burns,
+driver load/unload/blacklist, and GPU status, served from the `ga100vfi`
+package:
 
 ```sh
-sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
+sudo python3 -m ga100vfi console --port 8790
 # open http://<host>:8790
+# the card is auto-detected — pass --bdf only to choose which one the live
+# view watches on a multi-GPU host (burns pick any GA100 at runtime)
 ```
+
+| Fuse Explorer | Glitch & Burn |
+|---|---|
+| ![Fuse Explorer tab](docs/images/console-explorer.png) | ![Glitch & Burn tab](docs/images/console-glitch-burn.png) |
+| **Drivers** | **GPU Info** |
+| ![Drivers tab](docs/images/console-drivers.png) | ![GPU Info tab](docs/images/console-gpu.png) |
 
 - Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
@@ -38,8 +49,9 @@ sudo python3 -m ga100vfi console --bdf 0000:1a:00.0 --port 8790
   HTTP API, systemd unit, troubleshooting:
   **[docs/CONSOLE.md](docs/CONSOLE.md)**
 
-Headless equivalents: `sudo python3 -m ga100vfi fusedump --bdf 0000:1a:00.0`
-(full dump) and `ga100vfi-console` (the service) after `pip install -e host/`.
+Headless equivalents: `sudo python3 -m ga100vfi fusedump` (full dump, card
+auto-detected) and `ga100vfi-console` (the service) after
+`pip install -e host/`.
 
 Everything below is the upstream `pico-ga100vfi` toolchain documentation,
 kept intact.
