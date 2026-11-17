@@ -63,8 +63,9 @@ The live view of the card the service was started with.
   see `DSOV` flip `1 → 0` the moment a glitch lands.
 - **⟳ Run full dump**: all fuse rows 0–487 via the fuse-macro `CMD_READ`
   path, plus the hex window and dmesg, archived to
-  `<state-dir>/dumps/<ts>/`. Manual only — do not run it while a campaign
-  is driving the card.
+  `<state-dir>/dumps/<ts>/`. The page requests one automatically on
+  load; while a campaign is running the server refuses it (a mid-campaign
+  sweep could push classify past the Goldilocks window).
 - **Topology**: GPC/FBP floorsweep vs. defective masks, with a state
   selector (pre-glitch reference / intended / NOW) — dead silicon that is
   *enabled* is drawn red-hatched.

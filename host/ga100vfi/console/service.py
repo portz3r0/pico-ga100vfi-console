@@ -171,6 +171,12 @@ def dumps_dir():
 
 
 def full_dump():
+    with glitch_lock:
+        if GLITCH["running"]:
+            # the GUI auto-loads a dump on every page open; a dump grabs
+            # card_lock for a full 488-row sweep and can push classify past
+            # the Goldilocks window between shots
+            return {"error": "campaign running — full dump refused"}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy — another full dump is running"}
     try:
