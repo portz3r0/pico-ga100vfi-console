@@ -718,6 +718,14 @@ def glitch_start(body):
         "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
         "port": body.get("port", "/dev/ttyACM0"),
     }
+    if not (200 <= params["v_dip"] <= 500):
+        # the firmware clamps pulses/pw/gap but not vd — a fat-fingered
+        # 3540 would command 3.54 V on a ~0.7 V rail. Refuse loudly.
+        return {"error": f"v_dip {params['v_dip']} mV outside 200-500 — "
+                "refusing (check for a typo)"}
+    if params["adaptive"] and params["min_v"] >= params["max_v"]:
+        return {"error": f"adaptive range invalid: min_v {params['min_v']} >= "
+                f"max_v {params['max_v']}"}
     records = []
     if body.get("mode") == "burn":
         recs = body.get("records", [])
