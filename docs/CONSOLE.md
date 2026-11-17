@@ -70,6 +70,29 @@ server-side immediately before `CMD_WRITE`:
 5. **No retries**: any guard failure or verify mismatch aborts; nothing is
    retried blindly.
 
+### FF placement policy (hard-enforced)
+
+The FF record region (rows 222–487) is laid out and enforced live
+(`/api/ff/layout`; the Glitch & Burn tab renders it as a row map):
+
+```
+| boot FFs (occupied) | buffer | BURN ZONE | SM re-disable reserve | revert tail |
+```
+
+- **Burn only into blank rows** in the FF region — occupied rows, the main
+  array and the FPF region are refused.
+- **A buffer (default 4 rows) is kept after the last boot FF** so new
+  records cannot interfere with the boot chain.
+- **The revert tail (default 12 rows) stays empty** — a wrong value can only
+  be corrected by burning a *later* record (last record per block wins), so
+  the tail is your correction budget and attempts are finite.
+- **The SM reserve (default 16 rows) stays free** so SMs that turn out to be
+  actually bad after unlocking can be re-disabled.
+- The budget pill shows how many safe rows remain; burns refresh it.
+
+Reserves are tunable per deployment: `--ff-buffer`, `--ff-tail-reserve`,
+`--ff-sm-reserve`.
+
 Read-back verify runs after every burn — but note the hard lesson from the
 field: **a bit-exact readback does NOT prove the shadow latch followed**
 (records can land and still lose). After any burn, watch `STATUS_OPT_*` in

@@ -252,6 +252,20 @@ HTML = r"""<!DOCTYPE html>
   .dangerstrip { border: 1px solid rgba(248,81,73,.4); background: rgba(248,81,73,.07);
                border-radius: 8px; padding: 8px 12px; font-size: 11.5px;
                color: var(--bad); margin-top: 12px; }
+  .rules { margin: 4px 0 10px; padding-left: 20px; font-size: 11.5px;
+           color: var(--muted-foreground); }
+  .rules li { margin: 4px 0; }
+  .rules b { color: var(--foreground); }
+  .ffmap { display: flex; height: 30px; border-radius: 7px; overflow: hidden;
+           border: 1px solid var(--border); margin-top: 4px; }
+  .seg { display: flex; align-items: center; justify-content: center;
+         font-size: 9.5px; font-weight: 600; overflow: hidden; white-space: nowrap;
+         letter-spacing: .03em; }
+  .seg.occ { background: rgba(102,112,123,.30); color: #aab4bf; }
+  .seg.buf { background: rgba(210,153,34,.18); color: var(--warn); }
+  .seg.zone { background: rgba(63,185,80,.16); color: var(--ok); }
+  .seg.smr { background: rgba(188,140,255,.16); color: #bc8cff; }
+  .seg.rev { background: rgba(248,81,73,.14); color: var(--bad); }
 
   footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--border-soft);
            color: var(--fg-subtle); font-size: 11px; display: flex; gap: 14px; flex-wrap: wrap; }
@@ -747,6 +761,29 @@ LIVEBOOT = r"""
       GPU currently in the <b>Goldilocks</b> state (DSOV=0, CRC=0x55, PLMs open) —
       the campaign's burn-on-goldilocks mode creates that state on the selected GPU.</div>
     </div>
+    <div class="card" id="gb-policy" style="margin-top:12px">
+      <h3>Burn placement policy</h3>
+      <ol class="rules">
+        <li><b>Never yolo ffcalc output.</b> Verify every record against your
+        card's own defect masks first — a blind burn bricks the card.</li>
+        <li><b>Burn only into blank rows</b> in the FF record region
+        (222–487) — never touch the occupied boot records.</li>
+        <li><b>Keep a buffer after the last boot FF</b> so new records cannot
+        interfere with the boot FF chain.</li>
+        <li><b>Leave the tail empty for reverts.</b> A wrong value can only be
+        corrected by burning a <i>later</i> record (last record per block
+        wins) — mistakes consume rows.</li>
+        <li><b>Attempts are limited:</b> the safe zone holds only the rows in
+        the budget below, corrections included.</li>
+        <li><b>The SM reserve stays free</b> so you can re-disable SMs that
+        turn out to be actually bad after unlocking.</li>
+      </ol>
+      <div class="ffmap" id="gb-ffmap"></div>
+      <div class="frow" style="margin-top:8px">
+        <span class="pill" id="gb-budget">scanning FF region…</span>
+        <span class="pill" id="gb-rowhint">row —</span>
+      </div>
+    </div>
     <div class="card" id="gb-burn" style="margin-top:12px">
       <h3>Burn payload</h3>
       <div class="frow">
@@ -852,9 +889,62 @@ LIVEBOOT = r"""
     targetBdf = $("gb-gpu").value; payloadChecked = null;
     $("gb-checkresult").innerHTML = "";
     loadGpus();
+    loadLayout();
   };
   setInterval(loadGpus, 2000);
   loadGpus();
+
+  // ---- FF placement policy (row map + budget + live row hint) ----
+  let ffLayout = null;
+  function renderFfMap() {
+    const L = ffLayout;
+    if (!L || !L.burn_zone) return;
+    const total = L.ff_end - L.ff_start + 1;
+    const seg = (a, b, cls, label) => {
+      if (b < a) return "";
+      const w = ((b - a + 1) / total * 100).toFixed(2);
+      return `<div class="seg ${cls}" style="width:${w}%" title="rows ${a}–${b}">${label}</div>`;
+    };
+    $("gb-ffmap").innerHTML =
+      seg(L.ff_start, L.last_occupied, "occ", `boot FFs · ${L.occupied_count}`) +
+      seg(L.last_occupied + 1, L.burn_zone[0] - 1, "buf", `buffer ${L.buffer}`) +
+      seg(L.burn_zone[0], L.burn_zone[1], "zone", `BURN ZONE · ${L.free_in_zone} free`) +
+      seg(L.sm_zone[0], L.sm_zone[1], "smr", `SM reserve ${L.sm_reserve}`) +
+      seg(L.revert_zone[0], L.revert_zone[1], "rev", `revert ${L.tail_reserve}`);
+    $("gb-budget").innerHTML =
+      `safe zone rows <b>${L.burn_zone[0]}–${L.burn_zone[1]}</b> · <b>${L.free_in_zone}</b> free · last boot FF: row ${L.last_occupied}`;
+    const rv = +$("gb-row").value;               // pull the row into the zone
+    if (!(rv >= L.burn_zone[0] && rv <= L.burn_zone[1]))
+      $("gb-row").value = L.burn_zone[0];
+    updateRowHint();
+  }
+  function updateRowHint() {
+    const hint = $("gb-rowhint");
+    const rv = +$("gb-row").value;
+    if (!ffLayout || !ffLayout.burn_zone) { hint.innerHTML = "row —"; hint.className = "pill"; return; }
+    const L = ffLayout;
+    let txt, cls;
+    if (rv >= L.burn_zone[0] && rv <= L.burn_zone[1]) { txt = `row ${rv}: ✓ safe zone`; cls = "ok"; }
+    else if (rv < L.ff_start || rv > L.ff_end)       { txt = `row ${rv}: ✗ outside FF region`; cls = "bad"; }
+    else if (rv <= L.last_occupied)                  { txt = `row ${rv}: ✗ occupied (boot FF)`; cls = "bad"; }
+    else if (rv < L.burn_zone[0])                    { txt = `row ${rv}: ✗ buffer zone`; cls = "bad"; }
+    else if (rv >= L.revert_zone[0])                 { txt = `row ${rv}: ✗ revert tail (keep free)`; cls = "bad"; }
+    else if (rv >= L.sm_zone[0])                     { txt = `row ${rv}: ✗ SM reserve (keep free)`; cls = "bad"; }
+    else                                             { txt = `row ${rv}: ✗`; cls = "bad"; }
+    hint.className = "pill";
+    hint.innerHTML = `<b class="${cls}">${txt}</b>`;
+  }
+  $("gb-row").oninput = updateRowHint;
+  async function loadLayout() {
+    try {
+      const q = targetBdf ? "?bdf=" + encodeURIComponent(targetBdf) : "";
+      const j = await jget("/api/ff/layout" + q);
+      if (j.error) { $("gb-budget").textContent = "⚠ " + j.error; return; }
+      ffLayout = j;
+      renderFfMap();
+    } catch (e) {}
+  }
+  loadLayout();
 
   // ---- pico port selector ----
   async function loadPorts() {
@@ -909,17 +999,19 @@ LIVEBOOT = r"""
       `<span>${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
       (g.want !== undefined ? ` (want ${typeof g.want === "number" ? fmt(g.want) : esc(String(g.want))})` : "") +
       `</span></div>`).join("");
-    const ffNote = (row >= 222 && row <= 487) ? "" :
-      `<div class="warn" style="margin-top:6px">⚠ row ${row} is OUTSIDE the FF record region (222–487) — ` +
-      `burning record-format values in the main array / FPF region is how cards get bricked.</div>`;
+    const pol = j.policy;
+    const polBlock = pol ? `<div class="${pol.ok ? "ok" : "bad"}" style="margin-top:6px">` +
+      `<b>placement policy: ${pol.ok ? "OK — row is in the safe burn zone" : "VIOLATION"}</b>` +
+      (pol.issues || []).map(i => `<div>• ${esc(i)}</div>`).join("") + `</div>` : "";
     res.innerHTML =
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
-      ffNote +
+      polBlock +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
-      `<div class="note" style="margin-top:6px">${esc(j.note || "")}</div>`;
+      (pol && !pol.ok ? "" : `<div class="note" style="margin-top:6px">${esc(j.note || "")}</div>`);
+    loadLayout();   // budget may have changed
   };
 
   $("gb-burnnow").onclick = async () => {
@@ -931,6 +1023,7 @@ LIVEBOOT = r"""
     const j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
     $("gb-checkresult").innerHTML =
       `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
+    loadLayout();   // a burn changes the zone — refresh the map
   };
 
   // campaign
@@ -1095,6 +1188,7 @@ LIVEBOOT = r"""
   window.__onTabChange = name => {
     if (gpuTimer) { clearInterval(gpuTimer); gpuTimer = null; }
     if (name === "gpu") { renderGpu(); gpuTimer = setInterval(renderGpu, 5000); }
+    if (name === "glitch") loadLayout();
   };
 
   const ms = +document.getElementById("pollsel").value;
