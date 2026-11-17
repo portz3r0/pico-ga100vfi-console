@@ -792,12 +792,18 @@ LIVEBOOT = r"""
     <div class="card" id="gb-burn" style="margin-top:12px">
       <h3>Burn payload</h3>
       <div class="frow">
-        <div class="field"><label>row</label><input type="number" id="gb-row" value="306" min="0" max="487"></div>
-        <div class="field"><label>value (hex)</label><input type="text" id="gb-value" value="0x00010041" class="mono" style="width:120px"></div>
-        <div class="field"><label>expected old (hex)</label><input type="text" id="gb-old" value="0x00000000" class="mono" style="width:120px"></div>
+        <div class="field"><label>target row</label><input type="number" id="gb-row" value="306" min="0" max="487"></div>
+        <div class="field"><label>value source</label>
+          <select id="gb-srcmode">
+            <option value="typed">typed hex</option>
+            <option value="dump">from dump row</option>
+          </select></div>
+        <div class="field" id="gb-typedwrap"><label>value (hex)</label><input type="text" id="gb-value" value="0x00010041" class="mono" style="width:120px"></div>
+        <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" value="304" min="0" max="487"></div>
         <label class="checkline"><input type="checkbox" id="gb-mirror" checked> burn mirror row too</label>
         <button class="btn" id="gb-check">Check row &amp; guards</button>
       </div>
+      <div id="gb-srcdecode" class="note"></div>
       <div id="gb-checkresult" class="note"></div>
       <div class="frow" style="margin-top:10px">
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
@@ -1000,15 +1006,53 @@ LIVEBOOT = r"""
     updateArmState();
   };
 
+  // ---- burn value source: typed hex, or grabbed from a dump row ----
+  let payloadValue = null;        // set by the dump-row grab (verify target)
+  function knownBlock(f) {
+    if (f.ch === 1 && f.blk === 19) return " → FBP_DISABLE";
+    if (f.ch === 1 && f.blk === 8) return " → GPC_DISABLE";
+    return "";
+  }
+  function renderSrcDecode() {
+    const el = $("gb-srcdecode");
+    if ($("gb-srcmode").value !== "dump") { el.innerHTML = ""; payloadValue = null; return; }
+    const sr = +$("gb-srcrow").value;
+    const v = D.rows ? D.rows[sr] : undefined;
+    if (v === undefined) {
+      payloadValue = null;
+      el.innerHTML = `<span class="warn">row ${sr} is not in the loaded dump — ` +
+        `run a full dump first (⟳ on the Fuse Explorer tab)</span>`;
+    } else if (typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) {
+      payloadValue = null;
+      el.innerHTML = `<span class="warn">row ${sr} is blank in the dump — ` +
+        `nothing to re-apply</span>`;
+    } else {
+      payloadValue = v;
+      const f = ffDecode(v);
+      el.innerHTML =
+        `<span class="mono">dump row ${sr} → 0x${v.toString(16).toUpperCase().padStart(8, "0")}</span> · ` +
+        `${f.iff ? '<b class="warn">IFF (invalidation — will be refused)</b>' : `FF ch${f.ch}·blk${f.blk}·d0x${f.data.toString(16)}`}` +
+        `${knownBlock(f)} — verify this is the record you want, then Check`;
+    }
+  }
+  $("gb-srcmode").onchange = () => {
+    const dump = $("gb-srcmode").value === "dump";
+    $("gb-dumpwrap").style.display = dump ? "" : "none";
+    $("gb-typedwrap").style.display = dump ? "none" : "";
+    renderSrcDecode();
+  };
+  $("gb-srcrow").oninput = renderSrcDecode;
+
   $("gb-check").onclick = async () => {
-    const row = +$("gb-row").value, value = $("gb-value").value.trim();
+    const row = +$("gb-row").value;
+    const fromDump = $("gb-srcmode").value === "dump";
+    const value = fromDump ? (payloadValue === null ? "0x0" : "0x" + payloadValue.toString(16)) : $("gb-value").value.trim();
     const mirror = $("gb-mirror").checked;
     const res = $("gb-checkresult");
     res.innerHTML = "checking…";
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
     payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
-    $("gb-old").value = fmt(j.current);
     const guards = (j.guards || []).map(g =>
       `<div class="guardrow"><span class="gs ${g.ok ? "ok" : "bad"}">${g.ok ? "✓" : "✗"}</span>` +
       `<span>${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +

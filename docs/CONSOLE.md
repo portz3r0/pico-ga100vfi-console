@@ -152,12 +152,17 @@ Prerequisite: a record derived from **this card's own defect masks**
 from another card. Plan the burn against the placement policy: the row map
 shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 
-1. **Burn payload**: enter row + value (and keep *burn mirror row too*
-   checked for paired rows). Press **Check row & guards**. The result shows
-   the row's current value (auto-filled as *expected old*), the 0→1 purity
-   check, the **placement policy verdict**, and every hardware guard.
-   Everything except the Goldilocks guards should be green at this point —
-   DSOV=1 is expected here.
+1. **Burn payload**: pick the **target row** (blank, inside the safe zone).
+   For the value, either type it, or — preferred — choose **value source:
+   from dump row** and enter the row of an existing record: the console
+   grabs the value from the loaded dump and shows it decoded
+   (`FF ch·blk·data`, plus the known block names) for you to verify —
+   no hex typing, no fat fingers. (Re-applying an existing record at a
+   later row is exactly how you override a block: last record wins.)
+   Press **Check row & guards**. The result shows the row's current value,
+   the 0→1 purity, the **placement policy verdict** (bit-5/IFF values are
+   refused), and every hardware guard. Everything except the Goldilocks
+   guards should be green at this point — DSOV=1 is expected here.
 2. Type `BURN` into the arm field and press **Arm (120 s)**. The countdown
    shows how long the arm token is valid.
 3. Campaign card: mode **burn payload on first Goldilocks**. (The burn runs
