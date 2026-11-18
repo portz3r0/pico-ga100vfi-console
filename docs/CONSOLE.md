@@ -149,8 +149,19 @@ Reverse with **Load nvidia** / **Remove blacklist** when you're done.
    flips to `goldilocks YES`, and (if you look at the Fuse Explorer tab) the
    feed shows `DSOV: 0x1 → 0x0`. The hit is also appended to
    `<state-dir>/goldilocks.jsonl` with the card serial.
-6. **■ Stop** ends a run early. A stopped or exhausted campaign leaves the
-   card in whatever state the last shot produced — re-run to try again.
+6. **Goldilocks window hold (default):** the campaign's **Goldilocks
+   window** dropdown defaults to **hold open — no revert**, so the run
+   ends with NVVDD still at glitch voltage and the shadow registers
+   writable — time to verify or burn from the Fuse Explorer tab. A
+   `window HELD open` chip appears; close the window with **⟲ Revert
+   VRM** (manual hand-back to PWM-VID) or a cold boot. Choosing
+   **auto-revert VRM** restores the old behavior (the campaign hands the
+   VRM back itself on exit). Misses, stops, and errors always revert
+   regardless of the dropdown — an interrupted run can never leave NVVDD
+   low.
+7. **■ Stop** ends a run early (the VRM is handed back). A stopped or
+   exhausted campaign leaves the card in whatever state the last shot
+   produced — re-run to try again.
 
 ### 4. Burn an FF record (the full sequence)
 
@@ -276,8 +287,9 @@ bricked.
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials |
 | GET | `/api/ff/layout` | FF region occupancy + policy zones |
 | GET | `/api/glitch/status` | campaign stats + log tail |
-| POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, records) |
+| POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, records, `no_revert` — default **true**: a Goldilocks result holds the window open) |
 | POST | `/api/glitch/stop` | stop campaign |
+| POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + Goldilocks target) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |

@@ -5,8 +5,9 @@ Endpoints:
   GET  /api/live         fast probe: status + shadow regs. PURE reads, safe any time.
   GET  /api/full         full 488-row dump via CMD_READ + hex window (manual only).
   GET  /api/glitch/status  campaign stats + log tail
-  POST /api/glitch/start   {params..., mode, records[], token}  (token needed to burn)
+  POST /api/glitch/start   {params..., mode, records[], token, no_revert}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open)
   POST /api/glitch/stop
+  POST /api/revert         {port?} — hand PMBus control back (undo a held window)
   GET  /api/burn/check?row=&value=&mirror=   guards + current row value (dry)
   POST /api/burn           {row, value, old, mirror, confirm, token}
   POST /api/arm            {phrase: "BURN"} -> 120s arm token
@@ -524,7 +525,8 @@ def arm_api(body):
 
 # ---------------------------------------------------------------- glitch campaign
 GLITCH: dict = {"running": False, "log": [], "stats": {}, "params": None,
-                "error": None, "finished": None, "result": None}
+                "error": None, "finished": None, "result": None,
+                "window_held": False}
 glitch_lock = threading.Lock()
 glitch_stop = threading.Event()
 
@@ -694,10 +696,26 @@ def campaign_worker(params, records):
         with glitch_lock:
             GLITCH["error"] = str(e)
     finally:
-        try:
-            card.revert()          # AGENTS.md rule 5: hand PMBus control back
-        except Exception as e:
-            glog(f"warn: VRM revert failed: {e}")
+        # A Goldilocks window is the entire point of the campaign: closing it
+        # with an automatic revert made the console useless for anything that
+        # must happen IN the window (verify, explore, standalone burn). With
+        # no_revert (default ON for console campaigns) a Goldilocks result now
+        # KEEPS the window open; every other ending (exhausted / stopped /
+        # error / no-goldilocks) still reverts so an interrupted run can never
+        # leave NVVDD low. Serial is always released so /api/revert can open
+        # the pico afterwards.
+        held = bool(stats["goldilocks"]) and params.get("no_revert", True)
+        with glitch_lock:
+            GLITCH["window_held"] = held
+        if held:
+            glog("GOLDILOCKS — window HELD OPEN (no VRM revert). PMBus stays "
+                 "handed-off: press Revert VRM when done or cold-boot. "
+                 "BAR0 reads stay live; the link fades on its own in minutes.")
+        else:
+            try:
+                card.revert()      # AGENTS.md rule 5: hand PMBus control back
+            except Exception as e:
+                glog(f"warn: VRM revert failed: {e}")
         try:
             card.close()
         except Exception:
@@ -737,6 +755,9 @@ def glitch_start(body):
         "delay": int(body.get("delay", 117)),
         "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
         "port": body.get("port", "/dev/ttyACM0"),
+        # Goldilocks keeps the window open unless the caller explicitly asks
+        # for the classic always-revert behaviour (misses/stops always revert).
+        "no_revert": bool(body.get("no_revert", True)),
     }
     if not (200 <= params["v_dip"] <= 500):
         # the firmware clamps pulses/pw/gap but not vd — a fat-fingered
@@ -785,7 +806,8 @@ def glitch_start(body):
         if GLITCH["running"]:        # re-check: validation above released the
             return {"error": "campaign already running"}  # lock for seconds
         GLITCH.update({"running": True, "log": [], "stats": {}, "params": params,
-                       "error": None, "finished": None, "result": None})
+                       "error": None, "finished": None, "result": None,
+                       "window_held": False})
     t = threading.Thread(target=campaign_worker, args=(params, records), daemon=True)
     with glitch_lock:
         GLITCH["thread"] = t
@@ -802,7 +824,40 @@ def glitch_status():
         return {"running": GLITCH["running"], "stats": GLITCH["stats"],
                 "error": GLITCH["error"], "finished": GLITCH["finished"],
                 "result": GLITCH["result"], "params": GLITCH["params"],
+                "window_held": GLITCH.get("window_held", False),
                 "log": GLITCH["log"][-120:]}
+
+
+def vrm_revert_now(body):
+    """Manual safety valve: hand PMBus control back after a HELD Goldilocks
+    window (or any handed-off state) without a cold boot. Only valid when no
+    campaign owns the pico serial."""
+    with glitch_lock:
+        if GLITCH["running"]:
+            return {"error": "campaign running — it reverts on its own when "
+                             "it ends; press Stop first"}
+    if CFG["mock"]:
+        return {"reverted": "mock"}
+    port = (body.get("port") or (GLITCH.get("params") or {}).get("port")
+            or "/dev/ttyACM0")
+    try:
+        from ..glitch import Card
+        card = Card(port)
+    except Exception as e:
+        return {"error": f"cannot open pico serial {port}: {e}"}
+    try:
+        reply = str(card.revert()).strip()
+        glog(f"manual VRM revert issued via /api/revert: {reply}")
+        with glitch_lock:
+            GLITCH["window_held"] = False
+        return {"reverted": True, "reply": reply}
+    except Exception as e:
+        return {"error": f"revert failed: {e}"}
+    finally:
+        try:
+            card.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- ports + gpus
@@ -1099,6 +1154,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/glitch/stop":
                 glitch_stop.set()
                 resp = {"stopping": True}
+            elif path == "/api/revert":
+                resp = vrm_revert_now(body)
             elif path == "/api/burn":
                 resp = burn_api(body)
             elif path == "/api/arm":

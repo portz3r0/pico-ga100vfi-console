@@ -837,8 +837,14 @@ LIVEBOOT = r"""
             <option value="classify">classify only — observe glitch states</option>
             <option value="burn">burn payload on first Goldilocks</option>
           </select></div>
+        <div class="field"><label>Goldilocks window</label>
+          <select id="gc-hold" title="keep the glitch window open when the campaign hits Goldilocks (skip the VRM revert). Misses/stops always revert.">
+            <option value="hold" selected>hold open — no revert (default)</option>
+            <option value="revert">auto-revert VRM</option>
+          </select></div>
         <button class="btn go" id="gc-start">▶ Start campaign</button>
         <button class="btn danger" id="gc-stop" disabled>■ Stop</button>
+        <button class="btn" id="gc-revert" disabled title="hand PMBus control back — closes a held window without a cold boot">⟲ Revert VRM</button>
         <span class="pill" id="gc-state">idle</span>
       </div>
       <div class="chips" id="gc-chips"></div>
@@ -1089,6 +1095,7 @@ LIVEBOOT = r"""
   function setCampaignUI(j) {
     $("gc-stop").disabled = !j.running;
     $("gc-start").disabled = !!j.running;
+    $("gc-revert").disabled = !!j.running || !j.window_held;
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));
     st.className = "pill " + (j.running || j.result === "goldilocks" ? "okl" :
@@ -1100,7 +1107,8 @@ LIVEBOOT = r"""
       `<span class="pill">lost <b>${s.lost || 0}</b></span>` +
       `<span class="pill">nack <b>${s.nack || 0}</b></span>` +
       `<span class="pill">dsov=0 <b>${s.dsov_zero || 0}</b></span>` +
-      `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>`;
+      `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
+      (j.window_held ? `<span class="pill okl">window HELD open — verify/burn now, then Revert VRM or cold-boot</span>` : "");
     if ((j.log || []).length) {
       const logEl = $("gc-log");
       logEl.textContent = j.log.join("\n");
@@ -1119,7 +1127,8 @@ LIVEBOOT = r"""
       min_v: +$("gc-vmin").value, max_v: +$("gc-vmax").value,
       v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
-      max_attempts: +$("gc-max").value, port: $("gc-port").value, mode};
+      max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
+      no_revert: $("gc-hold").value === "hold"};
     if (mode === "burn") {
       if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
       if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
@@ -1141,6 +1150,14 @@ LIVEBOOT = r"""
     pollGlitch();
   };
   $("gc-stop").onclick = () => jpost("/api/glitch/stop", {});
+  $("gc-revert").onclick = async () => {
+    if (!confirm("Revert VRM now — hand PMBus control back? This closes any\n" +
+                 "held Goldilocks window. Do it only after you are done with\n" +
+                 "in-window verification/burns.")) return;
+    const j = await jpost("/api/revert", {port: $("gc-port").value});
+    if (j.error) alert(j.error);
+    pollGlitch();
+  };
   setInterval(pollGlitch, 1000);
   pollGlitch();
 
