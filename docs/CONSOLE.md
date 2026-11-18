@@ -57,10 +57,22 @@ The live view of the card the service was started with.
 
 ![Fuse Explorer tab](../images/console-explorer.png)
 
-- **Live poll**: status + shadow registers, refreshed every 1–2 s from
-  *pure reads* — safe to leave open at any time, even mid-glitch. Any
-  register change flashes amber and lands in the activity feed; you will
-  see `DSOV` flip `1 → 0` the moment a glitch lands.
+- **Refresh model (default: calm)**: the heavy full-page register redraw
+  is **off by default** — pick a rate in the `page poll` selector only
+  when you want the register grid to live-redraw. What keeps refreshing
+  regardless: the **interpretation feed** (register-change diff, 2 s),
+  the **dmesg tail** (GPU-relevant lines, 2 s), the **Glitch campaign
+  log** (1 s), the **Drivers log**, and the **GPU Info monitor** (1 s,
+  user-adjustable 1–10 s or off). All pollers pause when the browser tab
+  is hidden.
+- **Safety guard**: while the `nvidia` driver is bound to the card, the
+  server-side BAR0 poller **pauses itself** (live indicator shows
+  `⏸ driver bound`). Raw BAR0 reads against a GSP-driven card can wedge
+  the GSP into a state only a full power-cycle recovers. Unload the
+  driver (Drivers tab) to resume live register viewing.
+- **Live feed**: status + shadow register changes flash amber and land in
+  the activity feed; you will see `DSOV` flip `1 → 0` the moment a
+  glitch lands.
 - **⟳ Run full dump**: all fuse rows 0–487 via the fuse-macro `CMD_READ`
   path, plus the hex window and dmesg, archived to
   `<state-dir>/dumps/<ts>/`. The page requests one automatically on
@@ -295,7 +307,8 @@ bricked.
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
-| GET | `/api/gpu` | nvidia-smi + lspci link |
+| GET | `/api/gpu` | nvidia-smi + lspci link state |
+| GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the selected GPU is currently in

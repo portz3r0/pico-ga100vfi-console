@@ -158,7 +158,18 @@ def poller(interval):
                     snap = {"error": f"mock failed: {e}"}  # the poll thread
             else:
                 try:
-                    snap = probe(CFG["bdf"])
+                    drv = driver_of(CFG["bdf"])
+                    if drv and "nvidia" in drv:
+                        # Raw BAR0 reads against a GSP-driven card can wedge
+                        # the GSP (WPR2 stuck -> cold-boot-only recovery).
+                        # Never probe while the nvidia driver is bound.
+                        snap = {"paused": f"driver '{drv}' bound — raw BAR0 "
+                                        f"live view disabled (Drivers tab -> "
+                                        f"Unload nvidia stack to resume)",
+                               "driver": drv, "bdf": CFG["bdf"],
+                               "ts": datetime.now().isoformat(timespec="seconds")}
+                    else:
+                        snap = probe(CFG["bdf"])
                 except Exception as e:
                     snap = {"error": f"probe failed: {e}"}
         finally:
@@ -1014,7 +1025,8 @@ def driver_op_api(body):
 
 # ---------------------------------------------------------------- gpu info
 GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
-              "utilization.gpu", "temperature.gpu", "power.draw", "power.limit",
+              "utilization.gpu", "utilization.memory",
+              "temperature.gpu", "power.draw", "power.limit",
               "fan.speed", "pcie.link.gen.current", "pcie.link.gen.max",
               "clocks.sm", "clocks.mem", "pstate"]
 
@@ -1038,6 +1050,14 @@ def gpu_info():
             if "LnkSta:" in l or "LnkCap:" in l]
     return {"nvidia": nvidia, "link": link,
             "ts": datetime.now().isoformat(timespec="seconds")}
+
+
+def dmesg_tail(n=80):
+    """Live GPU-relevant dmesg tail (nvidia/NVRM/Xid + this card's slot)."""
+    slot = CFG["bdf"].split(":", 1)[1] if CFG["bdf"].count(":") == 2 else CFG["bdf"]
+    pat = re.compile(r"nvidia|NVRM|Xid|ga100|" + re.escape(slot), re.I)
+    out = sh(["dmesg", "-T"], timeout=10) or ""
+    return [l for l in out.splitlines() if pat.search(l)][-n:]
 
 
 # ---------------------------------------------------------------- http
@@ -1090,7 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/live":
                 with state_lock:
                     snap = dict(STATE)
-                if "error" in snap or snap.get("status") is None:
+                if snap.get("paused"):
+                    self._send(200, json.dumps(snap), "application/json")
+                elif "error" in snap or snap.get("status") is None:
                     self._send(200, json.dumps(
                         {"error": snap.get("error", "no probe yet")}),
                         "application/json")
@@ -1128,6 +1150,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/gpu":
                 self._send(200, json.dumps(gpu_info(), default=str),
                            "application/json")
+            elif path == "/api/dmesg":
+                self._send(200, json.dumps(
+                    {"tail": dmesg_tail(),
+                     "ts": datetime.now().isoformat(timespec="seconds")},
+                    default=str), "application/json")
             else:
                 self._send(404, '{"error": "not found"}', "application/json")
         except BrokenPipeError:

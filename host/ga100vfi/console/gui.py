@@ -205,6 +205,18 @@ HTML = r"""<!DOCTYPE html>
   #feed { font-size: 11px; color: var(--muted-foreground); margin-top: 9px;
           max-height: 130px; overflow: auto; background: var(--bg-deep);
           border: 1px solid var(--border-soft); border-radius: 7px; padding: 8px 10px; }
+  /* tmon-style GPU monitor */
+  .gmon-row { display: flex; gap: 10px; padding: 2px 0; white-space: nowrap;
+              border-bottom: 1px solid var(--border-soft); }
+  .gmon-row.ghead { color: var(--muted-foreground); font-size: 10px;
+                    text-transform: uppercase; letter-spacing: .04em; }
+  .gmon-row.bad { color: #f87171; }
+  .gtime { color: var(--muted-foreground); min-width: 62px; }
+  .gcell { min-width: 92px; display: inline-block; }
+  .gbar { display: inline-block; width: 44px; height: 6px; margin-left: 5px;
+          vertical-align: middle; background: var(--border-soft);
+          border-radius: 3px; overflow: hidden; }
+  .gbar > span { display: block; height: 100%; background: var(--accent); }
 
   /* tabs + control panels */
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border);
@@ -657,16 +669,18 @@ LIVEBAR = """
   <div class="card" id="livebar">
     <div class="flexline" style="margin:0">
       <span id="liveind" class="pill warnl">connecting…</span>
-      <span class="pill">poll:
+      <span class="pill">page poll:
         <select id="pollsel">
+          <option value="0" selected>off</option>
           <option value="1000">1s</option>
-          <option value="2000" selected>2s</option>
+          <option value="2000">2s</option>
           <option value="5000">5s</option>
-          <option value="0">off</option>
         </select></span>
       <button class="btn" id="fulldump">⟳ Run full dump</button>
       <span class="note">full dump issues fuse CMD_READs — do not run it while a
-        glitch/burn tool is driving the card. The live poll is pure reads (safe any time).</span>
+        glitch/burn tool is driving the card. The heavy register redraw is off
+        by default; the interpretation feed, dmesg tail, campaign log and GPU
+        monitor keep refreshing on their own.</span>
     </div>
     <div id="feed" class="mono"></div>
   </div>
@@ -705,17 +719,18 @@ LIVEBOOT = r"""
     }
     prev = j;
   }
-  async function poll() {
+  async function fetchLive(heavy) {
     try {
       const r = await fetch("/api/live", { cache: "no-store" });
       const j = await r.json();
+      if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       D.status = j.status; D.shadow = j.shadow;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
       D.started = j.ts;
       diff(j);
-      renderLive();
+      if (heavy) renderLive();
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
   }
@@ -734,12 +749,30 @@ LIVEBOOT = r"""
     finally { b.disabled = false; }
   }
   document.getElementById("fulldump").onclick = fullDump;
+  let heavyTimer = null;
   document.getElementById("pollsel").onchange = e => {
-    if (timer) { clearInterval(timer); timer = null; }
+    if (heavyTimer) { clearInterval(heavyTimer); heavyTimer = null; }
     const ms = +e.target.value;
-    if (ms > 0) { poll(); timer = setInterval(poll, ms); }
-    else note("polling paused", "warnl");
+    localStorage.setItem("ga100.pollMs", String(ms));
+    if (ms > 0) { fetchLive(true); heavyTimer = setInterval(() => fetchLive(true), ms); }
+    else note("heavy page redraw paused — feed/dmesg/logs still live", "warnl");
   };
+  // interpretation feed: always-on light poll (diff-only, no heavy redraw)
+  setInterval(() => { if (!document.hidden) fetchLive(false); }, 2000);
+  // live dmesg tail (GPU-relevant lines)
+  async function dmesgTick() {
+    try {
+      const r = await fetch("/api/dmesg", { cache: "no-store" });
+      const j = await r.json();
+      if ((j.tail || []).length) {
+        D.dmesg_tail = j.tail.join("\n");   // keep renderStatic in sync
+        const el = document.getElementById("dmesg");
+        if (el) el.innerHTML = j.tail.map(esc).join("\n");
+      }
+    } catch (e) {}
+  }
+  dmesgTick();
+  setInterval(() => { if (!document.hidden) dmesgTick(); }, 2000);
 
   // ============================ TAB PANES ============================
   const $ = id => document.getElementById(id);
@@ -918,8 +951,7 @@ LIVEBOOT = r"""
     loadGpus();
     loadLayout();
   };
-  setInterval(loadGpus, 2000);
-  loadGpus();
+  loadGpus();   // refreshed on demand + when the Glitch tab is shown
 
   // ---- FF placement policy (row map + budget + live row hint) ----
   let ffLayout = null;
@@ -1233,44 +1265,121 @@ LIVEBOOT = r"""
   // ---------- GPU pane ----------
   $("tab-gpu").innerHTML = `
     <div class="card" id="gpu-banner"><div class="note">loading…</div></div>
+    <div class="card" style="margin-top:12px">
+      <div class="flexline" style="margin:0 0 6px 0">
+        <h3 style="margin:0">Live monitor</h3>
+        <span class="pill">refresh
+          <select id="gmon-sel">
+            <option value="1000" selected>1s</option>
+            <option value="2000">2s</option>
+            <option value="5000">5s</option>
+            <option value="10000">10s</option>
+            <option value="0">off</option>
+          </select></span>
+        <button class="btn" id="gmon-clear">clear</button>
+      </div>
+      <div id="gmon-head" class="mono gmon-row ghead"></div>
+      <div id="gmon" class="mono" style="max-height:360px; overflow-y:auto; font-size:11px"></div>
+    </div>
     <div class="grid" id="gpu-cards" style="margin-top:12px"></div>
     <div class="card" style="margin-top:12px"><h3>PCIe link (lspci)</h3>
       <div id="gpu-link" class="mono note"></div></div>`;
   const GPU_LABELS = {"name": "GPU", "driver_version": "driver", "memory.total": "VRAM total",
-    "memory.used": "VRAM used", "utilization.gpu": "util %", "temperature.gpu": "temp °C",
+    "memory.used": "VRAM used", "utilization.gpu": "util %",
+    "utilization.memory": "mem util %", "temperature.gpu": "temp °C",
     "power.draw": "power W", "power.limit": "limit W", "fan.speed": "fan %",
     "pcie.link.gen.current": "PCIe gen", "pcie.link.gen.max": "PCIe max gen",
     "clocks.sm": "SM MHz", "clocks.mem": "mem MHz", "pstate": "P-state"};
-  async function renderGpu() {
+  async function renderGpu(pre) {
+    let j = pre;
+    if (!j) { try { j = await jget("/api/gpu"); } catch (e) { return; } }
+    const n = j.nvidia || {};
+    if (n.error) {
+      $("gpu-banner").innerHTML = `<b class="warn">nvidia-smi:</b> ` +
+        `<span class="mono">${esc(n.error)}</span>`;
+      $("gpu-cards").innerHTML = "";
+    } else {
+      $("gpu-banner").innerHTML = `<b class="ok">nvidia-smi online</b> — ` +
+        `updated <span class="mono">${esc(j.ts)}</span>`;
+      $("gpu-cards").innerHTML = Object.entries(GPU_LABELS)
+        .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
+        .map(([k, l]) => `<div class="card stat"><div class="k">${l}</div>` +
+          `<div class="v mono">${esc(n[k])}</div></div>`).join("");
+    }
+    $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
+  }
+  // ---- tmon-style scrolling monitor ----
+  const gmonHist = [];
+  const gmonMs = () => +(localStorage.getItem("ga100.gmonMs") || "1000");
+  const gnum = v => { const x = parseFloat(v); return isNaN(x) ? null : x; };
+  function gcell(v, max, unit) {
+    if (v === null) return `<span class="gcell">—</span>`;
+    const w = Math.max(0, Math.min(100, (v / max) * 100));
+    return `<span class="gcell">${v}${unit}` +
+      `<span class="gbar"><span style="width:${w.toFixed(0)}%"></span></span></span>`;
+  }
+  const GMON_COLS = [["t", "time"], ["temp", "temp"], ["util", "util"],
+    ["memu", "mem"], ["pw", "W"], ["sm", "SM"], ["mc", "memclk"],
+    ["fan", "fan"], ["vram", "VRAM"]];
+  function gmonRender() {
+    $("gmon-head").innerHTML = GMON_COLS.map(
+      ([, l]) => `<span class="gcell gcol">${l}</span>`).join("");
+    $("gmon").innerHTML = gmonHist.map(s => {
+      if (s.err) return `<div class="gmon-row bad"><span class="gtime">${s.t}</span>` +
+        `⚠ ${esc(s.err)}</div>`;
+      return `<div class="gmon-row"><span class="gtime">${s.t}</span>` +
+        gcell(s.temp, 100, "°") + gcell(s.util, 100, "%") +
+        gcell(s.memu, 100, "%") + gcell(s.pw, s.pwmax, "") +
+        gcell(s.sm, 1500, "") + gcell(s.mc, 2000, "") +
+        gcell(s.fan, 100, "%") + gcell(s.vram, s.vrammax, "") + `</div>`;
+    }).join("");
+  }
+  async function gmonTick() {
     try {
       const j = await jget("/api/gpu");
+      renderGpu(j);
       const n = j.nvidia || {};
-      if (n.error) {
-        $("gpu-banner").innerHTML = `<b class="warn">nvidia-smi:</b> ` +
-          `<span class="mono">${esc(n.error)}</span>`;
-        $("gpu-cards").innerHTML = "";
-      } else {
-        $("gpu-banner").innerHTML = `<b class="ok">nvidia-smi online</b> — ` +
-          `updated <span class="mono">${esc(j.ts)}</span>`;
-        $("gpu-cards").innerHTML = Object.entries(GPU_LABELS)
-          .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
-          .map(([k, l]) => `<div class="card stat"><div class="k">${l}</div>` +
-            `<div class="v mono">${esc(n[k])}</div></div>`).join("");
+      const t = new Date().toTimeString().slice(0, 8);
+      if (n.error) { gmonHist.unshift({t, err: n.error}); }
+      else {
+        const lim = gnum(n["power.limit"]) || 300;
+        const tot = gnum(n["memory.total"]) || 81920;
+        gmonHist.unshift({t,
+          temp: gnum(n["temperature.gpu"]), util: gnum(n["utilization.gpu"]),
+          memu: gnum(n["utilization.memory"]), pw: gnum(n["power.draw"]),
+          pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
+          fan: gnum(n["fan.speed"]), vram: gnum(n["memory.used"]), vrammax: tot});
       }
-      $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
+      if (gmonHist.length > 90) gmonHist.pop();
+      gmonRender();
     } catch (e) {}
   }
-  let gpuTimer = null;
+  let gmonTimer = null;
+  function gmonStart() {
+    if (gmonTimer) { clearInterval(gmonTimer); gmonTimer = null; }
+    const ms = gmonMs();
+    if (ms > 0) { gmonTick(); gmonTimer = setInterval(
+      () => { if (!document.hidden) gmonTick(); }, ms); }
+  }
+  $("gmon-sel").value = String(gmonMs());
+  $("gmon-sel").onchange = e => {
+    localStorage.setItem("ga100.gmonMs", e.target.value); gmonStart();
+  };
+  $("gmon-clear").onclick = () => { gmonHist.length = 0; gmonRender(); };
   renderGpu();
 
   window.__onTabChange = name => {
-    if (gpuTimer) { clearInterval(gpuTimer); gpuTimer = null; }
-    if (name === "gpu") { renderGpu(); gpuTimer = setInterval(renderGpu, 5000); }
-    if (name === "glitch") loadLayout();
+    if (gmonTimer) { clearInterval(gmonTimer); gmonTimer = null; }
+    if (name === "gpu") { renderGpu(); gmonStart(); }
+    if (name === "glitch") { loadLayout(); loadGpus(); }
   };
 
-  const ms = +document.getElementById("pollsel").value;
-  fullDump().then(() => { if (ms > 0) timer = setInterval(poll, ms); });
+  const savedMs = +(localStorage.getItem("ga100.pollMs") || "0");
+  document.getElementById("pollsel").value = String(savedMs);
+  fullDump().then(() => {
+    fetchLive(true);
+    if (savedMs > 0) heavyTimer = setInterval(() => fetchLive(true), savedMs);
+  });
 })();
 """
 
