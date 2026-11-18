@@ -205,17 +205,32 @@ HTML = r"""<!DOCTYPE html>
   #feed { font-size: 11px; color: var(--muted-foreground); margin-top: 9px;
           max-height: 130px; overflow: auto; background: var(--bg-deep);
           border: 1px solid var(--border-soft); border-radius: 7px; padding: 8px 10px; }
-  /* tmon-style GPU monitor graphs */
-  .gmon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-               gap: 10px; }
-  .ggraph { background: var(--bg-deep); border: 1px solid var(--border-soft);
-            border-radius: 7px; padding: 8px 10px; }
-  .ggraph-head { display: flex; justify-content: space-between; align-items: baseline;
-                 font-size: 11px; margin-bottom: 4px; }
-  .ggl { color: var(--muted-foreground); }
-  .ggv { font-weight: 600; font-family: var(--mono, monospace); }
-  .gspark { width: 100%; height: 52px; display: block; }
-  .ggrid { stroke: var(--border-soft); stroke-width: 0.5; }
+  /* nvtop-style GPU monitor */
+  .nvhdr { display: flex; flex-wrap: wrap; gap: 14px; align-items: baseline;
+           padding: 4px 2px 10px; border-bottom: 1px solid var(--border-soft); }
+  .nvname { color: #22d3ee; font-weight: 700; }
+  .nvlbl { color: var(--muted-foreground); font-size: 11px; }
+  .nvval { font-family: var(--mono, monospace); font-size: 12px; }
+  .nvbar { display: inline-block; width: 170px; height: 8px; vertical-align: middle;
+           background: var(--border-soft); border-radius: 4px; overflow: hidden; }
+  .nvbar > span { display: block; height: 100%; }
+  .nvdev { margin: 10px 2px; line-height: 1.8; font-size: 12px; }
+  .nvplotwrap { display: flex; gap: 6px; }
+  .nvy { display: flex; flex-direction: column; justify-content: space-between;
+         font-size: 10px; color: var(--muted-foreground); text-align: right;
+         min-width: 24px; padding: 2px 0; }
+  .nvplot { position: relative; flex: 1; border: 1px solid var(--border);
+            background: var(--bg-deep); }
+  .nvsvg { width: 100%; height: 190px; display: block; }
+  .nvlegend { position: absolute; top: 4px; left: 8px; display: flex;
+              flex-direction: column; font-size: 10px; line-height: 1.5; }
+  .nvx { display: flex; justify-content: space-between; font-size: 10px;
+         color: var(--muted-foreground); margin: 2px 0 0 30px; }
+  table.nvproc { width: 100%; border-collapse: collapse; margin-top: 12px;
+                 font-size: 12px; }
+  table.nvproc th { background: #16a34a; color: #04140a; text-align: left;
+                    padding: 4px 8px; font-size: 11px; }
+  table.nvproc td { padding: 3px 8px; border-bottom: 1px solid var(--border-soft); }
   .gmon-err { color: #f87171; padding: 10px; }
 
   /* tabs + control panels */
@@ -1307,52 +1322,90 @@ LIVEBOOT = r"""
     }
     $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
   }
-  // ---- tmon-style live graphs ----
+  // ---- nvtop-style live monitor ----
   const gmonHist = [];
   const gmonMs = () => +(localStorage.getItem("ga100.gmonMs") || "1000");
   const gnum = v => { const x = parseFloat(v); return isNaN(x) ? null : x; };
-  const GMON_METRICS = [
-    {k: "util", label: "GPU util", unit: "%", max: 100, color: "#4ade80"},
-    {k: "memu", label: "Mem util", unit: "%", max: 100, color: "#38bdf8"},
-    {k: "temp", label: "Temp", unit: "°C", max: 100, color: "#f87171"},
-    {k: "pw", label: "Power", unit: " W", maxKey: "pwmax", dfltMax: 300, color: "#fbbf24"},
-    {k: "sm", label: "SM clock", unit: " MHz", max: 1500, color: "#a78bfa"},
-    {k: "mc", label: "Mem clock", unit: " MHz", max: 2000, color: "#f472b6"},
-    {k: "vram", label: "VRAM used", unit: " MiB", maxKey: "vrammax", dfltMax: 81920, color: "#34d399"},
-  ];
+  const CY = "#22d3ee", YE = "#eab308", GR = "#22c55e", MG = "#e879f9";
+  function pbar(pct, width) {
+    const p = Math.max(0, Math.min(1, (pct || 0) / 100));
+    const n = Math.round(p * width);
+    return "[" + `<span style="color:${GR}">${"|".repeat(n)}</span>` +
+      `<span style="color:var(--border)">${"|".repeat(width - n)}</span>` +
+      `<span class="nvval"> ${Math.round(pct)}%]</span>`;
+  }
+  function hbar(v, max, color) {
+    const w = max ? Math.max(0, Math.min(100, v / max * 100)) : 0;
+    return `<span class="nvbar"><span style="width:${w.toFixed(1)}%;background:${color}"></span></span>`;
+  }
+  function agoLabel(sec) {
+    if (sec >= 60) { const m = Math.floor(sec / 60), s = sec % 60;
+      return "-" + m + "m" + (s ? s + "s" : ""); }
+    return "-" + sec + "s";
+  }
   function gmonRender() {
-    const W = 200, H = 48;
+    const el = $("gmon");
     const last = gmonHist[0];
-    if (last && last.err) {
-      $("gmon").innerHTML = `<div class="gmon-err mono">⚠ ${esc(last.err)}</div>`;
-      return;
-    }
-    $("gmon").innerHTML = GMON_METRICS.map(m => {
-      const vals = [];
-      for (let i = gmonHist.length - 1; i >= 0; i--) {   // oldest -> newest
+    if (!last) { el.innerHTML = `<div class="note">no samples yet</div>`; return; }
+    if (last.err) { el.innerHTML = `<div class="gmon-err mono">⚠ ${esc(last.err)}</div>`; return; }
+    const utils = gmonHist.map(s => s.util).filter(v => v !== null && v !== undefined);
+    const avg = utils.length ? Math.round(utils.reduce((a, b) => a + b, 0) / utils.length) : 0;
+    const mx = utils.length ? Math.max(...utils) : 0;
+    const vp = last.vrammax ? last.vram / last.vrammax * 100 : 0;
+    const hdr = `<div class="nvhdr">` +
+      `<span class="nvname">● ${esc(last.name || "GPU")}</span>` +
+      `<span class="nvlbl">GPU</span><span class="nvval">avg ${avg}% max ${mx}%</span>` +
+      `<span class="nvlbl">VRAM</span>${hbar(last.vram, last.vrammax, GR)}` +
+      `<span class="nvval">${(last.vram / 1024).toFixed(1)}Gi / ${(last.vrammax / 1024).toFixed(1)}Gi` +
+      ` · ${((last.vrammax - last.vram) / 1024).toFixed(1)}Gi free · ${Math.round(vp)}%</span>` +
+      `<span class="nvval">POW ${last.pw ?? "—"}/${last.pwmax ?? "—"} W</span>` +
+      `<span class="nvval" style="color:${GR}">TEMP ${last.temp ?? "—"}°C</span>` +
+      `<span class="nvval" style="color:${MG}">PCIe GEN ${esc(last.gen || "?")}@${esc(last.lanes || "?")}x</span>` +
+      `</div>`;
+    const dev = `<div class="nvdev mono">` +
+      `<div><span style="color:${CY}">Device 0</span> <span class="nvval">[${esc(last.name || "")}]</span>` +
+      ` <span style="color:${MG}">PCIe GEN ${esc(last.gen || "?")}@${esc(last.lanes || "?")}x</span></div>` +
+      `<div><span style="color:${CY}">GPU</span> <span class="nvval">${last.sm ?? "—"}MHz</span>` +
+      ` <span style="color:${CY}">MEM</span> <span class="nvval">${last.mc ?? "—"}MHz</span>` +
+      ` <span style="color:${GR}">TEMP</span> <span class="nvval">${last.temp ?? "—"}°C</span>` +
+      ` <span style="color:${GR}">FAN</span> <span class="nvval">${last.fan ?? "—"}%</span>` +
+      ` <span style="color:${YE}">POW</span> <span class="nvval">${last.pw ?? "—"}/${last.pwmax ?? "—"} W</span></div>` +
+      `<div><span style="color:${CY}">GPU</span>${pbar(last.util, 24)}` +
+      `&nbsp;&nbsp;<span style="color:${YE}">MEM</span>${pbar(last.memu, 24)}</div>` +
+      `</div>`;
+    const W = 600, H = 190;
+    const series = k => { const a = [];
+      for (let i = gmonHist.length - 1; i >= 0; i--) {
         const s = gmonHist[i];
-        if (!s.err && s[m.k] !== null && s[m.k] !== undefined) vals.push(s[m.k]);
-      }
-      const max = m.maxKey ? ((last && last[m.maxKey]) || m.dfltMax) : m.max;
-      const cur = vals.length ? vals[vals.length - 1] : null;
-      let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="gspark">` +
-        `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" class="ggrid"/>` +
-        `<line x1="0" y1="2" x2="${W}" y2="2" class="ggrid"/>`;
-      if (vals.length > 1) {
-        const pts = vals.map((v, i) => {
-          const x = (i / (vals.length - 1)) * W;
-          const y = H - 2 - Math.max(0, Math.min(1, v / max)) * (H - 4);
-          return x.toFixed(1) + "," + y.toFixed(1);
-        });
-        svg += `<polygon points="${pts.join(" ")} ${W},${H} 0,${H}" fill="${m.color}" fill-opacity="0.14"/>`;
-        svg += `<polyline points="${pts.join(" ")}" fill="none" stroke="${m.color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
-      }
-      svg += `</svg>`;
-      return `<div class="ggraph"><div class="ggraph-head">` +
-        `<span class="ggl">${m.label}</span>` +
-        `<span class="ggv" style="color:${m.color}">${cur === null ? "—" : cur + m.unit}</span>` +
-        `</div>${svg}</div>`;
-    }).join("");
+        if (!s.err && s[k] !== null && s[k] !== undefined) a.push(s[k]);
+      } return a; };
+    const toPts = a => a.map((v, i) => {
+      const x = a.length > 1 ? (i / (a.length - 1)) * W : 0;
+      const y = H - Math.max(0, Math.min(1, v / 100)) * H;
+      return x.toFixed(1) + "," + y.toFixed(1); }).join(" ");
+    const u = series("util"), m = series("memu");
+    const winSec = Math.round((gmonHist.length - 1) * (gmonMs() || 1000) / 1000);
+    const xl = [0, 1, 2, 3, 4].map(f => {
+      const sec = Math.round(winSec * (1 - f / 4));
+      return `<span>${f === 4 ? "now" : agoLabel(sec)}</span>`; }).join("");
+    const plot = `<div class="nvplotwrap"><div class="nvy">` +
+      `<span>100</span><span>75</span><span>50</span><span>25</span><span>0</span>` +
+      `</div><div class="nvplot">` +
+      `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="nvsvg">` +
+      `<polyline points="${toPts(m)}" fill="none" stroke="${YE}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>` +
+      `<polyline points="${toPts(u)}" fill="none" stroke="${CY}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>` +
+      `</svg><div class="nvlegend">` +
+      `<span style="color:${CY}">GPU %</span><span style="color:${YE}">mem %</span>` +
+      `</div></div></div><div class="nvx">${xl}</div>`;
+    const apps = last.apps || [];
+    const tbl = `<table class="nvproc"><thead><tr><th>PID</th><th>USER</th>` +
+      `<th>DEV</th><th>GPU MEM</th><th>Command</th></tr></thead><tbody>` +
+      (apps.length ? apps.map(a => `<tr><td class="mono">${esc(a.pid)}</td>` +
+        `<td>${esc(a.user)}</td><td>0</td><td class="mono">${esc(a.mem)} MiB</td>` +
+        `<td class="mono">${esc(a.cmd)}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="note">no compute processes</td></tr>`) +
+      `</tbody></table>`;
+    el.innerHTML = hdr + dev + plot + tbl;
   }
   async function gmonTick() {
     try {
@@ -1364,11 +1417,13 @@ LIVEBOOT = r"""
       else {
         const lim = gnum(n["power.limit"]) || 300;
         const tot = gnum(n["memory.total"]) || 81920;
-        gmonHist.unshift({t,
+        gmonHist.unshift({t, name: n["name"],
           temp: gnum(n["temperature.gpu"]), util: gnum(n["utilization.gpu"]),
           memu: gnum(n["utilization.memory"]), pw: gnum(n["power.draw"]),
           pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
-          fan: gnum(n["fan.speed"]), vram: gnum(n["memory.used"]), vrammax: tot});
+          fan: gnum(n["fan.speed"]), vram: gnum(n["memory.used"]), vrammax: tot,
+          gen: n["pcie.link.gen.current"], lanes: n["pcie.link.width.current"],
+          apps: j.apps || []});
       }
       if (gmonHist.length > 120) gmonHist.pop();
       gmonRender();

@@ -1028,7 +1028,7 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
               "utilization.gpu", "utilization.memory",
               "temperature.gpu", "power.draw", "power.limit",
               "fan.speed", "pcie.link.gen.current", "pcie.link.gen.max",
-              "clocks.sm", "clocks.mem", "pstate"]
+              "pcie.link.width.current", "clocks.sm", "clocks.mem", "pstate"]
 
 
 def gpu_info():
@@ -1048,7 +1048,17 @@ def gpu_info():
         nvidia = {"error": first or "nvidia-smi failed"}
     link = [l.strip() for l in sh(["lspci", "-s", slot, "-vv"]).splitlines()
             if "LnkSta:" in l or "LnkCap:" in l]
-    return {"nvidia": nvidia, "link": link,
+    apps = []
+    aout = sh(["nvidia-smi", "--id=" + nvml_id,
+               "--query-compute-apps=pid,process_name,used_memory",
+               "--format=csv,noheader,nounits"], timeout=10) or ""
+    for line in aout.splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) >= 3:
+            user = (sh(["ps", "-o", "user=", "-p", p[0]], timeout=5) or "").strip()
+            apps.append({"pid": p[0], "user": user or "?",
+                        "cmd": p[1], "mem": p[2]})
+    return {"nvidia": nvidia, "link": link, "apps": apps,
             "ts": datetime.now().isoformat(timespec="seconds")}
 
 
