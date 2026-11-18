@@ -205,18 +205,18 @@ HTML = r"""<!DOCTYPE html>
   #feed { font-size: 11px; color: var(--muted-foreground); margin-top: 9px;
           max-height: 130px; overflow: auto; background: var(--bg-deep);
           border: 1px solid var(--border-soft); border-radius: 7px; padding: 8px 10px; }
-  /* tmon-style GPU monitor */
-  .gmon-row { display: flex; gap: 10px; padding: 2px 0; white-space: nowrap;
-              border-bottom: 1px solid var(--border-soft); }
-  .gmon-row.ghead { color: var(--muted-foreground); font-size: 10px;
-                    text-transform: uppercase; letter-spacing: .04em; }
-  .gmon-row.bad { color: #f87171; }
-  .gtime { color: var(--muted-foreground); min-width: 62px; }
-  .gcell { min-width: 92px; display: inline-block; }
-  .gbar { display: inline-block; width: 44px; height: 6px; margin-left: 5px;
-          vertical-align: middle; background: var(--border-soft);
-          border-radius: 3px; overflow: hidden; }
-  .gbar > span { display: block; height: 100%; background: var(--accent); }
+  /* tmon-style GPU monitor graphs */
+  .gmon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+               gap: 10px; }
+  .ggraph { background: var(--bg-deep); border: 1px solid var(--border-soft);
+            border-radius: 7px; padding: 8px 10px; }
+  .ggraph-head { display: flex; justify-content: space-between; align-items: baseline;
+                 font-size: 11px; margin-bottom: 4px; }
+  .ggl { color: var(--muted-foreground); }
+  .ggv { font-weight: 600; font-family: var(--mono, monospace); }
+  .gspark { width: 100%; height: 52px; display: block; }
+  .ggrid { stroke: var(--border-soft); stroke-width: 0.5; }
+  .gmon-err { color: #f87171; padding: 10px; }
 
   /* tabs + control panels */
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border);
@@ -1278,8 +1278,7 @@ LIVEBOOT = r"""
           </select></span>
         <button class="btn" id="gmon-clear">clear</button>
       </div>
-      <div id="gmon-head" class="mono gmon-row ghead"></div>
-      <div id="gmon" class="mono" style="max-height:360px; overflow-y:auto; font-size:11px"></div>
+      <div id="gmon" class="gmon-grid"></div>
     </div>
     <div class="grid" id="gpu-cards" style="margin-top:12px"></div>
     <div class="card" style="margin-top:12px"><h3>PCIe link (lspci)</h3>
@@ -1308,30 +1307,51 @@ LIVEBOOT = r"""
     }
     $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
   }
-  // ---- tmon-style scrolling monitor ----
+  // ---- tmon-style live graphs ----
   const gmonHist = [];
   const gmonMs = () => +(localStorage.getItem("ga100.gmonMs") || "1000");
   const gnum = v => { const x = parseFloat(v); return isNaN(x) ? null : x; };
-  function gcell(v, max, unit) {
-    if (v === null) return `<span class="gcell">—</span>`;
-    const w = Math.max(0, Math.min(100, (v / max) * 100));
-    return `<span class="gcell">${v}${unit}` +
-      `<span class="gbar"><span style="width:${w.toFixed(0)}%"></span></span></span>`;
-  }
-  const GMON_COLS = [["t", "time"], ["temp", "temp"], ["util", "util"],
-    ["memu", "mem"], ["pw", "W"], ["sm", "SM"], ["mc", "memclk"],
-    ["fan", "fan"], ["vram", "VRAM"]];
+  const GMON_METRICS = [
+    {k: "util", label: "GPU util", unit: "%", max: 100, color: "#4ade80"},
+    {k: "memu", label: "Mem util", unit: "%", max: 100, color: "#38bdf8"},
+    {k: "temp", label: "Temp", unit: "°C", max: 100, color: "#f87171"},
+    {k: "pw", label: "Power", unit: " W", maxKey: "pwmax", dfltMax: 300, color: "#fbbf24"},
+    {k: "sm", label: "SM clock", unit: " MHz", max: 1500, color: "#a78bfa"},
+    {k: "mc", label: "Mem clock", unit: " MHz", max: 2000, color: "#f472b6"},
+    {k: "vram", label: "VRAM used", unit: " MiB", maxKey: "vrammax", dfltMax: 81920, color: "#34d399"},
+  ];
   function gmonRender() {
-    $("gmon-head").innerHTML = GMON_COLS.map(
-      ([, l]) => `<span class="gcell gcol">${l}</span>`).join("");
-    $("gmon").innerHTML = gmonHist.map(s => {
-      if (s.err) return `<div class="gmon-row bad"><span class="gtime">${s.t}</span>` +
-        `⚠ ${esc(s.err)}</div>`;
-      return `<div class="gmon-row"><span class="gtime">${s.t}</span>` +
-        gcell(s.temp, 100, "°") + gcell(s.util, 100, "%") +
-        gcell(s.memu, 100, "%") + gcell(s.pw, s.pwmax, "") +
-        gcell(s.sm, 1500, "") + gcell(s.mc, 2000, "") +
-        gcell(s.fan, 100, "%") + gcell(s.vram, s.vrammax, "") + `</div>`;
+    const W = 200, H = 48;
+    const last = gmonHist[0];
+    if (last && last.err) {
+      $("gmon").innerHTML = `<div class="gmon-err mono">⚠ ${esc(last.err)}</div>`;
+      return;
+    }
+    $("gmon").innerHTML = GMON_METRICS.map(m => {
+      const vals = [];
+      for (let i = gmonHist.length - 1; i >= 0; i--) {   // oldest -> newest
+        const s = gmonHist[i];
+        if (!s.err && s[m.k] !== null && s[m.k] !== undefined) vals.push(s[m.k]);
+      }
+      const max = m.maxKey ? ((last && last[m.maxKey]) || m.dfltMax) : m.max;
+      const cur = vals.length ? vals[vals.length - 1] : null;
+      let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="gspark">` +
+        `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" class="ggrid"/>` +
+        `<line x1="0" y1="2" x2="${W}" y2="2" class="ggrid"/>`;
+      if (vals.length > 1) {
+        const pts = vals.map((v, i) => {
+          const x = (i / (vals.length - 1)) * W;
+          const y = H - 2 - Math.max(0, Math.min(1, v / max)) * (H - 4);
+          return x.toFixed(1) + "," + y.toFixed(1);
+        });
+        svg += `<polygon points="${pts.join(" ")} ${W},${H} 0,${H}" fill="${m.color}" fill-opacity="0.14"/>`;
+        svg += `<polyline points="${pts.join(" ")}" fill="none" stroke="${m.color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+      }
+      svg += `</svg>`;
+      return `<div class="ggraph"><div class="ggraph-head">` +
+        `<span class="ggl">${m.label}</span>` +
+        `<span class="ggv" style="color:${m.color}">${cur === null ? "—" : cur + m.unit}</span>` +
+        `</div>${svg}</div>`;
     }).join("");
   }
   async function gmonTick() {
@@ -1350,7 +1370,7 @@ LIVEBOOT = r"""
           pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
           fan: gnum(n["fan.speed"]), vram: gnum(n["memory.used"]), vrammax: tot});
       }
-      if (gmonHist.length > 90) gmonHist.pop();
+      if (gmonHist.length > 120) gmonHist.pop();
       gmonRender();
     } catch (e) {}
   }
