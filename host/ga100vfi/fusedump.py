@@ -87,8 +87,20 @@ SHADOW_REGS = {
     "STATUS_OPT_GPC":   0x820C1C,
     "STATUS_OPT_FBP":   0x820D38,
 }
-TPC_DISABLE_BASE = 0x820760   # 0x820760..0x82077C (TPC region)
-CTRL_TPC_BASE    = 0x820A40   # 0x820A40 + gpc*4, 8 GPCs
+# Per-GPC TPC masks: one word per GPC (8 GPCs), bit t = TPC t in that GPC,
+# bit SET = masked. GA100: 8 TPC per GPC, 2 SM per TPC.
+#   0x820760+gpc*4  TPC DEFECTIVE (fuse-derived dead silicon)
+#   0x820C38+gpc*4  effective TPC DISABLE (defective ⊆ disabled; the extra
+#                   bits are factory-disabled-but-healthy = unlock headroom)
+# (0x820760 was mislabelled "TPC_DISABLE" before 2026-11-19; the fuse-array
+# defect-offset table and the ⊆ relation on stock+burned dumps confirm it is
+# the defective array.)
+TPC_DEFECTIVE_BASE = 0x820760   # 0x820760..0x82077C, 8 GPCs
+TPC_DISABLE_BASE   = 0x820C38   # 0x820C38..0x820C54, 8 GPCs
+CTRL_TPC_BASE      = 0x820A40   # 0x820A40 + gpc*4, 8 GPCs (closed at DSOV=1)
+
+TPCS_PER_GPC = 8
+SM_PER_TPC = 2
 
 HEX_WIN_START = 0x820000
 HEX_WIN_END   = 0x824400     # covers everything above incl. FPF_ROW_SHADOW
@@ -102,6 +114,65 @@ KNOWN_GOOD_ROW0 = 0x53557C3D
 
 def bits(mask):
     return sorted(i for i in range(32) if (mask >> i) & 1)
+
+
+def tpc_summary(shadow):
+    """Per-GPC TPC/SM availability from a shadow-register dict.
+
+    Reads TPC_DEFECTIVE_GPC{i} (0x820760) and TPC_DISABLE_GPC{i}
+    (0x820C38), falling back to the legacy TPC_DISABLE_{i} key (which held
+    the 0x820760 word) for pre-2026-11-19 dumps.
+
+    Per GPC: defective TPCs are dead silicon; disabled-but-not-defective
+    TPCs are the unlock headroom. 'sm_max' is the post-unlock ceiling:
+    (8 - defective) * 2 SM for a GPC that is not itself GPC-defective,
+    0 for a defective GPC. 'sm_now' additionally accounts for the GPC
+    being floorswept (GPC_DISABLE) at boot.
+    """
+    gpc_def = shadow.get("GPC_DEFECTIVE", 0) or 0
+    gpc_dis = shadow.get("GPC_DISABLE", 0) or 0
+    gpcs, totals = [], {"sm_now": 0, "sm_max": 0, "sm_defective": 0,
+                       "sm_recoverable": 0, "tpc_defective": 0,
+                       "tpc_recoverable": 0, "have_data": False}
+    for g in range(8):
+        d = shadow.get(f"TPC_DEFECTIVE_GPC{g}")
+        if d is None:
+            d = shadow.get(f"TPC_DISABLE_{g}")   # legacy key = 0x820760 word
+        dis = shadow.get(f"TPC_DISABLE_GPC{g}")
+        if d is None and dis is None:
+            gpcs.append({"gpc": g, "available": False})
+            continue
+        d = (d or 0) & 0xFF
+        dis = ((dis if dis is not None else d) or 0) & 0xFF
+        ndef = bin(d).count("1")
+        ndis = bin(dis).count("1")
+        recov = max(ndis - ndef, 0)
+        gdead = (gpc_def >> g) & 1
+        gdis = (gpc_dis >> g) & 1
+        tpc_now = TPCS_PER_GPC - ndis
+        tpc_max = 0 if gdead else TPCS_PER_GPC - ndef
+        sm_now = 0 if gdis else tpc_now * SM_PER_TPC
+        sm_max = tpc_max * SM_PER_TPC
+        gpcs.append({
+            "gpc": g, "available": True,
+            "def": d, "dis": dis,   # raw masks (JS renderer reads these)
+            "defective_bits": bits(d), "disabled_bits": bits(dis),
+            "recoverable_bits": bits(dis & ~d),
+            "tpc_defective": ndef, "tpc_disabled": ndis,
+            "tpc_recoverable": recov, "tpc_now": tpc_now, "tpc_max": tpc_max,
+            "sm_now": sm_now, "sm_max": sm_max,
+            "sm_defective": ndef * SM_PER_TPC,
+            "gpc_defective": gdead, "gpc_disabled": gdis,
+        })
+        totals["have_data"] = True
+        totals["sm_now"] += sm_now
+        totals["sm_max"] += sm_max
+        totals["sm_defective"] += ndef * SM_PER_TPC
+        totals["sm_recoverable"] += (0 if gdead else recov) * SM_PER_TPC
+        totals["tpc_defective"] += ndef
+        totals["tpc_recoverable"] += 0 if gdead else recov
+    return {"gpcs": gpcs, "totals": totals,
+            "tpcs_per_gpc": TPCS_PER_GPC, "sm_per_tpc": SM_PER_TPC}
 
 
 def sh(argv, timeout=15):
@@ -250,7 +321,8 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         for name, off in SHADOW_REGS.items():
             shadow[name] = bar.rd(off)
         for i in range(8):
-            shadow[f"TPC_DISABLE_{i}"] = bar.rd(TPC_DISABLE_BASE + 4 * i)
+            shadow[f"TPC_DEFECTIVE_GPC{i}"] = bar.rd(TPC_DEFECTIVE_BASE + 4 * i)
+            shadow[f"TPC_DISABLE_GPC{i}"] = bar.rd(TPC_DISABLE_BASE + 4 * i)
             shadow[f"CTRL_TPC_GPC{i}"] = bar.rd(CTRL_TPC_BASE + 4 * i)
         res["shadow"] = dict(shadow)
         for name in ("GPC_DISABLE", "GPC_DEFECTIVE", "FBP_DISABLE",
@@ -320,6 +392,12 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
             "live_mem_gb": (12 - len(bits(shadow.get("FBP_DISABLE", 0)))) * 8,
             "max_mem_gb": (12 - len(bits(shadow.get("FBP_DEFECTIVE", 0)))) * 8,
         }
+        res["tpc"] = tpc_summary(shadow)
+        t = res["tpc"]["totals"]
+        log(f"  TPC/SM       defective {t['tpc_defective']} TPC "
+            f"({t['sm_defective']} SM) · recoverable {t['tpc_recoverable']} TPC "
+            f"({t['sm_recoverable']} SM) · SM now {t['sm_now']} → "
+            f"post-unlock ceiling {t['sm_max']}")
         fp_src = "".join(f"{shadow[k]:08x}" for k in
                          ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
                           "NVLINK_DEFECTIVE")) + str((sbfe or 0) & 1)

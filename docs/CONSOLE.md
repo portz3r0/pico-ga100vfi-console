@@ -81,6 +81,22 @@ The live view of the card the service was started with.
 - **Topology**: GPC/FBP floorsweep vs. defective masks, with a state
   selector (pre-glitch reference / intended / NOW) — dead silicon that is
   *enabled* is drawn red-hatched.
+- **TPC map — SM availability per GPC**: one row per GPC, 8 TPC cells
+  each (2 SM per TPC). Cell colours: **green** = enabled now, **yellow** =
+  disabled-but-healthy (unlock headroom), **red** = defective silicon
+  (never usable). Per-GPC line: `SM now · after unlock · defective SM
+  (+ recoverable)`; totals pills at the bottom.
+  - Sources: TPC **defective** array `0x820760 + gpc·4`, effective TPC
+    **disable** array `0x820C38 + gpc·4` (defective ⊆ disable; the extra
+    bits are factory-disabled-but-healthy).
+  - *After unlock* is the **fuse ceiling**: `(8 − defective TPC) × 2 SM`
+    per non-defective GPC. It assumes the GPC-level floorsweep is
+    unlocked too — the TPC mask is separate from `GPC_DISABLE`. Cells in
+    a floorswept or dead GPC are dimmed: their health is shown, but they
+    only run once the GPC itself is enabled.
+  - Note: a GPC can be unflagged in `GPC_DEFECTIVE` yet fully defective
+    at TPC granularity (e.g. GPC2 with all 8 TPCs masked) — the TPC map
+    exposes this; the GPC-level topology view cannot.
 - **Row explorer**: every fuse row with region colouring (MAIN / UNIQ /
   FPF / FF), pairing, and the verified FF-record decode
   (`chain`, `iff`, `block`, `data`). Click a row for its 32-bit breakdown.
@@ -293,7 +309,7 @@ bricked.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/live` | fast probe (pure reads) |
+| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) |
 | GET | `/api/full` | full row dump + hex window |
 | GET | `/api/ports` | serial ports present on the host (pico selector) |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials |

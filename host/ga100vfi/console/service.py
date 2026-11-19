@@ -133,9 +133,12 @@ def probe(bdf):
             status = {k: rd(o) for k, o in fd.STATUS_REGS.items()}
             shadow = {k: rd(o) for k, o in fd.SHADOW_REGS.items()}
             for i in range(8):
-                shadow[f"TPC_DISABLE_{i}"] = rd(fd.TPC_DISABLE_BASE + 4 * i)
+                shadow[f"TPC_DEFECTIVE_GPC{i}"] = rd(fd.TPC_DEFECTIVE_BASE + 4 * i)
+                shadow[f"TPC_DISABLE_GPC{i}"] = rd(fd.TPC_DISABLE_BASE + 4 * i)
                 shadow[f"CTRL_TPC_GPC{i}"] = rd(fd.CTRL_TPC_BASE + 4 * i)
-            return {"status": status, "shadow": shadow, "driver": driver_of(bdf),
+            return {"status": status, "shadow": shadow,
+                    "tpc": fd.tpc_summary(shadow),
+                    "driver": driver_of(bdf),
                     "bdf": bdf, "ts": datetime.now().isoformat(timespec="seconds")}
         finally:
             mm.close()

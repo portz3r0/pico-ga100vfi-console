@@ -44,6 +44,23 @@ def load_dump(dump_path):
             if m and int(m.group(2), 16):
                 hexnon.append([int(m.group(1), 16), int(m.group(2), 16)])
     d["hexnonzero"] = hexnon
+    # Backfill per-GPC TPC shadow keys from the hex window for dumps made
+    # before the TPC_DEFECTIVE_GPC/TPC_DISABLE_GPC keys existed (0x820760 =
+    # defective, 0x820C38 = effective disable).
+    sh = d.get("shadow")
+    if isinstance(sh, dict) and hexnon:
+        by_off = {off: val for off, val in hexnon}
+        for g in range(8):
+            sh.setdefault(f"TPC_DEFECTIVE_GPC{g}",
+                         by_off.get(0x820760 + 4 * g))
+            sh.setdefault(f"TPC_DISABLE_GPC{g}",
+                         by_off.get(0x820C38 + 4 * g))
+        if "tpc" not in d:
+            try:
+                from .. import fusedump as _fd
+                d["tpc"] = _fd.tpc_summary(sh)
+            except Exception:
+                pass
     return d
 
 
@@ -161,6 +178,31 @@ HTML = r"""<!DOCTYPE html>
   .dead  { background: rgba(248,81,73,.07); color: #b0706b; border-color: rgba(248,81,73,.22); }
   .deadon{ background: repeating-linear-gradient(45deg, rgba(248,81,73,.3) 0 7px, rgba(248,81,73,.08) 7px 14px);
            color: var(--bad); border-color: var(--bad); font-weight: 700; }
+
+  /* TPC map — per-GPC rows of 8 TPC cells (2 SM per TPC) */
+  .tpcrow { display: flex; align-items: center; gap: 10px; padding: 4px 0;
+            border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+  .tpcrow:last-child { border-bottom: none; }
+  .tpcglab { width: 92px; flex: none; font-weight: 600; font-size: 12px; }
+  .tpcglab .gstate { display: block; font-weight: 400; font-size: 10px;
+                     color: var(--muted-foreground); }
+  .tpccells { display: flex; gap: 4px; flex: none; }
+  .tpccell { width: 46px; height: 34px; border-radius: 6px; border: 1px solid var(--border);
+             display: inline-flex; flex-direction: column; align-items: center;
+             justify-content: center; font-size: 9px; background: var(--bg-deep);
+             font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .tpccell b { font-size: 10.5px; }
+  .tpccell.on   { background: rgba(63,185,80,.13); color: var(--ok);
+                  border-color: rgba(63,185,80,.4); }
+  .tpccell.recov { background: rgba(210,153,34,.12); color: var(--warn);
+                   border-color: rgba(210,153,34,.45); }
+  .tpccell.dead { background: rgba(248,81,73,.07); color: #b0706b;
+                  border-color: rgba(248,81,73,.25); }
+  .tpccell.goff { opacity: .45; }
+  .tpcstat { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
+  .tpcstat b { color: var(--foreground); }
+  .tpcstat .ok { color: var(--ok); } .tpcstat .warn { color: var(--warn); }
+  .tpcstat .bad { color: var(--bad); }
 
   .bits { display: flex; flex-wrap: wrap; gap: 3px; margin: 8px 0; }
   .bitcell { width: 25px; height: 21px; display: inline-flex; align-items: center;
@@ -331,6 +373,14 @@ __LIVEBAR__
   </div>
   <div class="card" id="topo"></div>
 
+  <h2>TPC map — SM availability per GPC <span class="note">(8 TPC per GPC · 2 SM per TPC)</span></h2>
+  <div class="legend">
+    <span><i class="sw on"></i>enabled now</span>
+    <span><i class="sw off"></i>disabled · healthy (unlock headroom)</span>
+    <span><i class="sw dead"></i>defective silicon (never usable)</span>
+  </div>
+  <div class="card" id="tpcmap"></div>
+
   <h2>Shadow registers</h2>
   <div class="scroll" id="shadow"></div>
 
@@ -392,7 +442,8 @@ const REGIONS = [
   { min: 96, max: 221, name: "FPF",  desc: "FPF region — production-writable config rows (96–221)" },
   { min: 222, max: 487, name: "FF",  desc: "fuseless-fuse region — boot-replayed records (222–487), last record per block wins" },
 ];
-const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max);
+const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max) ||
+  { min: r, max: r, name: "TAIL", desc: "rows beyond 487 — outside the documented row map" };
 
 // ---------------------------------------------------------------- renderers
 function renderMeta() {
@@ -495,6 +546,102 @@ function renderTopo() {
         `mean the card boots dead silicon (GFW hang at progress 0x1).</div>` : "");
 }
 
+// TPC map -----------------------------------------------------------------
+function computeTpc() {
+  // Mirror of fusedump.tpc_summary() for payloads without a precomputed
+  // "tpc" key (old static dumps). Legacy TPC_DISABLE_{g} held 0x820760.
+  const sh = D.shadow || {};
+  const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
+  const gpcs = [], totals = { sm_now: 0, sm_max: 0, sm_defective: 0,
+                              sm_recoverable: 0, tpc_defective: 0,
+                              tpc_recoverable: 0, have_data: false };
+  const pop = v => { let n = 0; while (v) { n += v & 1; v >>>= 1; } return n; };
+  for (let g = 0; g < 8; g++) {
+    let def = sh["TPC_DEFECTIVE_GPC" + g];
+    if (def == null) def = sh["TPC_DISABLE_" + g];
+    let dis = sh["TPC_DISABLE_GPC" + g];
+    if (def == null && dis == null) { gpcs.push({ gpc: g, available: false }); continue; }
+    def = ((def ?? 0) >>> 0) & 0xFF;
+    dis = (((dis == null ? def : dis)) >>> 0) & 0xFF;
+    const ndef = pop(def), ndis = pop(dis);
+    const recov = Math.max(ndis - ndef, 0);
+    const gdead = (gpcDef >> g) & 1, gdis = (gpcDis >> g) & 1;
+    const tpc_max = gdead ? 0 : 8 - ndef;
+    const sm_now = gdis ? 0 : (8 - ndis) * 2;
+    const row = { gpc: g, available: true, def, dis,
+                  tpc_defective: ndef, tpc_recoverable: recov,
+                  tpc_now: 8 - ndis, tpc_max,
+                  sm_now, sm_max: tpc_max * 2,
+                  gpc_defective: gdead, gpc_disabled: gdis };
+    gpcs.push(row);
+    totals.have_data = true;
+    totals.sm_now += sm_now;
+    totals.sm_max += tpc_max * 2;
+    totals.sm_defective += ndef * 2;
+    totals.sm_recoverable += gdead ? 0 : recov * 2;
+    totals.tpc_defective += ndef;
+    totals.tpc_recoverable += gdead ? 0 : recov;
+  }
+  return { gpcs, totals };
+}
+function renderTpc() {
+  const el = document.getElementById("tpcmap");
+  const sh = D.shadow || {};
+  if (sh.TPC_DEFECTIVE_GPC0 == null && sh.TPC_DISABLE_GPC0 == null &&
+      sh.TPC_DISABLE_0 == null && !(D.tpc && D.tpc.totals.have_data)) {
+    el.innerHTML = `<span class="note">waiting for TPC register data…</span>`;
+    return;
+  }
+  const T = (D.tpc && D.tpc.totals && D.tpc.totals.have_data) ? D.tpc : computeTpc();
+  let html = "";
+  for (const r of T.gpcs) {
+    if (!r || !r.available) {
+      html += `<div class="tpcrow"><div class="tpcglab">GPC${r ? r.gpc : "?"}` +
+        `<span class="gstate">no data</span></div></div>`;
+      continue;
+    }
+    const gdead = r.gpc_defective, gdis = r.gpc_disabled;
+    const gstate = gdead ? `<span class="gstate bad">GPC defective</span>`
+                 : gdis  ? `<span class="gstate warn">floorswept</span>`
+                         : `<span class="gstate ok">active</span>`;
+    let cells = "";
+    const defM = r.def ?? 0, disM = r.dis ?? 0;
+    for (let t = 0; t < 8; t++) {
+      const d = (defM >> t) & 1, z = (disM >> t) & 1;
+      const cls = d ? "dead" : (z ? "recov" : "on");
+      const lbl = d ? "defect" : (z ? "2 SM" : "2 SM");
+      cells += `<div class="tpccell ${cls}${(gdead || gdis) && !d ? " goff" : ""}" ` +
+        `title="GPC${r.gpc} TPC${t}: ${d ? "defective" : z ? "disabled, healthy — unlock headroom" : "enabled"}` +
+        `${gdead ? " (GPC dead)" : gdis ? " (GPC floorswept)" : ""}">` +
+        `<b>T${t}</b><span>${lbl}</span></div>`;
+    }
+    const smNow = r.sm_now, smMax = r.sm_max;
+    const recovSm = gdead ? 0 : r.tpc_recoverable * 2;
+    html += `<div class="tpcrow">` +
+      `<div class="tpcglab">GPC${r.gpc}${gstate}</div>` +
+      `<div class="tpccells">${cells}</div>` +
+      `<div class="tpcstat">` +
+        `SM now <b>${smNow}</b> · ` +
+        `after unlock <b class="${smMax ? "ok" : "bad"}">${smMax}</b> · ` +
+        `defective <b class="bad">${r.tpc_defective * 2} SM</b>` +
+        (recovSm ? ` · <span class="warn">+${recovSm} recoverable</span>` : "") +
+      `</div></div>`;
+  }
+  const t = T.totals;
+  html += `<div class="statline">` +
+    `<span class="pill">SM now: <b>${t.sm_now}</b></span>` +
+    `<span class="pill okl">SM after unlock (fuse ceiling): <b>${t.sm_max}</b></span>` +
+    `<span class="pill badl">defective: <b>${t.tpc_defective} TPC / ${t.sm_defective} SM</b></span>` +
+    `<span class="pill warnl">unlock headroom: <b>${t.tpc_recoverable} TPC / ${t.sm_recoverable} SM</b></span>` +
+    `</div>` +
+    `<div class="note" style="margin-top:8px">Post-unlock ceiling = (8 − defective TPC) × 2 SM per ` +
+    `non-defective GPC. It assumes the GPC-level floorsweep is unlocked too — the TPC disable mask ` +
+    `(0x820C38) is separate from GPC_DISABLE (0x820350). Cells in a floorswept/dead GPC are dimmed: ` +
+    `their health is shown, but they only run once the GPC itself is enabled. ` +
+    `Sources: TPC defective 0x820760+gpc·4 · TPC disable 0x820C38+gpc·4.</div>`;
+  el.innerHTML = html;
+}
+
 // shadow registers -------------------------------------------------------
 function renderShadow() {
   const SHOFF = {
@@ -519,11 +666,20 @@ function renderShadow() {
       `<td class="mono">{${bitsOf(v).join(",")}}</td><td class="note">${note}</td></tr>`;
   }
   for (let i = 0; i < 8; i++) {
-    const v = sh["TPC_DISABLE_" + i];
-    if (v) html += `<tr><td class="mono">TPC word ${i}</td>` +
+    const d = sh["TPC_DEFECTIVE_GPC" + i];
+    const z = sh["TPC_DISABLE_GPC" + i];
+    const legacy = sh["TPC_DISABLE_" + i];   // pre-2026-11-19: held 0x820760
+    if (d == null && z == null && legacy == null) continue;
+    const dv = d != null ? d : legacy;
+    html += `<tr><td class="mono">TPC_DEFECTIVE_GPC${i}</td>` +
       `<td class="mono note">0x${(0x820760 + i * 4).toString(16).toUpperCase()}</td>` +
-      `<td class="mono">${fmt(v)}</td><td class="mono">{${bitsOf(v).join(",")}}</td>` +
-      `<td class="note">TPC-level mask (mapping approximate)</td></tr>`;
+      `<td class="mono">${dv == null ? "—" : fmt(dv)}</td>` +
+      `<td class="mono">{${bitsOf(dv).join(",")}}</td>` +
+      `<td class="note">dead TPCs in GPC${i} (bit = TPC, 2 SM each)</td></tr>`;
+    if (z != null) html += `<tr><td class="mono">TPC_DISABLE_GPC${i}</td>` +
+      `<td class="mono note">0x${(0x820C38 + i * 4).toString(16).toUpperCase()}</td>` +
+      `<td class="mono">${fmt(z)}</td><td class="mono">{${bitsOf(z).join(",")}}</td>` +
+      `<td class="note">effective TPC disable — extra bits over defective = unlock headroom</td></tr>`;
   }
   document.getElementById("shadow").innerHTML = html + "</table>";
 }
@@ -650,7 +806,8 @@ function renderHex() {
 }
 
 function renderLive() {  // cheap: everything except rows/dmesg/hex/interp
-  renderMeta(); renderStatus(); renderVerdict(); renderTopo(); renderShadow();
+  renderMeta(); renderStatus(); renderVerdict(); renderTopo(); renderTpc();
+  renderShadow();
 }
 function renderAll() {
   renderLive(); renderRows(); renderInterp(); renderDmesg(); renderHex();
@@ -741,6 +898,7 @@ LIVEBOOT = r"""
       if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       D.status = j.status; D.shadow = j.shadow;
+      if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
       D.started = j.ts;
