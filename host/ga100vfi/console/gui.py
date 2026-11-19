@@ -224,6 +224,23 @@ HTML = r"""<!DOCTYPE html>
   .sev2 { border-left: 3px solid #58a6ff; }
   .sev3 { border-left: 3px solid var(--border); }
   .auditclose { float: right; }
+  /* record timeline */
+  .tl { margin: 6px 0 2px; padding-left: 4px; }
+  .tlstep { position: relative; padding: 5px 0 5px 24px; }
+  .tlstep::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0;
+                    width: 2px; background: var(--border-soft); }
+  .tlstep:first-child::before { top: 13px; }
+  .tlstep:last-child::before { bottom: auto; height: 13px; }
+  .tlstep .tlnode { position: absolute; left: 2px; top: 4px; font-size: 12px;
+                    color: var(--fg-subtle); }
+  .s-dis .tlnode, .s-dis2 .tlnode { color: var(--bad); }
+  .s-en .tlnode { color: var(--ok); }
+  .s-iff .tlnode { color: var(--warn); }
+  .tlst { font-weight: 600; }
+  .tlst.d { color: var(--bad); } .tlst.e { color: var(--ok); }
+  .tlst.n { color: var(--fg-subtle); font-weight: 400; }
+  .tlive { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; }
+  .tlive::before { display: none; }
   .tpcstat { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
   .tpcstat b { color: var(--foreground); }
   .tpcstat .ok { color: var(--ok); } .tpcstat .warn { color: var(--warn); }
@@ -717,20 +734,77 @@ function tpcWord(g, which) {   // which: "def" | "dis"
   if (hv) return { v: hv[1] >>> 0, src: "hex window @ " + hx(off) };
   return { v: null, src: "not captured in this dump" };
 }
-function ffRecordsFor(blk, bit) {
+function ffBlockRecords(blk) {
+  // All chain-1 records for a fuse block, row-ordered. OPT_* record data is
+  // NOT a raw disable mask: decoded mask = (data >> 3) & width.
   const out = [];
   for (const k of Object.keys(D.rows || {})) {
     const r = +k, v = D.rows[k];
     if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
     const f = ffDecode(v);
-    if (f.blk === blk && ((f.data >>> bit) & 1)) out.push({ r, f });
+    if (f.ch === 1 && f.blk === blk) out.push({ r, iff: f.iff, data: f.data });
   }
+  out.sort((a, b) => a.r - b.r);
   return out;
 }
-function arow(sev, reg, off, w, bit, impact, interp) {
+function maskBits(m) { const b = []; for (let i = 0; i < 12; i++) if ((m >> i) & 1) b.push(i); return b; }
+function timelineHtml(kind, unit) {
+  const isGpc = kind === "gpc";
+  const blk = isGpc ? 8 : 19;
+  const width = isGpc ? 0xFF : 0xFFF;
+  const nm = (isGpc ? "GPC" : "FBP") + unit;
+  const recs = ffBlockRecords(blk);
+  if (!recs.length) return "";
+  let prev = null;
+  let html = `<div class="note" style="margin-top:12px"><b>Record timeline — ${nm}</b> · ` +
+    `chain 1 · block ${blk} · decoded mask = data &gt;&gt; 3 · last record wins</div><div class="tl">`;
+  for (const rec of recs) {
+    const mask = (rec.data >>> 3) & width;
+    const bit = (mask >>> unit) & 1;
+    let cls, st, sc;
+    if (rec.iff) { cls = "s-iff"; sc = "n"; st = "IFF — invalidation record (refused by newer fuse logic)"; }
+    else if (bit && prev !== 1) { cls = "s-dis"; sc = "d"; st = nm + " DISABLED here"; }
+    else if (bit) { cls = "s-dis2"; sc = "d"; st = nm + " still disabled (no change)"; }
+    else if (prev === 1) { cls = "s-en"; sc = "e"; st = nm + " RE-ENABLED here — this is the unlock record"; }
+    else { cls = "s-none"; sc = "n"; st = nm + " not touched by this record"; }
+    const last = rec === recs[recs.length - 1] && !rec.iff;
+    html += `<div class="tlstep ${cls}"><span class="tlnode">${rec.iff ? "⚡" : "●"}</span>` +
+      `<div class="tlbody">row <b>${rec.r}</b> · ${rec.iff ? "IFF" : "FF"} · ` +
+      `data <span class="mono">0x${rec.data.toString(16).toUpperCase().padStart(4, "0")}</span> → ` +
+      `mask <span class="mono">0x${mask.toString(16).toUpperCase()}</span> {${maskBits(mask).join(",")}}` +
+      ` <span class="tlst ${sc}">${st}</span>` +
+      (last ? ` <span class="tag">LAST — EFFECTIVE</span>` : "") + `</div></div>`;
+    if (!rec.iff) prev = bit;
+  }
+  // reconcile with the live gate register
+  const lw = auditWord(isGpc ? AOFF.GPC_DISABLE : AOFF.FBP_DISABLE,
+                      isGpc ? "GPC_DISABLE" : "FBP_DISABLE");
+  if (lw.v != null) {
+    const lb = (lw.v >>> unit) & 1;
+    const defW = auditWord(isGpc ? AOFF.GPC_DEFECTIVE : AOFF.FBP_DEFECTIVE,
+                          isGpc ? "GPC_DEFECTIVE" : "FBP_DEFECTIVE");
+    const unitDead = defW.v != null && ((defW.v >>> unit) & 1);
+    const lastRec = recs.filter(r => !r.iff).pop();
+    const fuseBit = lastRec ? (((lastRec.data >>> 3) & width) >>> unit) & 1 : null;
+    const agree = fuseBit == null || fuseBit === lb;
+    const gateNote = unitDead
+      ? `— but ${nm} is DEFECTIVE silicon: the hardware gate dominates, the register value is moot.`
+      : agree ? "— consistent with the last fuse record"
+              : "DIFFERS from the fuse-replayed mask: the live register was changed after boot (unlock/clear). " +
+                "The live register is what actually gates the unit right now.";
+    html += `<div class="tlstep tlive"><span class="tlnode">▼</span><div class="tlbody">` +
+      `live <span class="mono">${isGpc ? "GPC_DISABLE" : "FBP_DISABLE"}</span> = ` +
+      `<span class="mono">${fmt(lw.v)}</span> → ${nm} register-level ` +
+      `<b class="${lb ? "warn" : unitDead ? "bad" : "ok"}">${lb ? "DISABLED" : "ENABLED"}</b> ` +
+      `<span class="tlst ${unitDead ? "d" : agree ? "e" : "d"}">${gateNote}</span></div></div>`;
+  }
+  return html + `</div>`;
+}
+function arow(sev, reg, off, w, bit, impact, interp, bv) {
   return { sev, reg, off, val: w.v, src: w.src,
            bit: bit == null ? null : bit,
-           bitval: (bit == null || w.v == null) ? null : (w.v >>> bit) & 1,
+           bitval: bv !== undefined ? bv
+             : (bit == null || w.v == null) ? null : (w.v >>> bit) & 1,
            impact, interp };
 }
 function auditFor(kind, g, t) {
@@ -771,11 +845,16 @@ function auditFor(kind, g, t) {
       "cannot be changed now. Caution: on stock 170HX the driver writes 0xFF here as part of the floorsweep — but on a " +
       "running card all healthy TPCs still execute with 0xFF here, confirming it is a control bitmap, not the effective mask.",
       `non-zero control word ${fmt(ct.v)} captured (register is closed at DSOV=1 — informational)`));
-    for (const rec of ffRecordsFor(8, g)) rows.push(arow(2, "FF record · OPT_GPC_DISABLE",
-      null, { v: rec.f.data, src: "fuse row " + rec.r }, g,
-      "SOURCE OF THE MASK — this fuse record is what produced the GPC_DISABLE value at boot. To change behavior you must append a new record (burn); editing registers won't override fuse history.",
-      `${rec.f.iff ? "IFF (invalidation) " : "FF "}chain1·block8 data=0x${rec.f.data.toString(16).toUpperCase()} ` +
-      `bit ${g} SET → this record floorswept GPC${g} (last record per block wins)`));
+    for (const rec of ffBlockRecords(8)) {
+      const m = (rec.data >>> 3) & 0xFF;
+      if (!((m >>> g) & 1)) continue;   // decoded mask must act on this GPC
+      rows.push(arow(2, "FF record · OPT_GPC_DISABLE",
+        null, { v: rec.data, src: "fuse row " + rec.r }, g,
+        "DISABLES this unit at boot — the decoded mask (data>>3) holds bit " + g +
+        ". To change behavior you must append a newer record (burn); editing registers won't override fuse history.",
+        `${rec.iff ? "IFF (invalidation) " : "FF "}chain1·block8 data=0x${rec.data.toString(16).toUpperCase()} ` +
+        `→ mask 0x${m.toString(16).toUpperCase()} bit ${g} SET → this record floorswept GPC${g} (last record per block wins)`, 1));
+    }
     verdict = dead ? `<b class="bad">DEAD</b> — GPC${g} is dead silicon; every bit above is consistent with that.`
       : dis ? `<b class="warn">FLOORSWEPT</b> — GPC${g} is disabled by mask but silicon is healthy.`
       : (defM !== 0 || headroom !== 0)
@@ -855,11 +934,16 @@ function auditFor(kind, g, t) {
         "HARDWARE-APPLIED MIRROR — FBIO is the complete mask (FBPA alone can miss bits). Read-only consequence; confirms full coverage of the defect.",
         `hardware-applied FBIO disable ${fmt(ie.v)} — FBIO is the complete mask (FBPA alone can miss bits).`));
     }
-    for (const rec of ffRecordsFor(19, f)) rows.push(arow(2, "FF record · OPT_FBP_DISABLE",
-      null, { v: rec.f.data, src: "fuse row " + rec.r }, f,
-      "SOURCE OF THE MASK — this fuse record produced the FBP_DISABLE value at boot. Changing behavior requires appending a new record (burn); register edits won't override fuse history.",
-      `${rec.f.iff ? "IFF (invalidation) " : "FF "}chain1·block19 data=0x${rec.f.data.toString(16).toUpperCase()} ` +
-      `bit ${f} SET → this record floorswept FBP${f} (last record per block wins)`));
+    for (const rec of ffBlockRecords(19)) {
+      const m = (rec.data >>> 3) & 0xFFF;
+      if (!((m >>> f) & 1)) continue;   // decoded mask must act on this FBP
+      rows.push(arow(2, "FF record · OPT_FBP_DISABLE",
+        null, { v: rec.data, src: "fuse row " + rec.r }, f,
+        "DISABLES this unit at boot — the decoded mask (data>>3) holds bit " + f +
+        ". To change behavior you must append a newer record (burn); register edits won't override fuse history.",
+        `${rec.iff ? "IFF (invalidation) " : "FF "}chain1·block19 data=0x${rec.data.toString(16).toUpperCase()} ` +
+        `→ mask 0x${m.toString(16).toUpperCase()} bit ${f} SET → this record floorswept FBP${f} (last record per block wins)`, 1));
+    }
     verdict = dead ? `<b class="bad">DEAD</b> — FBP${f} is missing silicon.`
       : dis ? `<b class="warn">FLOORSWEPT</b> — FBP${f} disabled by mask but healthy.`
             : `<b class="ok">ACTIVE</b> — no register in this dump holds a bit against FBP${f}.`;
@@ -888,6 +972,7 @@ function openAudit(kind, g, t) {
     }
     html += `</table>`;
   }
+  if (kind === "gpc" || kind === "fbp") html += timelineHtml(kind, g);
   document.getElementById("audit").innerHTML = html;
   document.getElementById("auditbg").classList.add("open");
   document.getElementById("auditclose").onclick = closeAudit;
