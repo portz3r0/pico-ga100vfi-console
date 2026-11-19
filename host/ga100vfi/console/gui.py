@@ -46,15 +46,22 @@ def load_dump(dump_path):
     d["hexnonzero"] = hexnon
     # Backfill per-GPC TPC shadow keys from the hex window for dumps made
     # before the TPC_DEFECTIVE_GPC/TPC_DISABLE_GPC keys existed (0x820760 =
-    # defective, 0x820C38 = effective disable).
+    # defective, 0x820C38 = effective disable). The window stores only
+    # non-zero words, so a covered-but-absent offset means zero — treat the
+    # arrays as fully present once the window reaches the last GPC word.
     sh = d.get("shadow")
     if isinstance(sh, dict) and hexnon:
         by_off = {off: val for off, val in hexnon}
+        covered = max(o for o, _ in hexnon) >= 0x820C54
         for g in range(8):
-            sh.setdefault(f"TPC_DEFECTIVE_GPC{g}",
-                         by_off.get(0x820760 + 4 * g))
-            sh.setdefault(f"TPC_DISABLE_GPC{g}",
-                         by_off.get(0x820C38 + 4 * g))
+            if covered:
+                sh.setdefault(f"TPC_DEFECTIVE_GPC{g}", by_off.get(0x820760 + 4 * g, 0))
+                sh.setdefault(f"TPC_DISABLE_GPC{g}", by_off.get(0x820C38 + 4 * g, 0))
+            else:
+                sh.setdefault(f"TPC_DEFECTIVE_GPC{g}",
+                             by_off.get(0x820760 + 4 * g))
+                sh.setdefault(f"TPC_DISABLE_GPC{g}",
+                             by_off.get(0x820C38 + 4 * g))
         if "tpc" not in d:
             try:
                 from .. import fusedump as _fd
@@ -570,7 +577,8 @@ function computeTpc() {
     if (def == null && dis == null) { gpcs.push({ gpc: g, available: false }); continue; }
     def = ((def ?? 0) >>> 0) & 0xFF;
     dis = (((dis == null ? def : dis)) >>> 0) & 0xFF;
-    const ndef = pop(def), ndis = pop(dis);
+    const eff = def | dis;   // defective TPCs never run, disable or not
+    const ndef = pop(def), ndis = pop(eff);
     const recov = Math.max(ndis - ndef, 0);
     const gdead = (gpcDef >> g) & 1, gdis = (gpcDis >> g) & 1;
     const tpc_max = gdead ? 0 : 8 - ndef;
@@ -612,7 +620,7 @@ function renderTpc() {
                  : gdis  ? `<span class="gstate warn">floorswept</span>`
                          : `<span class="gstate ok">active</span>`;
     let cells = "";
-    const defM = r.def ?? 0, disM = r.dis ?? 0;
+    const defM = r.def ?? 0, disM = r.eff ?? ((r.def ?? 0) | (r.dis ?? 0));
     for (let t = 0; t < 8; t++) {
       const d = (defM >> t) & 1, z = (disM >> t) & 1;
       const cls = d ? "dead" : (z ? "recov" : "on");

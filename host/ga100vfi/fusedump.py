@@ -144,8 +144,13 @@ def tpc_summary(shadow):
             continue
         d = (d or 0) & 0xFF
         dis = ((dis if dis is not None else d) or 0) & 0xFF
+        # Hardware can never run a defective TPC, even where the disable
+        # array doesn't cover it (observed on the A100-VBIOS bench card:
+        # disable reads 0 while 2 TPCs are defective). Effective mask is
+        # the union; on 170HX dumps defective ⊆ disable so this is a no-op.
+        eff = dis | d
         ndef = bin(d).count("1")
-        ndis = bin(dis).count("1")
+        ndis = bin(eff).count("1")
         recov = max(ndis - ndef, 0)
         gdead = (gpc_def >> g) & 1
         gdis = (gpc_dis >> g) & 1
@@ -155,9 +160,9 @@ def tpc_summary(shadow):
         sm_max = tpc_max * SM_PER_TPC
         gpcs.append({
             "gpc": g, "available": True,
-            "def": d, "dis": dis,   # raw masks (JS renderer reads these)
-            "defective_bits": bits(d), "disabled_bits": bits(dis),
-            "recoverable_bits": bits(dis & ~d),
+            "def": d, "dis": dis, "eff": eff,   # raw masks (JS renderer reads these)
+            "defective_bits": bits(d), "disabled_bits": bits(eff),
+            "recoverable_bits": bits(eff & ~d),
             "tpc_defective": ndef, "tpc_disabled": ndis,
             "tpc_recoverable": recov, "tpc_now": tpc_now, "tpc_max": tpc_max,
             "sm_now": sm_now, "sm_max": sm_max,
