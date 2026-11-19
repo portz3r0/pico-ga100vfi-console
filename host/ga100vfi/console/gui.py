@@ -553,6 +553,7 @@ function renderStateBtns() {
     curState = b.dataset.st;
     sb.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
     renderTopo();
+    renderTpc();
   });
 }
 function unit(cls, name, sub, audit) {
@@ -637,6 +638,11 @@ function computeTpc() {
   }
   return { gpcs, totals };
 }
+// CMP 170HX stock SKU factory TPC floorsweep (per-GPC disable words,
+// bit t = TPC t masked). From the reference card's pre-glitch array:
+// GPC1/2/7 fully masked, one TPC masked in each of the others.
+const STOCK_TPC_DIS = [0x01, 0xFF, 0xFF, 0x01, 0x01, 0x01, 0x01, 0xFF];
+const STOCK_GPC_DIS = 0x86;   // stock SKU GPC floorsweep: GPC 1, 2, 7
 function renderTpc() {
   const el = document.getElementById("tpcmap");
   const sh = D.shadow || {};
@@ -646,6 +652,9 @@ function renderTpc() {
     return;
   }
   const T = (D.tpc && D.tpc.totals && D.tpc.totals.have_data) ? D.tpc : computeTpc();
+  const gpcDef = sh.GPC_DEFECTIVE ?? 0;
+  const tot = { sm_now: 0, sm_max: 0, tpc_def: 0, sm_def: 0,
+                tpc_recov: 0, sm_recov: 0 };
   let html = "";
   for (const r of T.gpcs) {
     if (!r || !r.available) {
@@ -653,46 +662,78 @@ function renderTpc() {
         `<span class="gstate">no data</span></div></div>`;
       continue;
     }
-    const gdead = r.gpc_defective, gdis = r.gpc_disabled;
+    const g = r.gpc;
+    const gdead = (gpcDef >> g) & 1;
+    const def = (r.def ?? 0) & 0xFF;   // silicon truth — same in every state
+    let dis, gdis;
+    if (curState === "pre") {
+      dis = STOCK_TPC_DIS[g]; gdis = (STOCK_GPC_DIS >> g) & 1;
+    } else if (curState === "intended") {
+      dis = def; gdis = gdead;        // goal: everything not dead runs
+    } else {
+      dis = (r.eff ?? ((r.def ?? 0) | (r.dis ?? 0))) & 0xFF;
+      gdis = r.gpc_disabled ? 1 : 0;
+    }
+    const eff = def | dis;
+    const ndef = pop(def), ndis = pop(eff);
+    const recov = Math.max(ndis - ndef, 0);
+    const tpcMax = gdead ? 0 : 8 - ndef;
+    const smNow = gdis ? 0 : (8 - ndis) * 2;
+    const recovSm = gdead ? 0 : recov * 2;
     const gstate = gdead ? `<span class="gstate bad">GPC defective</span>`
                  : gdis  ? `<span class="gstate warn">floorswept</span>`
                          : `<span class="gstate ok">active</span>`;
     let cells = "";
-    const defM = r.def ?? 0, disM = r.eff ?? ((r.def ?? 0) | (r.dis ?? 0));
     for (let t = 0; t < 8; t++) {
-      const d = (defM >> t) & 1, z = (disM >> t) & 1;
+      const d = (def >> t) & 1, z = (eff >> t) & 1;
       const cls = d ? "dead" : (z ? "recov" : "on");
-      const lbl = d ? "defect" : (z ? "2 SM" : "2 SM");
+      const zLbl = curState === "pre"
+        ? "factory-disabled, healthy — the unlock prize"
+        : "disabled, healthy — unlock headroom";
       cells += `<div class="tpccell ${cls}${(gdead || gdis) && !d ? " goff" : ""}" ` +
-        `data-audit="tpc:${r.gpc}:${t}" ` +
-        `title="GPC${r.gpc} TPC${t}: ${d ? "defective" : z ? "disabled, healthy — unlock headroom" : "enabled"}` +
+        `data-audit="tpc:${g}:${t}" ` +
+        `title="GPC${g} TPC${t}: ${d ? "defective" : z ? zLbl : "enabled"}` +
         `${gdead ? " (GPC dead)" : gdis ? " (GPC floorswept)" : ""} — click for full audit">` +
-        `<b>T${t}</b><span>${lbl}</span></div>`;
+        `<b>T${t}</b><span>${d ? "defect" : "2 SM"}</span></div>`;
     }
-    const smNow = r.sm_now, smMax = r.sm_max;
-    const recovSm = gdead ? 0 : r.tpc_recoverable * 2;
     html += `<div class="tpcrow">` +
-      `<div class="tpcglab" data-audit="gpc:${r.gpc}" title="click for full GPC audit">GPC${r.gpc}${gstate}</div>` +
+      `<div class="tpcglab" data-audit="gpc:${g}" title="click for full GPC audit">GPC${g}${gstate}</div>` +
       `<div class="tpccells">${cells}</div>` +
       `<div class="tpcstat">` +
         `SM now <b>${smNow}</b> · ` +
-        `after unlock <b class="${smMax ? "ok" : "bad"}">${smMax}</b> · ` +
-        `defective <b class="bad">${r.tpc_defective * 2} SM</b>` +
+        `after unlock <b class="${tpcMax ? "ok" : "bad"}">${tpcMax * 2}</b> · ` +
+        `defective <b class="bad">${ndef * 2} SM</b>` +
         (recovSm ? ` · <span class="warn">+${recovSm} recoverable</span>` : "") +
       `</div></div>`;
+    tot.sm_now += smNow; tot.sm_max += tpcMax * 2;
+    tot.tpc_def += ndef; tot.sm_def += ndef * 2;
+    tot.tpc_recov += gdead ? 0 : recov; tot.sm_recov += recovSm;
   }
-  const t = T.totals;
+  const stateTag = { pre: "PRE-GLITCH (stock 170HX SKU floorsweep)",
+                     intended: "INTENDED (this card's defects — everything not dead runs)",
+                     now: "NOW (live registers)" }[curState];
   html += `<div class="statline">` +
-    `<span class="pill">SM now: <b>${t.sm_now}</b></span>` +
-    `<span class="pill okl">SM after unlock (fuse ceiling): <b>${t.sm_max}</b></span>` +
-    `<span class="pill badl">defective: <b>${t.tpc_defective} TPC / ${t.sm_defective} SM</b></span>` +
-    `<span class="pill warnl">unlock headroom: <b>${t.tpc_recoverable} TPC / ${t.sm_recoverable} SM</b></span>` +
+    `<span class="pill">state: <b>${stateTag}</b></span>` +
+    `<span class="pill">SM now: <b>${tot.sm_now}</b></span>` +
+    `<span class="pill okl">SM after unlock (fuse ceiling): <b>${tot.sm_max}</b></span>` +
+    `<span class="pill badl">defective: <b>${tot.tpc_def} TPC / ${tot.sm_def} SM</b></span>` +
+    `<span class="pill warnl">unlock headroom: <b>${tot.tpc_recov} TPC / ${tot.sm_recov} SM</b></span>` +
     `</div>` +
-    `<div class="note" style="margin-top:8px">Post-unlock ceiling = (8 − defective TPC) × 2 SM per ` +
-    `non-defective GPC. It assumes the GPC-level floorsweep is unlocked too — the TPC disable mask ` +
-    `(0x820C38) is separate from GPC_DISABLE (0x820350). Cells in a floorswept/dead GPC are dimmed: ` +
-    `their health is shown, but they only run once the GPC itself is enabled. ` +
-    `Sources: TPC defective 0x820760+gpc·4 · TPC disable 0x820C38+gpc·4.</div>`;
+    `<div class="note" style="margin-top:8px">Defective bits are this card's own silicon and are ` +
+    `identical in all three states. ` +
+    (curState === "pre"
+      ? `Pre-glitch uses the stock CMP 170HX SKU floorsweep: GPC_DISABLE 0x86 (GPC 1/2/7) plus the ` +
+        `factory TPC mask 0x01/0xFF pattern (29 TPC masked → 70 SM). The yellow cells are what the ` +
+        `unlock recovers.`
+      : curState === "intended"
+        ? `Intended = disable mask equals the card's defective mask: every unit that is not dead ` +
+          `silicon runs. No yellow cells by definition.`
+        : `Now reads the live registers: TPC defective 0x820760+gpc·4, effective disable ` +
+          `0x820C38+gpc·4 (effective = disable ∪ defective). Yellow cells remaining = ` +
+          `still-disabled-but-healthy = outstanding unlock headroom.`) +
+    ` Post-unlock ceiling = (8 − defective TPC) × 2 SM per non-defective GPC. Cells in a ` +
+    `floorswept/dead GPC are dimmed: their health is shown, but they only run once the GPC ` +
+    `itself is enabled.</div>`;
   el.innerHTML = html;
 }
 
