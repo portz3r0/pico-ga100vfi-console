@@ -206,6 +206,24 @@ HTML = r"""<!DOCTYPE html>
   .tpccell.dead { background: rgba(248,81,73,.07); color: #b0706b;
                   border-color: rgba(248,81,73,.25); }
   .tpccell.goff { opacity: .45; }
+  .unit, .tpccell, .tpcglab { cursor: pointer; }
+  .unit:hover, .tpccell:hover, .tpcglab:hover { outline: 1px solid var(--accent); }
+
+  /* unit audit modal */
+  #auditbg { display: none; position: fixed; inset: 0; z-index: 50;
+             background: rgba(4,8,14,.72); overflow: auto; padding: 36px 16px; }
+  #auditbg.open { display: block; }
+  #audit { max-width: 920px; margin: 0 auto; background: var(--card);
+           border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  #audit h3 { margin: 0 0 2px; font-size: 15px; }
+  #audit .verdictline { font-size: 12.5px; margin: 6px 0 12px; }
+  #audit table { margin-top: 4px; }
+  #audit td { vertical-align: top; }
+  .sev0 { border-left: 3px solid var(--bad); }
+  .sev1 { border-left: 3px solid var(--warn); }
+  .sev2 { border-left: 3px solid #58a6ff; }
+  .sev3 { border-left: 3px solid var(--border); }
+  .auditclose { float: right; }
   .tpcstat { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
   .tpcstat b { color: var(--foreground); }
   .tpcstat .ok { color: var(--ok); } .tpcstat .warn { color: var(--warn); }
@@ -421,6 +439,8 @@ __LIVEBAR__
     <div class="card"><div class="note">GPU info is available in live mode.</div></div>
   </section>
 
+  <div id="auditbg"><div id="audit"></div></div>
+
   <footer>
     <span>data: ga100vfi.fusedump + ga100vfi.console</span>
     <span>FF decode: chain=bits[4:0] iff=bit5 block=bits[15:6] data=bits[31:16]</span>
@@ -518,8 +538,9 @@ function renderStateBtns() {
     renderTopo();
   });
 }
-function unit(cls, name, sub) {
-  return `<div class="unit ${cls}"><b>${name}</b><span>${sub}</span></div>`;
+function unit(cls, name, sub, audit) {
+  return `<div class="unit ${cls}" data-audit="${audit}" ` +
+    `title="click for full register audit">${name ? `<b>${name}</b>` : ""}<span>${sub}</span></div>`;
 }
 function renderTopo() {
   const sh = D.shadow || {};
@@ -538,13 +559,13 @@ function renderTopo() {
     const dead = (gpcDef >> i) & 1, dis = (gpcDis >> i) & 1;
     const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
     const sub = dead ? (dis ? "dead · off" : "DEAD · ON!") : (dis ? "floorswept" : "active");
-    gpcHtml += unit(cls, "GPC" + i, sub);
+    gpcHtml += unit(cls, "GPC" + i, sub, "gpc:" + i);
   }
   for (let i = 0; i < 12; i++) {
     const dead = (fbpDef >> i) & 1, dis = (fbpDis >> i) & 1;
     const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
     const sub = dead ? (dis ? "dead · off" : "DUMMY · ON!") : (dis ? "floorswept" : "active");
-    fbpHtml += unit(cls, "FBP" + i, sub);
+    fbpHtml += unit(cls, "FBP" + i, sub, "fbp:" + i);
   }
   const liveG = 8 - pop(gpcDis), liveF = 12 - pop(fbpDis);
   document.getElementById("topo").innerHTML =
@@ -626,14 +647,15 @@ function renderTpc() {
       const cls = d ? "dead" : (z ? "recov" : "on");
       const lbl = d ? "defect" : (z ? "2 SM" : "2 SM");
       cells += `<div class="tpccell ${cls}${(gdead || gdis) && !d ? " goff" : ""}" ` +
+        `data-audit="tpc:${r.gpc}:${t}" ` +
         `title="GPC${r.gpc} TPC${t}: ${d ? "defective" : z ? "disabled, healthy — unlock headroom" : "enabled"}` +
-        `${gdead ? " (GPC dead)" : gdis ? " (GPC floorswept)" : ""}">` +
+        `${gdead ? " (GPC dead)" : gdis ? " (GPC floorswept)" : ""} — click for full audit">` +
         `<b>T${t}</b><span>${lbl}</span></div>`;
     }
     const smNow = r.sm_now, smMax = r.sm_max;
     const recovSm = gdead ? 0 : r.tpc_recoverable * 2;
     html += `<div class="tpcrow">` +
-      `<div class="tpcglab">GPC${r.gpc}${gstate}</div>` +
+      `<div class="tpcglab" data-audit="gpc:${r.gpc}" title="click for full GPC audit">GPC${r.gpc}${gstate}</div>` +
       `<div class="tpccells">${cells}</div>` +
       `<div class="tpcstat">` +
         `SM now <b>${smNow}</b> · ` +
@@ -656,6 +678,206 @@ function renderTpc() {
     `Sources: TPC defective 0x820760+gpc·4 · TPC disable 0x820C38+gpc·4.</div>`;
   el.innerHTML = html;
 }
+
+// unit audit ---------------------------------------------------------------
+// Click any GPC / FBP / TPC tile: every dump record that holds a bit against
+// that unit, sorted by impact. Rows are ONLY added when the register actually
+// has a bit set for this unit — zero/no-impact registers are not listed.
+// Effective FBPA/FBIO disable mirrors (0x820C18/0x820C14) are shown only
+// when the unit is defective, as corroboration that the mask covers it.
+const AOFF = {
+  GPC_DISABLE: 0x820350, FBP_DISABLE: 0x820364, FBPA_DISABLE: 0x820368,
+  GPC_DEFECTIVE: 0x8205C4, FBP_DEFECTIVE: 0x8205CC, FBPA_DEFECTIVE: 0x8205D0,
+  STATUS_OPT_GPC: 0x820C1C, STATUS_OPT_FBP: 0x820D38,
+  TPC_DEF: 0x820760, TPC_DIS: 0x820C38, CTRL_TPC: 0x820A40,
+  FBPA_DIS_EFF: 0x820C18, FBIO_DIS_EFF: 0x820C14,
+};
+const hx = o => "0x" + o.toString(16).toUpperCase().padStart(6, "0");
+function auditWord(off, key) {
+  const sh = D.shadow || {};
+  if (sh[key] != null) return { v: sh[key] >>> 0, src: "shadow." + key };
+  const hv = (D.hexnonzero || []).find(([o]) => o === off);
+  if (hv) return { v: hv[1] >>> 0, src: "hex window @ " + hx(off) };
+  return { v: null, src: "not captured in this dump" };
+}
+function tpcWord(g, which) {   // which: "def" | "dis"
+  const sh = D.shadow || {};
+  if (which === "def") {
+    const k = "TPC_DEFECTIVE_GPC" + g;
+    if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
+    const lk = "TPC_DISABLE_" + g;   // legacy key held the 0x820760 word
+    if (sh[lk] != null)
+      return { v: sh[lk] >>> 0, src: "shadow." + lk + " (legacy = 0x820760 word)" };
+  } else {
+    const k = "TPC_DISABLE_GPC" + g;
+    if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
+  }
+  const off = (which === "def" ? AOFF.TPC_DEF : AOFF.TPC_DIS) + 4 * g;
+  const hv = (D.hexnonzero || []).find(([o]) => o === off);
+  if (hv) return { v: hv[1] >>> 0, src: "hex window @ " + hx(off) };
+  return { v: null, src: "not captured in this dump" };
+}
+function ffRecordsFor(blk, bit) {
+  const out = [];
+  for (const k of Object.keys(D.rows || {})) {
+    const r = +k, v = D.rows[k];
+    if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
+    const f = ffDecode(v);
+    if (f.blk === blk && ((f.data >>> bit) & 1)) out.push({ r, f });
+  }
+  return out;
+}
+function arow(sev, reg, off, w, bit, interp) {
+  return { sev, reg, off, val: w.v, src: w.src,
+           bit: bit == null ? null : bit,
+           bitval: (bit == null || w.v == null) ? null : (w.v >>> bit) & 1,
+           interp };
+}
+function auditFor(kind, g, t) {
+  const rows = [];
+  let title, verdict;
+  if (kind === "gpc") {
+    title = "GPC" + g + " — full register audit";
+    const d = auditWord(AOFF.GPC_DEFECTIVE, "GPC_DEFECTIVE");
+    const z = auditWord(AOFF.GPC_DISABLE, "GPC_DISABLE");
+    const dead = d.v != null && ((d.v >>> g) & 1);
+    const dis  = z.v != null && ((z.v >>> g) & 1);
+    if (dead) rows.push(arow(0, "GPC_DEFECTIVE", AOFF.GPC_DEFECTIVE, d, g,
+      `bit ${g} SET → GPC${g} is dead silicon (fuse-derived). No burn can re-enable it.`));
+    if (dis) rows.push(arow(1, "GPC_DISABLE", AOFF.GPC_DISABLE, z, g,
+      dead ? `bit ${g} SET → floorsweep mask, consistent with the defect.`
+           : `bit ${g} SET → floorswept at boot but silicon is healthy — re-enableable.`));
+    const st = auditWord(AOFF.STATUS_OPT_GPC, "STATUS_OPT_GPC");
+    if (st.v != null && ((st.v >>> g) & 1)) rows.push(arow(2, "STATUS_OPT_GPC",
+      AOFF.STATUS_OPT_GPC, st, g,
+      `bit ${g} SET → fuse replay confirms GPC${g} disabled at boot (the latch to watch after a burn).`));
+    const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
+    const defM = td.v ?? 0, effM = (tz.v ?? defM) | defM;
+    if (defM !== 0) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, AOFF.TPC_DEF + 4 * g, td, null,
+      `defective TPCs {${bitsOf(defM).join(",")}} → ${pop(defM) * 2} SM permanently lost in this GPC`));
+    const headroom = effM & ~defM;
+    if (headroom !== 0) rows.push(arow(1, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, null,
+      `disabled-but-healthy TPCs {${bitsOf(headroom).join(",")}} → ${pop(headroom) * 2} SM unlock headroom`));
+    const ct = auditWord(AOFF.CTRL_TPC + 4 * g, "CTRL_TPC_GPC" + g);
+    if (ct.v != null && ct.v !== 0) rows.push(arow(2, "CTRL_TPC_GPC" + g, AOFF.CTRL_TPC + 4 * g, ct, null,
+      `non-zero control word ${fmt(ct.v)} captured (register is closed at DSOV=1 — informational)`));
+    for (const rec of ffRecordsFor(8, g)) rows.push(arow(2, "FF record · OPT_GPC_DISABLE",
+      null, { v: rec.f.data, src: "fuse row " + rec.r }, g,
+      `${rec.f.iff ? "IFF (invalidation) " : "FF "}chain1·block8 data=0x${rec.f.data.toString(16).toUpperCase()} ` +
+      `bit ${g} SET → this record floorswept GPC${g} (last record per block wins)`));
+    verdict = dead ? `<b class="bad">DEAD</b> — GPC${g} is dead silicon; every bit above is consistent with that.`
+      : dis ? `<b class="warn">FLOORSWEPT</b> — GPC${g} is disabled by mask but silicon is healthy.`
+      : (defM !== 0 || headroom !== 0)
+        ? `<b class="ok">ACTIVE</b> — GPC${g} itself is enabled; ` +
+          `defects live at TPC granularity inside it (see DEAD rows above).`
+        : `<b class="ok">ACTIVE</b> — no register in this dump holds a bit against GPC${g}.`;
+  } else if (kind === "tpc") {
+    title = `GPC${g} · TPC${t} — full register audit (2 SM)`;
+    const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
+    const dead = td.v != null && ((td.v >>> t) & 1);
+    const dis  = tz.v != null && ((tz.v >>> t) & 1);
+    if (dead) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, AOFF.TPC_DEF + 4 * g, td, t,
+      `bit ${t} SET → TPC${t} in GPC${g} is dead silicon. Its 2 SM can never run.`));
+    if (dis && !dead) rows.push(arow(1, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, t,
+      `bit ${t} SET but NOT defective → disabled-but-healthy: 2 SM recoverable headroom.`));
+    if (dis && dead) rows.push(arow(2, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, t,
+      `bit ${t} also set in the disable array — consistent with the defect.`));
+    const gd = auditWord(AOFF.GPC_DEFECTIVE, "GPC_DEFECTIVE");
+    const gz = auditWord(AOFF.GPC_DISABLE, "GPC_DISABLE");
+    if (gd.v != null && ((gd.v >>> g) & 1)) rows.push(arow(3, "GPC_DEFECTIVE",
+      AOFF.GPC_DEFECTIVE, gd, g,
+      `parent GPC${g} is defective — this TPC cannot run regardless of its own health.`));
+    else if (gz.v != null && ((gz.v >>> g) & 1)) rows.push(arow(3, "GPC_DISABLE",
+      AOFF.GPC_DISABLE, gz, g,
+      `parent GPC${g} is floorswept — this TPC only runs once the GPC itself is enabled.`));
+    verdict = dead ? `<b class="bad">DEAD</b> — TPC${t} is defective silicon.`
+      : dis ? `<b class="warn">HEADROOM</b> — healthy silicon, disabled; 2 SM recoverable.`
+            : `<b class="ok">ENABLED</b> — no register holds a bit against this TPC.`;
+  } else {   // fbp
+    const f = g;
+    title = "FBP" + f + " — full register audit";
+    const fd = auditWord(AOFF.FBP_DEFECTIVE, "FBP_DEFECTIVE");
+    const fz = auditWord(AOFF.FBP_DISABLE, "FBP_DISABLE");
+    const dead = fd.v != null && ((fd.v >>> f) & 1);
+    const dis = fz.v != null && ((fz.v >>> f) & 1);
+    if (dead) rows.push(arow(0, "FBP_DEFECTIVE", AOFF.FBP_DEFECTIVE, fd, f,
+      `bit ${f} SET → FBP${f} is dummy/missing silicon (no HBM stack). Never usable, −8 GB.`));
+    if (dis) rows.push(arow(1, "FBP_DISABLE", AOFF.FBP_DISABLE, fz, f,
+      dead ? `bit ${f} SET → floorsweep consistent with the defect.`
+           : `bit ${f} SET → floorswept but healthy — re-enableable (+8 GB).`));
+    const st = auditWord(AOFF.STATUS_OPT_FBP, "STATUS_OPT_FBP");
+    if (st.v != null && ((st.v >>> f) & 1)) rows.push(arow(2, "STATUS_OPT_FBP",
+      AOFF.STATUS_OPT_FBP, st, f,
+      `bit ${f} SET → fuse replay confirms FBP${f} disabled at boot.`));
+    const ad = auditWord(AOFF.FBPA_DEFECTIVE, "FBPA_DEFECTIVE");
+    const az = auditWord(AOFF.FBPA_DISABLE, "FBPA_DISABLE");
+    const fbpaDead = [];
+    for (const b of [2 * f, 2 * f + 1])
+      if (ad.v != null && ((ad.v >>> b) & 1)) {
+        fbpaDead.push(b);
+        rows.push(arow(0, "FBPA_DEFECTIVE", AOFF.FBPA_DEFECTIVE, ad, b,
+          `bit ${b} SET → FBPA${b} (inside FBP${f}) is defective.`));
+      }
+    for (const b of [2 * f, 2 * f + 1])
+      if (az.v != null && ((az.v >>> b) & 1) && !fbpaDead.includes(b))
+        rows.push(arow(1, "FBPA_DISABLE", AOFF.FBPA_DISABLE, az, b,
+          `bit ${b} SET → FBPA${b} floorswept but healthy.`));
+    // effective disable mirrors: shown ONLY when the unit is defective (policy)
+    if (fbpaDead.length || dead) {
+      const ae = auditWord(AOFF.FBPA_DIS_EFF, "FBPA_DISABLE_EFF");
+      const ie = auditWord(AOFF.FBIO_DIS_EFF, "FBIO_DISABLE_EFF");
+      if (ae.v != null) rows.push(arow(2, "FBPA_DISABLE_EFF", AOFF.FBPA_DIS_EFF, ae, null,
+        `hardware-applied FBPA disable ${fmt(ae.v)} — corroborates the defective FBPA bits.`));
+      if (ie.v != null) rows.push(arow(2, "FBIO_DISABLE_EFF", AOFF.FBIO_DIS_EFF, ie, null,
+        `hardware-applied FBIO disable ${fmt(ie.v)} — FBIO is the complete mask (FBPA alone can miss bits).`));
+    }
+    for (const rec of ffRecordsFor(19, f)) rows.push(arow(2, "FF record · OPT_FBP_DISABLE",
+      null, { v: rec.f.data, src: "fuse row " + rec.r }, f,
+      `${rec.f.iff ? "IFF (invalidation) " : "FF "}chain1·block19 data=0x${rec.f.data.toString(16).toUpperCase()} ` +
+      `bit ${f} SET → this record floorswept FBP${f} (last record per block wins)`));
+    verdict = dead ? `<b class="bad">DEAD</b> — FBP${f} is missing silicon.`
+      : dis ? `<b class="warn">FLOORSWEPT</b> — FBP${f} disabled by mask but healthy.`
+            : `<b class="ok">ACTIVE</b> — no register in this dump holds a bit against FBP${f}.`;
+  }
+  rows.sort((x, y) => (x.sev - y.sev) || ((x.off ?? 0) - (y.off ?? 0)));
+  return { title, verdict, rows };
+}
+const SEV_TAG = ["DEAD", "DISABLED", "CORROBORATION", "CONTEXT"];
+function openAudit(kind, g, t) {
+  const a = auditFor(kind, g, t);
+  let html = `<button class="btn auditclose" id="auditclose">close ✕</button>` +
+    `<h3>${esc(a.title)}</h3><div class="verdictline">${a.verdict}</div>`;
+  if (!a.rows.length) {
+    html += `<div class="note">No register in this dump holds a bit against this unit — ` +
+      `nothing is disabling or killing it.</div>`;
+  } else {
+    html += `<table><tr><th>impact</th><th>register</th><th>offset</th><th>value</th>` +
+      `<th>bit</th><th>source</th><th>interpretation</th></tr>`;
+    for (const r of a.rows) {
+      html += `<tr class="sev${r.sev}"><td><span class="tag ${r.sev === 0 ? "b-tag" : ""}">` +
+        `${SEV_TAG[r.sev]}</span></td><td class="mono">${esc(r.reg)}</td>` +
+        `<td class="mono note">${r.off == null ? "—" : hx(r.off)}</td>` +
+        `<td class="mono">${r.val == null ? "—" : fmt(r.val)}</td>` +
+        `<td class="mono">${r.bit == null ? "word" : r.bit + " = " + r.bitval}</td>` +
+        `<td class="note">${esc(r.src)}</td><td>${r.interp}</td></tr>`;
+    }
+    html += `</table>`;
+  }
+  document.getElementById("audit").innerHTML = html;
+  document.getElementById("auditbg").classList.add("open");
+  document.getElementById("auditclose").onclick = closeAudit;
+}
+function closeAudit() { document.getElementById("auditbg").classList.remove("open"); }
+document.addEventListener("click", e => {
+  if (e.target.closest("#auditclose")) return;
+  if (e.target.id === "auditbg") { closeAudit(); return; }
+  const el = e.target.closest("[data-audit]");
+  if (el) {
+    const p = el.dataset.audit.split(":");
+    openAudit(p[0], +p[1], p[2] == null ? null : +p[2]);
+  }
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeAudit(); });
 
 // shadow registers -------------------------------------------------------
 function renderShadow() {
