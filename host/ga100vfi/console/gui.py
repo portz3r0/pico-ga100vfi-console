@@ -498,7 +498,9 @@ function renderVerdict() {
 
 // topology ---------------------------------------------------------------
 let curState = "now";
-const STATES = { pre: "Pre-glitch reference", intended: "Intended", now: "NOW (live)" };
+const STATES = { pre: "Pre-glitch reference",
+                intended: "Intended (this card's defects)",
+                now: "NOW (live)" };
 function renderStateBtns() {
   const sb = document.getElementById("statebtns");
   sb.innerHTML = Object.entries(STATES).map(([k, l]) =>
@@ -516,9 +518,14 @@ function renderTopo() {
   const sh = D.shadow || {};
   const gpcDef = sh.GPC_DEFECTIVE ?? 0, fbpDef = sh.FBP_DEFECTIVE ?? 0;
   let gpcDis, fbpDis;
-  if (curState === "pre")      { gpcDis = 0x86; fbpDis = 0x852; }   // stock 170HX reference
-  else if (curState === "intended") { gpcDis = 0x02; fbpDis = 0x840; }
-  else { gpcDis = sh.GPC_DISABLE ?? 0; fbpDis = sh.FBP_DISABLE ?? 0; }
+  if (curState === "pre") {
+    gpcDis = 0x86; fbpDis = 0x852;   // stock CMP 170HX SKU floorsweep (factory, same per SKU)
+  } else if (curState === "intended") {
+    // Per-card, derived from THIS card's dump: the unlock goal is to
+    // re-enable every unit that is not defective, so the intended
+    // disable mask equals the card's own defective mask.
+    gpcDis = gpcDef; fbpDis = fbpDef;
+  } else { gpcDis = sh.GPC_DISABLE ?? 0; fbpDis = sh.FBP_DISABLE ?? 0; }
   let gpcHtml = "", fbpHtml = "";
   for (let i = 0; i < 8; i++) {
     const dead = (gpcDef >> i) & 1, dis = (gpcDis >> i) & 1;
