@@ -1039,6 +1039,16 @@ def gpu_info():
     # NVML wants the 8-hex-digit domain form for --id; slot keeps lspci happy
     nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
+    # NEVER call nvidia-smi/NVML while the module is absent: NVML auto-loads
+    # nvidia via udev, silently undoing a deliberate unload (bench fuse work
+    # requires the driver OFF). lspci is safe and still reported.
+    if not os.path.exists("/sys/module/nvidia"):
+        link = [l.strip() for l in sh(["lspci", "-s", slot, "-vv"]).splitlines()
+                if "LnkSta:" in l or "LnkCap:" in l]
+        return {"nvidia": {"error": "driver not loaded — nvidia-smi skipped "
+                                   "(NVML would auto-load the driver)"},
+                "link": link, "apps": [], "driver_loaded": False,
+                "ts": datetime.now().isoformat(timespec="seconds")}
     q = ",".join(GPU_FIELDS)
     out = sh(["nvidia-smi", "--id=" + nvml_id, "--query-gpu=" + q,
               "--format=csv,noheader,nounits"], timeout=10)
