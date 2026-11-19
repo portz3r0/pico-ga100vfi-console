@@ -89,6 +89,7 @@ is the captured-rail average and is **present only in the debug build**
   push-pull; driving it high would put 3.3 V on it).
 - After the dip the firmware restores `VOUT_COMMAND` to the stock code and hands the
   rail back to PWM-VID mode, so an interrupted run cannot leave NVVDD low.
-- The NVVDD ADC is read-only and never gates actuation, so the sense wire (GP42) is
+- The NVVDD ADC is read-only and never gates actuation, so the sense wire
+  (`PIN_NVVDD_ADC` in `firmware/board.h`: GP42 on RP2350B, GP26 on RP2350A) is
   optional. The ADC exists only in the debug build (`-DDEBUG=ON`); the normal build
-  never touches GP42 — just leave it unwired.
+  never touches the ADC pin — just leave it unwired.

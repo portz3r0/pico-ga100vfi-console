@@ -8,10 +8,15 @@
 // Actuation is I2C-only: VOUT_COMMAND steps on the MP2888B plus PEX_RST.
 // The glitch runs at the RP2350's stock 150 MHz — no overclock is needed.
 //
-// Debug build (-DDEBUG): adds a 400 MHz overclock and the NVVDD ADC (GP42)
+// Debug build (-DDEBUG): adds a 400 MHz overclock and the NVVDD ADC
+// (PIN_NVVDD_ADC from board.h: GP42 on RP2350B, GP26 on RP2350A)
 // for budget-oscilloscope functionality — a high-rate NVVDD trace via `y`
 // and a rail readout via `v`. The ADC never feeds the glitch decision.
-// Normal build: stock clocks, no ADC, GP42 stays unconnected.
+// The overclock raises only QMI M0 CLKDIV (8 at 400 MHz) with a masked write,
+// commits it with a no-allocate XIP dummy read plus __dsb/__isb before raising
+// clk_sys, and prints the bootrom's M0 timing in the banner; on a failed
+// clock switch it restores the saved CLKDIV and VREG_VOLTAGE_DEFAULT.
+// Normal build: stock clocks, no ADC, the ADC pin stays unconnected.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,22 +52,56 @@
 #define PWMVID_SWITCH_DELAY_US  500000
 
 // ------------------------------------------------------------------ clocks
+#ifdef DEBUG
+// M0 timing as the bootrom left it, and after the overclock change. Printed by
+// the startup banner in main() so the bootrom's flash timing is captured on
+// hardware instead of assumed (boot2's XIP setup is not embedded:
+// PICO_EMBED_XIP_SETUP defaults to 0 in the SDK, so the bootrom picks flash
+// timing at power-on).
+static uint32_t qmi_m0_timing_boot;
+static uint32_t qmi_m0_timing_now;
+
+// Change only M0 CLKDIV while executing from XIP. The QMI_M0_TIMING CLKDIV
+// note in the SDK's qmi.h permits changing CLKDIV while the QMI is active
+// (all other fields only when idle) and requires a dummy access, with
+// processor barriers, to complete before clk_sys changes. The read uses the
+// uncached XIP window (the SDK's xip.h calls addr[27:26]==1 the uncached
+// window), so it cannot be served from the XIP cache and reaches the QMI;
+// boot2_w25q080.S uses the same address for its dummy transfer.
+static void qmi_set_clkdiv(uint32_t clkdiv) {
+    hw_write_masked(&qmi_hw->m[0].timing,
+                    clkdiv << QMI_M0_TIMING_CLKDIV_LSB,
+                    QMI_M0_TIMING_CLKDIV_BITS);
+    __dsb();
+    (void)*(volatile const uint32_t *)XIP_NOCACHE_NOALLOC_BASE;
+    __dsb();
+    __isb();
+}
+#endif // DEBUG
+
 static void clock_init(void) {
 #ifdef DEBUG
     vreg_disable_voltage_limit();
     vreg_set_voltage(VREG_VSEL);
     sleep_us(1000);
 
-    uint32_t div = (TARGET_KHZ + 40000 - 1) / 40000;
-    if (div < 4) div = 4;
-    if (div > 8) div = 8;
-    qmi_hw->m[0].timing = (1u << QMI_M0_TIMING_COOLDOWN_LSB) |
-                          (div << QMI_M0_TIMING_RXDELAY_LSB) |
-                          (div << QMI_M0_TIMING_CLKDIV_LSB);
+    qmi_m0_timing_boot = qmi_hw->m[0].timing;
+    uint32_t clkdiv = (TARGET_KHZ + 49999) / 50000;  /* 400 MHz -> 8 (50 MHz SCK) */
+    if (clkdiv < 2) clkdiv = 2;
+    if (clkdiv > 8) clkdiv = 8;
+    qmi_set_clkdiv(clkdiv);
 
-    if (!set_sys_clock_khz(TARGET_KHZ, false))
-        printf("pwmvid: %u kHz unsupported, staying at %u MHz\n",
-               TARGET_KHZ, clock_get_hz(clk_sys) / 1000000);
+    if (!set_sys_clock_khz(TARGET_KHZ, false)) {
+        /* Clock unchanged: put CLKDIV back to the bootrom's divisor (not a
+           hard-coded value) and drop VREG. Unreachable at TARGET_KHZ=400000
+           (400 MHz = 1200 MHz VCO /3/1) but guards other TARGET_KHZ values.
+           No printf here: stdio_init_all() in main has not run yet; the
+           startup banner in main reports the actual MHz. */
+        qmi_set_clkdiv((qmi_m0_timing_boot & QMI_M0_TIMING_CLKDIV_BITS) >>
+                       QMI_M0_TIMING_CLKDIV_LSB);
+        vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
+    }
+    qmi_m0_timing_now = qmi_hw->m[0].timing;
 
     // clk_adc does not follow clk_sys on RP2350; point it at PLL_SYS so the
     // 96-cycle conversion scales with the core (~0.24 us/sample at 400 MHz).
@@ -264,7 +303,8 @@ static void profile_cmd(bool fast) {
 }
 
 // ------------------------------------------------------------ optional ADC
-// Diagnostic only: the glitch path never reads the rail. GP42 is sampled by a
+// Diagnostic only: the glitch path never reads the rail. PIN_NVVDD_ADC
+// (GP42 on RP2350B, GP26 on RP2350A) is sampled by a
 // free-running ADC into a buffer via DMA, giving a high-rate NVVDD trace for
 // `y` and the `v` readout. Built out (no -DDEBUG) these become no-ops and
 // VFI is unaffected.
@@ -566,6 +606,8 @@ int main(void) {
            clock_get_hz(clk_sys) / 1000000);
 #ifdef DEBUG
     printf(" + NVVDD ADC (GP%d) [debug build]\n", PIN_NVVDD_ADC);
+    printf("qmi m0 timing: boot=0x%08x now=0x%08x\n",
+           qmi_m0_timing_boot, qmi_m0_timing_now);
 #else
     printf("\n");
 #endif

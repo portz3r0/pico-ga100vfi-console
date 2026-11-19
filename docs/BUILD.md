@@ -32,6 +32,10 @@ ninja -C build-pico2
 # Debug build (400 MHz OC + NVVDD ADC trace; diagnostic only)
 cmake -S firmware -B build-debug -DPICO_BOARD=pico2_w -DDEBUG=ON -G Ninja
 ninja -C build-debug
+
+# Debug build on RP2350A (Pico 2)
+cmake -S firmware -B build-debug-pico2 -DPICO_BOARD=pico2 -DBOARD_RP2350A=ON -DDEBUG=ON -G Ninja
+ninja -C build-debug-pico2
 ```
 
 Outputs: `build/pwmvid.uf2` (main firmware), `build/detect.uf2` (standalone I2C probe).
@@ -53,6 +57,10 @@ default build has no ADC.
 
 **Before relying on a fresh build for a glitch campaign, flash it and confirm the
 host client still gets `MATCH` from the unlock and a sane `glitch done` line.**
+A debug build must additionally show `pwmvid: 400 MHz` in the banner and
+`clk=400 MHz` in the `v` output, plus a `qmi m0 timing: boot=0x… now=0x…` line
+whose `now` value ends in `08` (the 400 MHz CLKDIV). If the overclock fails, the
+banner reports the actual frequency instead.
 
 ## Pin map (RP2350B)
 
@@ -75,7 +83,7 @@ and `v` readout — nothing samples a floating pin:
 
 | | debug (`-DDEBUG=ON`) | normal (default) |
 |---|---|---|
-| banner | `… wiring: I2C + PEX_RST + NVVDD ADC (GP42) [debug build]` | `… wiring: I2C + PEX_RST` |
+| banner | `… wiring: I2C + PEX_RST + NVVDD ADC (GP<n>) [debug build]`, then `qmi m0 timing: boot=0x… now=0x…` (`GP<n>` = `PIN_NVVDD_ADC`: GP42 on RP2350B, GP26 on RP2350A) | `… wiring: I2C + PEX_RST` |
 | `v` | `clk=<n> MHz  nvvdd=<v> V  sample_ns=<f>  last reset: <…>` | `clk=<n> MHz  last reset: <…>` |
 | `glitch done` | includes `nvvdd=<v>` | `nvvdd` omitted |
 | `y` trace | `trace n=<n> sample_ns=<f>` + samples | `trace: built without DEBUG` |

@@ -9,8 +9,9 @@ pico_sdk_init()
 option(BOARD_RP2350A "Build for RP2350A (Pico 2)" OFF)
 option(BOARD_RP2350B "Build for RP2350B (Pico 2 W / Plus-W)" OFF)
 
-# DEBUG: budget oscilloscope build — 400 MHz overclock + NVVDD ADC (GP42)
-# for high-rate rail traces. Normal build: stock clocks, no ADC, no GP42 wire.
+# DEBUG: budget oscilloscope build — 400 MHz overclock + NVVDD ADC trace
+# (PIN_NVVDD_ADC in board.h: GP42 on RP2350B, GP26 on RP2350A).
+# Normal build: stock clocks, no ADC, no ADC-pin wire.
 option(DEBUG "Debug build: 400 MHz OC + NVVDD ADC trace" OFF)
 
 if(BOARD_RP2350A AND BOARD_RP2350B)

@@ -10,9 +10,8 @@
 // I2C_SLOW_KHZ for the slower edges.  If the lines stay low even then, the
 // chip is unpowered (its ESD diodes clamp the bus) or a line is shorted.
 //
-// Stock clocks only: pwmvid.c's 400 MHz core does not come up on this board
-// (after flashing it the device never enumerates USB), and detection needs
-// none of it.  No vreg, no PLL, no QMI changes.
+// Stock clocks only by choice: detection needs none of the debug build's
+// 400 MHz core / VREG / QMI changes.  No vreg, no PLL, no QMI changes.
 //
 // Build for the plain Pico 2:  cmake -S firmware -B build-pico2 -DPICO_BOARD=pico2 -DBOARD_RP2350A=ON
 
