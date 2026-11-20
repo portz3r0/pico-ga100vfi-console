@@ -474,7 +474,7 @@ __LIVEBAR__
   <footer>
     <span>data: ga100vfi.fusedump + ga100vfi.console</span>
     <span>FF decode: chain=bits[4:0] iff=bit5 block=bits[15:6] data=bits[31:16]</span>
-    <span>burns require arm token + pure 0→1 payload + live Goldilocks guards · FUSEWDATA untouched otherwise</span>
+    <span>burns require arm token + pure 0→1 payload + open burn window (EFP/WDATA_PLM auto-arm via SENSE_CTRL) · FUSEWDATA untouched otherwise</span>
   </footer>
 </div>
 
@@ -1509,7 +1509,8 @@ LIVEBOOT = r"""
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
         <button class="btn danger" id="gb-arm">Arm (120 s)</button>
         <span class="pill" id="gb-armstate">not armed</span>
-        <button class="btn danger" id="gb-burnnow" disabled>Burn now (Goldilocks GPU only)</button>
+        <button class="btn danger" id="gb-burnnow" disabled>Burn now (burn window only)</button>
+        <span class="pill" id="gb-windowstate" title="read-only burn-window verdict from the live poller (window checks; EFP/WDATA_PLM auto-arm at burn)">window: …</span>
         <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
     </div>
@@ -1554,8 +1555,9 @@ LIVEBOOT = r"""
     <div class="dangerstrip">
       Glitching dips NVVDD via the pico; burns are <b>irreversible OTP writes</b>.
       Burn mode requires an armed token, a pure 0→1 payload, matching row state and a
-      live Goldilocks window on the target GPU — all verified again server-side
-      before CMD_WRITE.
+      live burn window on the target GPU — all verified again server-side
+      before CMD_WRITE; EFP/WDATA_PLM are opened at burn time by the SENSE_CTRL
+      arm sequence, never by the poller or the check.
       FF records belong at rows 222–487 (chain=bits[4:0], iff=bit5, block=bits[15:6],
       data=bits[31:16]); a bit-exact readback does NOT prove the shadow latch followed —
       after any burn, watch STATUS_OPT_* on the Fuse Explorer tab.
@@ -1565,7 +1567,8 @@ LIVEBOOT = r"""
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
   let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
-  let targetBdf = null, targetGoldilocks = false;
+  let targetBdf = null;
+  let windowOk = false;           // live burn-window verdict (poller / fresh check)
 
   // B6: the Check verdict binds to the exact payload — any edit to the burn
   // inputs invalidates it (the check IS the safety contract).
@@ -1607,16 +1610,16 @@ LIVEBOOT = r"""
     const pill = $("gb-gpustate");
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
-      targetGoldilocks = false;
     } else if (g.goldilocks) {
-      pill.textContent = "● Goldilocks — burn window open";
-      pill.className = "pill okl"; targetGoldilocks = true;
+      // glitch-state approximation (4 read-only checks); the authoritative
+      // burn-window verdict is the separate gb-windowstate pill (/api/live).
+      pill.textContent = "● Goldilocks — glitch window";
+      pill.className = "pill okl";
     } else if (g.error) {
       pill.textContent = "⚠ " + g.error; pill.className = "pill badl";
-      targetGoldilocks = false;
     } else {
       pill.textContent = "locked (DSOV=" + g.dsov + ") — glitch first";
-      pill.className = "pill"; targetGoldilocks = false;
+      pill.className = "pill";
     }
     $("gb-gpuserial").innerHTML =
       (g.serial ? "SN " + esc(g.serial) : "no serial") +
@@ -1718,9 +1721,34 @@ LIVEBOOT = r"""
         el.textContent = "not armed"; el.className = "pill";
       }
     }
-    $("gb-burnnow").disabled = !payloadChecked || !armed || !targetGoldilocks;
+    // Burn gating keys off the burn WINDOW verdict (window checks only) —
+    // EFP/WDATA_PLM read 0 outside a burn by design; SENSE_CTRL opens them.
+    $("gb-burnnow").disabled = !payloadChecked || !armed || !windowOk;
   }
   setInterval(updateArmState, 1000);
+
+  // Truthful burn-window indicator: /api/live carries the read-only window
+  // verdict computed by the server poller (window_ok + window_checks).
+  async function pollWindow() {
+    try {
+      const j = await jget("/api/live");
+      if (j.window_ok !== undefined) windowOk = !!j.window_ok;
+      const el = $("gb-windowstate");
+      if (j.window_ok === undefined) {
+        el.textContent = "window: n/a"; el.className = "pill warnl";
+      } else if (windowOk) {
+        el.textContent = "● burn window open"; el.className = "pill okl";
+      } else {
+        const bad = (j.window_checks || []).filter(c => !c.ok)
+          .map(c => c.name).join(", ");
+        el.textContent = "burn window closed" + (bad ? " (" + bad + ")" : "");
+        el.className = "pill";
+      }
+    } catch (e) {}
+    updateArmState();
+  }
+  setInterval(pollWindow, 2000);
+  pollWindow();
 
   $("gb-arm").onclick = async () => {
     const j = await jpost("/api/arm", {phrase: $("gb-armphrase").value});
@@ -1783,31 +1811,42 @@ LIVEBOOT = r"""
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
     payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
+    windowOk = !!j.window_ok;
     updateArmState();   // re-evaluate Burn gating against the fresh check
+    // window checks are hard pass/fail; arm_pending bits open at burn time
+    // (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM) — amber.
     const guards = (j.guards || []).map(g =>
       `<div class="guardrow"><span class="gs ${g.ok ? "ok" : "bad"}">${g.ok ? "✓" : "✗"}</span>` +
       `<span>${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
       (g.want !== undefined ? ` (want ${typeof g.want === "number" ? fmt(g.want) : esc(String(g.want))})` : "") +
       `</span></div>`).join("");
+    const pending = (j.arm_pending || []).map(g =>
+      `<div class="guardrow"><span class="gs warn">•</span>` +
+      `<span class="warn">${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
+      (g.want !== undefined ? ` (want ${typeof g.want === "number" ? fmt(g.want) : esc(String(g.want))})` : "") +
+      ` — ${esc(g.note || "auto-armed at burn (SENSE_CTRL)")}</span></div>`).join("");
     const pol = j.policy;
     const polBlock = pol ? `<div class="${pol.ok ? "ok" : "bad"}" style="margin-top:6px">` +
       `<b>placement policy: ${pol.ok ? "OK — row is in the safe burn zone" : "VIOLATION"}</b>` +
       (pol.issues || []).map(i => `<div>• ${esc(i)}</div>`).join("") + `</div>` : "";
     res.innerHTML =
+      `<div><b class="${j.window_ok ? "ok" : "bad"}">${j.window_ok ? "SAFE TO BURN" : "REFUSED"}</b> — ` +
+      `burn window ${j.window_ok ? "open" : "not open"} (verdict keys off the window checks, not EFP/WDATA_PLM)</div>` +
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
       polBlock +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
+      (pending ? `<div class="guardlist">${pending}</div>` : "") +
       (pol && !pol.ok ? "" : `<div class="note" style="margin-top:6px">${esc(j.note || "")}</div>`);
     loadLayout();   // budget may have changed
   };
 
   $("gb-burnnow").onclick = async () => {
     if (!payloadChecked) { alert("Check the payload first"); return; }
-    if (!targetGoldilocks) { alert("Selected GPU is not in the Goldilocks state — " +
-      "run a glitch campaign first"); return; }
+    if (!windowOk) { alert("Burn window is not open — run a glitch campaign " +
+      "first (EFP/WDATA_PLM auto-arm at burn; the window itself must be open)"); return; }
     if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
                  payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) + "?")) return;
     const j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
@@ -1833,6 +1872,7 @@ LIVEBOOT = r"""
       `<span class="pill">nack <b>${s.nack || 0}</b></span>` +
       `<span class="pill">dsov=0 <b>${s.dsov_zero || 0}</b></span>` +
       `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
+      (s.burn_aborts ? `<span class="pill warnl">burn aborts <b>${s.burn_aborts}</b> (not final — attempts keep firing)</span>` : "") +
       (j.window_held ? `<span class="pill okl">window HELD open — verify/burn now, then Revert VRM or cold-boot</span>` : "");
     if ((j.log || []).length) {
       const logEl = $("gc-log");
@@ -1868,7 +1908,8 @@ LIVEBOOT = r"""
       if (!confirm("Start glitching and BURN the payload on first Goldilocks?\n" +
         "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
         payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
-        "OTP burns are IRREVERSIBLE.")) return;
+        "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
+        "verifies OK; a burn ABORT is not final — attempts keep firing.")) return;
     } else if (!confirm("Start glitch campaign?\n" +
         "the pico on port " + $("gc-port").value + " dips NVVDD on " +
         (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +

@@ -19,10 +19,13 @@ Safety model:
   * /api/live never writes to the card.
   * /api/full only issues fuse CMD_READs (FUSEWDATA never written).
   * Burns require: armed token (typed phrase, 120s TTL), current row value
-    matching the expected old value, pure 0->1 bit transition, and all
-    hardware guards (CRC=0x55, DSOV=0, SBFE=0, EFP=1, PLMs open, RWL=0,
-    FUSECTRL idle) — i.e. a live Goldilocks window. Standalone burns outside
-    a window are structurally refused by the guards.
+    matching the expected old value, pure 0->1 bit transition, and the burn
+    WINDOW (DSOV=0, CRC=0x55, loader 0x120060=0, PLMs open, DEBUGCTRL=0,
+    SWIFF=0, IFF_CTRL=0, FUSECTRL idle — mirrors ga100_burn.check_window).
+    The write path is then OPENED at burn time by the arm sequence
+    (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM — mirrors
+    ga100_burn.arm); EFP/WDATA_PLM reading 0 statically does NOT block a
+    burn. Standalone burns outside a window are structurally refused.
   * The glitch campaign can burn records IN-PROCESS on the first Goldilocks
     (the PCIe window dies seconds after the campaign loop returns, so a
     separate burn call would miss it). Campaign/burn logic mirrors
@@ -87,7 +90,19 @@ EN_SW_OVERRIDE, DEBUGCTRL, CRC_STATUS, EFP, DSOV = (0x820040, 0x820060, 0x820070
                                                     0x820078, 0x820084)
 FUSEWDATA_PLM, FUSECTRL_PLM, SBFE, PRIV_MASK = (0x8200F4, 0x8200F8, 0x821108,
                                                 0x8200FC)
-CMD_READ, CMD_WRITE = 1, 2
+PROGRAM_DIS, WDATA_SECURE = 0x82007C, 0x82048C
+SWIFF, IFF_CTRL = 0x820088, 0x820028          # fusedump EXTRA controller-state regs
+LOADER_120060 = 0x120060                      # loader must be quiescent (ga100_dump)
+CMD_READ, CMD_WRITE, CMD_SENSE = 1, 2, 3
+
+# opened by arm_window at burn time (SENSE_CTRL restores EFP; WDATA_SECURE=0
+# opens FUSEWDATA_PLM). A static read of these must NOT block a burn check
+# while the window itself is open — ga100_burn.arm() opens them on demand.
+ARM_PENDING = (("EFP", EFP, 1),
+               ("PROGRAM_DIS", PROGRAM_DIS, 0),
+               ("SBFE", SBFE, 0),
+               ("WDATA_SECURE", WDATA_SECURE, 0),
+               ("FUSEWDATA_PLM", FUSEWDATA_PLM, 0xFFFFFFFF))
 
 # FF record region (chain/block/value records; last record per block wins)
 FF_START, FF_END = 222, 487
@@ -136,7 +151,9 @@ def probe(bdf):
                 shadow[f"TPC_DEFECTIVE_GPC{i}"] = rd(fd.TPC_DEFECTIVE_BASE + 4 * i)
                 shadow[f"TPC_DISABLE_GPC{i}"] = rd(fd.TPC_DISABLE_BASE + 4 * i)
                 shadow[f"CTRL_TPC_GPC{i}"] = rd(fd.CTRL_TPC_BASE + 4 * i)
+            window_ok, window_checks = burn_window(rd)   # read-only verdict
             return {"status": status, "shadow": shadow,
+                    "window_ok": window_ok, "window_checks": window_checks,
                     "tpc": fd.tpc_summary(shadow),
                     "driver": driver_of(bdf),
                     "bdf": bdf, "ts": datetime.now().isoformat(timespec="seconds")}
@@ -243,28 +260,82 @@ def read_row_via(rd, wr, row):
     raise RuntimeError(f"CMD_READ timeout row {row}")
 
 
-def burn_guards(rd):
+def burn_window(rd):
+    """Static burn window, mirroring ga100_burn.check_window. READ-ONLY.
+    EFP / FUSEWDATA_PLM are deliberately NOT checked here — arm_window
+    opens them at burn time (SENSE_CTRL restores EFP; clearing
+    WDATA_SECURE opens FUSEWDATA_PLM). Returns (ok, checks)."""
     checks = []
-    for name, off, want in (("CRC_STATUS", CRC_STATUS, 0x55),
-                            ("DSOV", DSOV, 0),
-                            ("SBFE", SBFE, 0),
-                            ("EFP", EFP, 1),
-                            ("FUSEWDATA_PLM", FUSEWDATA_PLM, 0xFFFFFFFF),
-                            ("FUSECTRL_PLM", FUSECTRL_PLM, 0xFFFFFFFF)):
+
+    def chk(name, off, want):
         v = rd(off)
         checks.append({"name": name, "value": v, "want": want, "ok": v == want})
+
+    chk("DSOV", DSOV, 0)
+    chk("CRC_STATUS", CRC_STATUS, 0x55)
+    chk("LOADER_120060", LOADER_120060, 0)
+    chk("FUSECTRL_PLM", FUSECTRL_PLM, 0xFFFFFFFF)
+    chk("PRIV_MASK", PRIV_MASK, 0xFFFFFFFF)
+    chk("DEBUGCTRL", DEBUGCTRL, 0)
+    chk("SWIFF", SWIFF, 0)
+    chk("IFF_CTRL", IFF_CTRL, 0)
     ctrl = rd(FUSECTRL)
     checks.append({"name": "FUSECTRL idle", "value": ctrl,
                    "ok": ((ctrl >> 16) & 0x1F) == 4 and (ctrl & 3) == 0})
-    rwl = (rd(DEBUGCTRL) >> 1) & 1
-    checks.append({"name": "DEBUGCTRL RWL", "value": rwl, "ok": rwl == 0})
     return all(c["ok"] for c in checks), checks
 
 
+def _fusectrl_idle(rd, timeout_s):
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        c = rd(FUSECTRL)
+        if ((c >> 16) & 0x1F) == 4 and (c & 3) == 0:
+            return True
+        time.sleep(0.001)
+    return False
+
+
+def arm_window(rd, wr):
+    """Open the write path inside a verified window, mirroring ga100_burn.arm.
+    SENSE_CTRL (FUSECTRL=CMD_SENSE) restores EFP (PROGRAM_EN); it is issued
+    AT MOST ONCE per burn attempt (no-retry rule) and ONLY from real burn
+    execution — never from probe / poller / burn_check / fusedump paths.
+    Returns (ok, checks) with the window checks first, arm checks appended."""
+    ok, checks = burn_window(rd)
+    if not ok:
+        return False, checks          # never SENSE into a bad window
+    if rd(EFP) != 1:
+        wr(FUSECTRL, CMD_SENSE)
+        checks.append({"name": "SENSE_CTRL issued", "value": CMD_SENSE,
+                       "want": "idle", "ok": True})
+        if not _fusectrl_idle(rd, 2.0):
+            checks.append({"name": "SENSE idle", "value": rd(FUSECTRL),
+                           "want": "idle", "ok": False})
+            return False, checks
+        ok, rechecks = burn_window(rd)   # SENSE can disturb the window
+        checks.extend(rechecks)
+        if not ok:
+            return False, checks          # failed re-check is fatal
+    efp = rd(EFP)
+    checks.append({"name": "EFP", "value": efp, "want": 1, "ok": efp == 1})
+    pdis = rd(PROGRAM_DIS)
+    checks.append({"name": "PROGRAM_DIS", "value": pdis, "want": 0, "ok": pdis == 0})
+    if efp != 1 or pdis != 0:
+        return False, checks
+    wr(WDATA_SECURE, 0)                   # opens FUSEWDATA_PLM
+    wr(SBFE, 0)
+    plm = rd(FUSEWDATA_PLM)
+    checks.append({"name": "FUSEWDATA_PLM", "value": plm, "want": 0xFFFFFFFF,
+                   "ok": plm == 0xFFFFFFFF})
+    return plm == 0xFFFFFFFF, checks
+
+
 def burn_execute(rd, wr, row, value, old) -> dict:
-    """Guarded single-row burn. Returns report dict. NEVER retries."""
+    """Guarded single-row burn. Returns report dict. NEVER retries.
+    Window check then SENSE arm sequence (arm_window is the ONLY SENSE
+    caller); guards = window checks + arm checks, in order."""
     rep = {"row": row, "value": value, "old": old}
-    ok, checks = burn_guards(rd)
+    ok, checks = arm_window(rd, wr)
     rep["guards"] = checks
     if not ok:
         rep["result"] = "ABORT — guard failure (no Goldilocks window)"
@@ -429,7 +500,10 @@ def ff_policy(layout, row, mirror=False, value=None):
 
 
 def burn_check(row, value, mirror, bdf=None):
-    """Dry check: current row value, purity, live guard states. No fuse writes."""
+    """Dry check: current row value, purity, live burn-window verdict.
+    Read-only — never SENSE, never a fuse write. Arm bits (EFP, PROGRAM_DIS,
+    SBFE, WDATA_SECURE, FUSEWDATA_PLM) are reported as arm_pending (ok=None):
+    they open at burn time via arm_window and must not block the check."""
     if CFG["mock"]:
         return {"error": "burn check needs a live card — run the console without --mock"}
     bdf = bdf or CFG["bdf"]
@@ -454,15 +528,21 @@ def burn_check(row, value, mirror, bdf=None):
                 if en_sw != 0:
                     wr(EN_SW_OVERRIDE, en_sw)
                     time.sleep(0.05)
-            ok, checks = burn_guards(rd)
+            ok, checks = burn_window(rd)   # READ-ONLY: never SENSE, never write
+            arm_pending = [{"name": n, "value": rd(o), "want": w, "ok": None,
+                            "note": "auto-armed at burn via SENSE_CTRL"}
+                           for n, o, w in ARM_PENDING]
             pure = (value & cur) == cur and value != cur
             rows = [row]
             if mirror:
                 rows.append(row + 1 if row % 2 == 0 else row - 1)
             issues = ff_policy(layout, row, mirror, value)
             policy = {"ok": not issues, "issues": issues, "layout": layout}
-            note = "guards require a live Goldilocks window (DSOV=0); " \
+            note = "burn window closed (see red checks); " \
                    "use the campaign burn-on-goldilocks mode"
+            if ok:
+                note = "burn window OPEN — EFP/WDATA_PLM read 0 statically but " \
+                       "are auto-armed at burn via SENSE_CTRL (amber rows)"
             if policy["issues"]:
                 note = "PLACEMENT POLICY: " + "; ".join(policy["issues"])
             elif not (222 <= row <= 487):
@@ -470,7 +550,9 @@ def burn_check(row, value, mirror, bdf=None):
                         "burning record-format values in the main array / FPF "
                         "region has bricked cards. " + note)
             return {"row": row, "current": cur, "value": value, "bdf": bdf,
-                    "pure_0to1": pure, "guards_ok": ok, "guards": checks,
+                    "pure_0to1": pure, "window_ok": ok,
+                    "guards_ok": ok, "guards": checks,
+                    "arm_pending": arm_pending,
                     "policy": policy,
                     "rows_to_burn": rows, "note": note}
         finally:
@@ -534,7 +616,8 @@ def arm_api(body):
     ARM["token"] = uuid.uuid4().hex
     ARM["expires"] = time.time() + 120
     return {"token": ARM["token"], "expires_in": 120,
-            "note": "armed for 120s — burns still require a Goldilocks window"}
+            "note": "armed for 120s — burns verify the burn window and "
+                    "self-arm via SENSE_CTRL at execution"}
 
 
 # ---------------------------------------------------------------- glitch campaign
@@ -595,9 +678,21 @@ def _log_goldilocks(bdf, bar, att, attempts, v_dip, params):
         glog(f"warn: goldilocks.jsonl append failed: {e}")
 
 
+def burn_campaign_final(records, results):
+    """Pure decision for burn-on-goldilocks campaigns: does this Goldilocks
+    hit END the campaign? Classify mode (no records): always yes. Burn mode:
+    only when EVERY record burned VERIFY OK — an ABORT (e.g. window closed
+    mid-arm) or VERIFY FAIL is NOT final; the campaign keeps firing attempts
+    (no-retry: each attempt is a fresh glitch, not a re-burn)."""
+    if not records:
+        return True
+    return len(results) == len(records) and all(r == "VERIFY OK" for r in results)
+
+
 def campaign_worker(params, records):
     stats = {"attempts": 0, "valid": 0, "lost": 0, "nack": 0,
-             "dsov_zero": 0, "goldilocks": False, "burned": []}
+             "dsov_zero": 0, "goldilocks": False, "burned": [],
+             "burn_aborts": 0}
     with glitch_lock:
         GLITCH["stats"] = stats
     try:
@@ -683,28 +778,42 @@ def campaign_worker(params, records):
                                  f"priv=0x{v.priv_mask:08x}" +
                                  ("  << GOLDILOCKS" if v.passed else ""))
                             if v.passed:
-                                stats["goldilocks"] = True
                                 _log_goldilocks(bdf, bar, att, n, v_dip, params)
                                 if records:
                                     glog(">>> GOLDILOCKS — burning records now "
                                          "(same process, no further restore)")
+                                    results = []
                                     for rec in records:
                                         rrep = burn_execute(bar.rd32, bar.wr32,
                                                             rec["row"], rec["value"],
                                                             rec.get("old", 0))
-                                        glog(f"    row {rec['row']}: "
-                                             f"{rrep.get('result')}")
+                                        res = rrep.get("result")
+                                        glog(f"    row {rec['row']}: {res}")
                                         stats["burned"].append(
-                                            {"row": rec["row"],
-                                             "result": rrep.get("result")})
+                                            {"row": rec["row"], "result": res})
+                                        results.append(res)
+                                        if res != "VERIFY OK" and \
+                                                str(res).startswith("ABORT"):
+                                            stats["burn_aborts"] += 1
+                                    # Only an all-VERIFY-OK burn is final; an
+                                    # ABORT is logged, not counted, and the
+                                    # loop keeps firing attempts (re-glitch).
+                                    if burn_campaign_final(records, results):
+                                        stats["goldilocks"] = True
+                                    else:
+                                        glog(">>> burn not final — not holding "
+                                             "the window; continuing attempts")
+                                else:
+                                    stats["goldilocks"] = True
                 except Exception as e:
                     glog(f"[{n}] classify err {e}")
                 if planner and outcome != "goldilocks":
                     planner.record(v_dip, outcome)
                 if outcome == "lost":
                     stats["lost"] += 1
-                if outcome == "goldilocks":
-                    break
+                if outcome == "goldilocks" and (not records
+                                                or stats["goldilocks"]):
+                    break   # burn mode: only an all-VERIFY-OK burn ends it
     except Exception as e:
         glog(f"ABORT — {e}")
         with glitch_lock:

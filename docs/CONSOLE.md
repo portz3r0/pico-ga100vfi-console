@@ -207,8 +207,11 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    later row is exactly how you override a block: last record wins.)
    Press **Check row & guards**. The result shows the row's current value,
    the 0→1 purity, the **placement policy verdict** (bit-5/IFF values are
-   refused), and every hardware guard. Everything except the Goldilocks
-   guards should be green at this point — DSOV=1 is expected here.
+   refused), and the **burn window** checks (top-line `SAFE TO BURN` /
+   `REFUSED`). `EFP`, `PROGRAM_DIS`, `SBFE`, `WDATA_SECURE` and
+   `FUSEWDATA_PLM` are shown amber as *arm pending* — they read closed
+   outside a burn by design and are opened at burn time by the SENSE_CTRL
+   arm sequence; they never block the check.
 2. Type `BURN` into the arm field and press **Arm (120 s)**. The countdown
    shows how long the arm token is valid.
 3. Campaign card: mode **burn payload on first Goldilocks**. (The burn runs
@@ -217,9 +220,11 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    miss it.)
 4. **▶ Start campaign**, confirm the dialog (it repeats the exact row,
    value, mirror and target). The campaign glitches; on the first
-   Goldilocks it burns the records in-process, each with a full guard
-   re-check, `CMD_WRITE`, and read-back verify logged as
-   `row N: VERIFY OK`.
+   Goldilocks it burns the records in-process: each burn re-checks the
+   window, runs the SENSE_CTRL arm sequence, `CMD_WRITE`, and read-back
+   verify logged as `row N: VERIFY OK`. The campaign ends only when EVERY
+   record verifies OK; a burn `ABORT` is logged, counted in the
+   `burn aborts` chip, and is NOT final — attempts keep firing.
 5. Cold-boot the card, then verify honestly — see workflow 5.
 
 ### 5. After a burn: verify and, if needed, correct
@@ -244,15 +249,16 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 |---|---|
 | live bar pill (top) | `● live — <time>` polling fine · `⚠ service unreachable` page lost the server · `⚠ BAR0 unreadable` card link is down — **normal mid-glitch** |
 | activity feed | timestamped register changes; flashes the matching card |
-| target GPU pill | `● Goldilocks — burn window open` · `locked (DSOV=1) — glitch first` · `⚠ unreadable` |
+| target GPU pill | `● Goldilocks — glitch window` (4-check read-only approximation) · `locked (DSOV=1) — glitch first` · `⚠ unreadable` |
+| burn window pill | `● burn window open` · `burn window closed (<failed bits>)` · `window: n/a` — read-only verdict from `/api/live` (`window_ok` + `window_checks`) |
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
 | row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve` · `✗ revert tail` |
 | value source decode | `dump row N → 0x…` + decoded `FF ch·blk·data` (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | budget pill | safe zone rows, free count, last boot FF row |
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase |
-| Burn now button | enabled only when armed **and** the selected GPU is currently Goldilocks |
+| Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
-| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks |
+| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts |
 
 ## Burn safety model (reference)
 
@@ -264,12 +270,22 @@ server-side immediately before `CMD_WRITE`:
    value (OTP physics — bits can only be added).
 3. **Row state match**: the row must currently read exactly the expected old
    value; any drift aborts.
-4. **Hardware guards**: `CRC_STATUS == 0x55`, `DSOV == 0`, `SBFE == 0`,
-   `EFP == 1`, `FUSEWDATA_PLM`/`FUSECTRL_PLM` open, `DEBUGCTRL.RWL == 0`,
-   `FUSECTRL` idle — i.e. a live Goldilocks window.
-5. **Placement policy**: blank row inside the safe zone (see below).
-6. **No retries**: any guard failure or verify mismatch aborts; nothing is
-   retried blindly.
+4. **Burn window** (static, read-only — mirrors `ga100_burn.check_window`):
+   `DSOV == 0`, `CRC_STATUS == 0x55`, loader `0x120060 == 0`,
+   `FUSECTRL_PLM`/`PRIV_MASK` open, `DEBUGCTRL == 0`, `SWIFF == 0`,
+   `IFF_CTRL == 0`, `FUSECTRL` idle (state bits[1:0]==0, stage[20:16]==4).
+5. **Arm sequence** (mirrors `ga100_burn.arm`, executed ONLY inside the
+   burn itself): if `EFP != 1`, issue `SENSE_CTRL` (`FUSECTRL = 3`, poll to
+   idle ≤2 s, at most once per burn attempt — no retry) and re-check the
+   window (a failed re-check is fatal); then require `EFP == 1` and
+   `PROGRAM_DIS == 0`; write `WDATA_SECURE = 0` and `SBFE = 0`; then require
+   `FUSEWDATA_PLM == 0xFFFFFFFF`. The poller, `/api/live`, the burn check
+   and fusedump NEVER write and NEVER issue SENSE — a static `EFP == 0` or
+   `FUSEWDATA_PLM == 0xFFFFFFF8` is normal outside a burn and must not
+   block the check or the burn.
+6. **Placement policy**: blank row inside the safe zone (see below).
+7. **No retries**: any window/arm failure or verify mismatch aborts; nothing
+   is retried blindly.
 
 ### FF placement policy (hard-enforced)
 
@@ -309,7 +325,7 @@ bricked.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) |
+| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — and the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE) |
 | GET | `/api/full` | full row dump + hex window |
 | GET | `/api/ports` | serial ports present on the host (pico selector) |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials |
@@ -318,8 +334,8 @@ bricked.
 | POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, records, `no_revert` — default **true**: a Goldilocks result holds the window open) |
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
-| GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check |
-| POST | `/api/burn` | burn (needs `confirm: true` + arm token + Goldilocks target) |
+| GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) |
+| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
@@ -327,8 +343,9 @@ bricked.
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
-UI only enables the standalone burn while the selected GPU is currently in
-the Goldilocks state, and the server-side guards enforce it regardless. The
+UI only enables the standalone burn while the burn-window verdict is open
+(`window_ok`), and the server-side window+arm sequence enforces it
+regardless. The
 pico port is a dropdown populated from the host's serial devices
 (`/dev/ttyACM*`, `/dev/ttyUSB*`, with `/dev/serial/by-id` names when
 available).
@@ -399,8 +416,9 @@ report unavailability. Useful for working on the GUI.
 | GPU Info shows "No devices were found" | Expected while the card is GFW-dead; the banner is honest, not an error. |
 | Live pill shows `BAR0 unreadable` | Normal during a campaign — the PCIe link drops on every shot and comes back. |
 | Campaign start refused: "driver … is bound" | Every glitch attempt reprograms PCI COMMAND/BAR0, which corrupts GSP boots under a bound driver. Drivers tab → **Unload nvidia stack**. |
-| Burn now stays disabled | Either not armed (type `BURN`, 120 s TTL) or the selected GPU isn't in the Goldilocks state. |
-| Check shows guards failing at DSOV=1 | You're not in a burn window — that's what the burn-on-first-Goldilocks campaign mode is for. |
+| Burn now stays disabled | Either not armed (type `BURN`, 120 s TTL) or the burn window pill says closed — run a glitch campaign first. |
+| Check shows EFP/WDATA_PLM amber (arm pending) | Normal — they are auto-armed at burn via SENSE_CTRL; only the red window checks block. |
+| Check top-line says REFUSED | The burn window is closed (red window checks) — that's what the burn-on-first-Goldilocks campaign mode is for. |
 | "card busy" on check/dump | A campaign or another dump is running; wait for it to finish. |
 | Target card shows "no GA100 detected" | Wrong `--bdf`, or the card dropped off the bus — check `lspci`. |
 | Pico port dropdown is empty | Pico not connected / not enumerated; fix the cable, press **⟳ rescan**. |
