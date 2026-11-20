@@ -329,6 +329,14 @@ HTML = r"""<!DOCTYPE html>
   .tabpane { display: none; }
   .tabpane.on { display: block; }
 
+  /* B14: one visible keyboard-focus ring on the dark theme (UA default is
+     rgb(16,16,16) on #0d1117 — invisible). B16: active row of the roving
+     row table while the table container holds keyboard focus. */
+  .btn:focus-visible, .tab:focus-visible, .tpccell:focus-visible,
+  .unit:focus-visible, #rowtable:focus-visible,
+  #rowtable:focus-visible tr.rowact {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+
   h3 { font-size: 12.5px; font-weight: 650; margin: 0 0 10px; color: var(--foreground);
        display: flex; align-items: center; gap: 8px; }
   h3::before { content: ""; width: 3px; height: 11px; border-radius: 2px;
@@ -391,14 +399,18 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
   </header>
-  <nav class="tabs">
-    <button class="tab on" data-tab="explorer">Fuse Explorer</button>
-    <button class="tab" data-tab="glitch">Glitch &amp; Burn</button>
-    <button class="tab" data-tab="drivers">Drivers</button>
-    <button class="tab" data-tab="gpu">GPU Info</button>
+  <nav class="tabs" role="tablist" aria-label="console views">
+    <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"
+            aria-selected="true" tabindex="0" data-tab="explorer">Fuse Explorer</button>
+    <button class="tab" role="tab" id="tabbtn-glitch" aria-controls="tab-glitch"
+            aria-selected="false" tabindex="-1" data-tab="glitch">Glitch &amp; Burn</button>
+    <button class="tab" role="tab" id="tabbtn-drivers" aria-controls="tab-drivers"
+            aria-selected="false" tabindex="-1" data-tab="drivers">Drivers</button>
+    <button class="tab" role="tab" id="tabbtn-gpu" aria-controls="tab-gpu"
+            aria-selected="false" tabindex="-1" data-tab="gpu">GPU Info</button>
   </nav>
 __LIVEBAR__
-  <section id="tab-explorer" class="tabpane on">
+  <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <h2>Status</h2>
   <div class="grid" id="status"></div>
 
@@ -432,7 +444,8 @@ __LIVEBAR__
     <input type="text" id="search" placeholder="search row # or hex value…">
     <span class="note" id="rowcount"></span>
   </div>
-  <div class="scroll" id="rowtable"></div>
+  <div class="scroll" id="rowtable" tabindex="0" role="region"
+       aria-label="fuse rows — arrow keys move the active row, Enter selects"></div>
   <div class="card" id="detail"></div>
 
   <h2>Interpretation log</h2>
@@ -445,18 +458,18 @@ __LIVEBAR__
 
   </section>
 
-  <section id="tab-glitch" class="tabpane">
+  <section id="tab-glitch" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-glitch">
     <div class="card"><div class="note">Glitch &amp; Burn controls are available when this
     page is served by the live console (<span class="mono">ga100vfi.console</span>).</div></div>
   </section>
-  <section id="tab-drivers" class="tabpane">
+  <section id="tab-drivers" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-drivers">
     <div class="card"><div class="note">Driver management is available in live mode.</div></div>
   </section>
-  <section id="tab-gpu" class="tabpane">
+  <section id="tab-gpu" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-gpu">
     <div class="card"><div class="note">GPU info is available in live mode.</div></div>
   </section>
 
-  <div id="auditbg"><div id="audit"></div></div>
+  <div id="auditbg" role="dialog" aria-modal="true" aria-label="unit audit"><div id="audit"></div></div>
 
   <footer>
     <span>data: ga100vfi.fusedump + ga100vfi.console</span>
@@ -1004,6 +1017,7 @@ function auditFor(kind, g, t) {
   return { title, verdict, rows };
 }
 const SEV_TAG = ["DEAD", "DISABLED", "CORROBORATION", "CONTEXT"];
+let auditOpener = null;  // B12: element to hand focus back to on close
 function openAudit(kind, g, t) {
   const a = auditFor(kind, g, t);
   let html = `<button class="btn auditclose" id="auditclose">close ✕</button>` +
@@ -1026,10 +1040,21 @@ function openAudit(kind, g, t) {
   }
   if (kind === "gpc" || kind === "fbp") html += timelineHtml(kind, g);
   document.getElementById("audit").innerHTML = html;
+  auditOpener = document.activeElement;
   document.getElementById("auditbg").classList.add("open");
   document.getElementById("auditclose").onclick = closeAudit;
+  document.getElementById("auditclose").focus();  // B12: focus into the dialog
 }
-function closeAudit() { document.getElementById("auditbg").classList.remove("open"); }
+function closeAudit() {
+  document.getElementById("auditbg").classList.remove("open");
+  const el = auditOpener && document.contains(auditOpener) ? auditOpener : null;
+  // Chromium keeps focus on the just-hidden close button and body.focus() is a
+  // no-op over it — blur first, then restore to the opener.
+  const cur = document.activeElement;
+  if (cur && cur !== el && cur.blur) cur.blur();
+  if (el) el.focus();
+  auditOpener = null;
+}
 document.addEventListener("click", e => {
   if (e.target.closest("#auditclose")) return;
   if (e.target.id === "auditbg") { closeAudit(); return; }
@@ -1039,7 +1064,22 @@ document.addEventListener("click", e => {
     openAudit(p[0], +p[1], p[2] == null ? null : +p[2]);
   }
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeAudit(); });
+document.addEventListener("keydown", e => {
+  const bg = document.getElementById("auditbg");
+  if (e.key === "Escape") { closeAudit(); return; }
+  if (e.key !== "Tab" || !bg.classList.contains("open")) return;
+  // B12: keep Tab cycling inside the open dialog (background stays untabbable).
+  const f = [...bg.querySelectorAll("button, [href], input, select, textarea, " +
+    "[tabindex]:not([tabindex='-1'])")].filter(el => el.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  const inside = bg.contains(document.activeElement);
+  if (e.shiftKey && (!inside || document.activeElement === first)) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+    e.preventDefault(); first.focus();
+  }
+});
 
 // shadow registers -------------------------------------------------------
 function renderShadow() {
@@ -1151,7 +1191,43 @@ function renderRows() {
   document.getElementById("rowcount").textContent = `${vis.length} rows shown`;
   document.getElementById("rowtable").querySelectorAll("tr.rowline").forEach(tr =>
     tr.onclick = () => { selRow = +tr.dataset.r; renderRows(); renderDetail(selRow); });
+  syncActiveRow();
 }
+
+// B16: keyboard access to the row table. The scroll container is a single tab
+// stop (roving active row) instead of 488 tab stops — see design note in
+// evidence/05-fix4.md. Enter/Space selects the active row exactly like a click.
+let activeRow = null;
+function syncActiveRow() {
+  const rows = [...document.getElementById("rowtable").querySelectorAll("tr.rowline")];
+  const has = r => rows.some(tr => +tr.dataset.r === r);
+  if (has(selRow)) activeRow = selRow;
+  else if (!has(activeRow)) activeRow = rows.length ? +rows[0].dataset.r : null;
+  rows.forEach(tr => tr.classList.toggle("rowact", +tr.dataset.r === activeRow));
+}
+(function () {
+  const box = document.getElementById("rowtable");
+  box.addEventListener("keydown", e => {
+    const rows = [...box.querySelectorAll("tr.rowline")];
+    if (!rows.length) return;
+    let i = rows.findIndex(tr => +tr.dataset.r === activeRow);
+    if (i < 0) i = 0;
+    let j = null;
+    if (e.key === "ArrowDown") j = Math.min(i + 1, rows.length - 1);
+    else if (e.key === "ArrowUp") j = Math.max(i - 1, 0);
+    else if (e.key === "Home") j = 0;
+    else if (e.key === "End") j = rows.length - 1;
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      selRow = +rows[i].dataset.r; renderRows(); renderDetail(selRow);
+      return;
+    } else return;
+    e.preventDefault();
+    activeRow = +rows[j].dataset.r;
+    rows.forEach(tr => tr.classList.toggle("rowact", +tr.dataset.r === activeRow));
+    rows[j].scrollIntoView({ block: "nearest" });
+  });
+})();
 function renderDetail(r) {
   const v = D.rows[r], el = document.getElementById("detail");
   el.style.display = "block";
@@ -1214,8 +1290,12 @@ function renderAll() {
 
 // ---------------------------------------------------------------- tabs
 function switchTab(name) {
-  document.querySelectorAll(".tab").forEach(b =>
-    b.classList.toggle("on", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");  // B13
+    b.tabIndex = on ? 0 : -1;                                // B13: roving tab stop
+  });
   document.querySelectorAll(".tabpane").forEach(p =>
     p.classList.toggle("on", p.id === "tab-" + name));
   try { history.replaceState(null, "", "#" + name); } catch (e) {}
@@ -1223,6 +1303,21 @@ function switchTab(name) {
 }
 document.querySelectorAll(".tab").forEach(b =>
   b.onclick = () => switchTab(b.dataset.tab));
+// B13: ArrowLeft/Right (plus Home/End) move focus and activation on the tablist.
+document.querySelector(".tabs").addEventListener("keydown", e => {
+  const tabs = [...document.querySelectorAll(".tab")];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === "ArrowRight") j = (i + 1) % tabs.length;
+  else if (e.key === "ArrowLeft") j = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = tabs.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  tabs[j].focus();
+  switchTab(tabs[j].dataset.tab);
+});
 
 // ---------------------------------------------------------------- boot
 renderStateBtns();
@@ -1239,7 +1334,7 @@ __LIVEBOOT__
 LIVEBAR = """
   <div class="card" id="livebar">
     <div class="flexline" style="margin:0">
-      <span id="liveind" class="pill warnl">connecting…</span>
+      <span id="liveind" class="pill warnl" aria-live="polite">connecting…</span>
       <span class="pill">page poll:
         <select id="pollsel">
           <option value="0" selected>off</option>
@@ -1253,7 +1348,7 @@ LIVEBAR = """
         by default; the interpretation feed, dmesg tail, campaign log and GPU
         monitor keep refreshing on their own.</span>
     </div>
-    <div id="feed" class="mono"></div>
+    <div id="feed" class="mono" aria-live="polite"></div>
   </div>
 """
 
