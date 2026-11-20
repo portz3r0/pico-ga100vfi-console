@@ -180,7 +180,7 @@ HTML = r"""<!DOCTYPE html>
           flex-direction: column; background: var(--bg-deep); }
   .unit b { font-size: 12.5px; }
   .unit span { opacity: .85; font-size: 9.5px; }
-  .on    { background: rgba(63,185,80,.13); color: var(--ok); border-color: rgba(63,185,80,.4); }
+  .u-on  { background: rgba(63,185,80,.13); color: var(--ok); border-color: rgba(63,185,80,.4); }
   .off   { background: rgba(210,153,34,.12); color: var(--warn); border-color: rgba(210,153,34,.4); }
   .dead  { background: rgba(248,81,73,.07); color: #b0706b; border-color: rgba(248,81,73,.22); }
   .deadon{ background: repeating-linear-gradient(45deg, rgba(248,81,73,.3) 0 7px, rgba(248,81,73,.08) 7px 14px);
@@ -503,29 +503,39 @@ function renderStatus() {
   const add = (k, v, cls, note) => cards.push(
     `<div class="card stat" data-key="status.${k}"><div class="k">${k}</div>` +
     `<div class="v mono ${cls}">${v}</div><div class="k">${note || ""}</div></div>`);
+  // Unknown (null) registers must never render as a definitive state (B3).
+  const NODATA = "no data — probe failed/paused";
   add("CRC_STATUS", status.CRC_STATUS == null ? "—" : fmt(status.CRC_STATUS),
-    status.CRC_STATUS === 0x55 ? "ok" : (status.CRC_STATUS == null ? "" : "bad"),
-    status.CRC_STATUS === 0x55 ? "fuse block parses cleanly" : "hash regions invalid");
+    status.CRC_STATUS == null ? "" : (status.CRC_STATUS === 0x55 ? "ok" : "bad"),
+    status.CRC_STATUS == null ? NODATA
+      : status.CRC_STATUS === 0x55 ? "fuse block parses cleanly" : "hash regions invalid");
   add("DSOV", status.DSOV == null ? "—" : String(status.DSOV & 1),
-    (status.DSOV & 1) ? "" : "warn",
-    (status.DSOV & 1) ? "factory-locked (normal)" : "glitch/burn gate OPEN");
+    status.DSOV == null ? "" : (status.DSOV & 1) ? "" : "warn",
+    status.DSOV == null ? NODATA
+      : (status.DSOV & 1) ? "factory-locked (normal)" : "glitch/burn gate OPEN");
   add("SBFE", status.SBFE == null ? "—" : String(status.SBFE & 1), "",
-    (status.SBFE & 1) ? "writes confined to FPF 96–221" : "arbitrary FF writes allowed");
-  add("EFP", status.EFP == null ? "—" : String(status.EFP & 1), "", "");
+    status.SBFE == null ? NODATA
+      : (status.SBFE & 1) ? "writes confined to FPF 96–221" : "arbitrary FF writes allowed");
+  add("EFP", status.EFP == null ? "—" : String(status.EFP & 1), "",
+    status.EFP == null ? NODATA : "");
   add("EN_SW_OVERRIDE", status.EN_SW_OVERRIDE == null ? "—" : fmt(status.EN_SW_OVERRIDE),
-    "", "row-read override state");
+    "", status.EN_SW_OVERRIDE == null ? NODATA : "row-read override state");
   add("PRIV_MASK", status.PRIV_MASK == null ? "—" : fmt(status.PRIV_MASK),
-    status.PRIV_MASK === 0xFFFFFFFF ? "ok" : "warn", "PLM state");
-  add("nvidia-smi", esc((D.nvidia_smi || "—").split("\n")[0] || "n/a"),
-    /No devices|error|ERR|failed/i.test(D.nvidia_smi || "") ? "bad" : "ok", "device init");
+    status.PRIV_MASK == null ? "" : (status.PRIV_MASK === 0xFFFFFFFF ? "ok" : "warn"),
+    status.PRIV_MASK == null ? NODATA : "PLM state");
+  const smi = (D.nvidia_smi || "").trim();
+  add("nvidia-smi", smi ? esc(smi.split("\n")[0] || "n/a") : "not queried",
+    smi ? (/No devices|error|ERR|failed/i.test(smi) ? "bad" : "ok") : "", "device init");
   document.getElementById("status").innerHTML = cards.join("");
 }
 
 function renderVerdict() {
+  const el = document.getElementById("verdict");
   const gpc = D.shadow ? D.shadow.GPC_DISABLE : undefined;
   const fbp = D.shadow ? D.shadow.FBP_DISABLE : undefined;
   if (gpc == null || fbp == null) {
-    document.getElementById("verdict").innerHTML = "waiting for data…";
+    el.classList.toggle("good", false);
+    el.innerHTML = "waiting for data…";
     return;
   }
   const zeroed = gpc === 0 && fbp === 0;
@@ -537,7 +547,8 @@ function renderVerdict() {
        boots trying to use dead units (GFW stalls at progress 0x1) and needs a
        corrective burn or is parked.`
     : `<b class="ok">Floorsweep masks not zeroed — masks-cleared brick signature absent.</b>`;
-  document.getElementById("verdict").innerHTML = html;
+  el.classList.toggle("good", !zeroed);
+  el.innerHTML = html;
 }
 
 // topology ---------------------------------------------------------------
@@ -575,13 +586,13 @@ function renderTopo() {
   let gpcHtml = "", fbpHtml = "";
   for (let i = 0; i < 8; i++) {
     const dead = (gpcDef >> i) & 1, dis = (gpcDis >> i) & 1;
-    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
+    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "u-on");
     const sub = dead ? (dis ? "dead · off" : "DEAD · ON!") : (dis ? "floorswept" : "active");
     gpcHtml += unit(cls, "GPC" + i, sub, "gpc:" + i);
   }
   for (let i = 0; i < 12; i++) {
     const dead = (fbpDef >> i) & 1, dis = (fbpDis >> i) & 1;
-    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
+    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "u-on");
     const sub = dead ? (dis ? "dead · off" : "DUMMY · ON!") : (dis ? "floorswept" : "active");
     fbpHtml += unit(cls, "FBP" + i, sub, "fbp:" + i);
   }
@@ -1291,7 +1302,7 @@ LIVEBOOT = r"""
       if (j.bdf !== undefined) D.bdf = j.bdf;
       D.started = j.ts;
       diff(j);
-      if (heavy) renderLive();
+      renderLive();  // cheap cards refresh on the light poll too; rows/hex stay heavy-only
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
   }
