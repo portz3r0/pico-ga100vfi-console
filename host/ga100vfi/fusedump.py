@@ -191,7 +191,8 @@ def sh(argv, timeout=15):
 
 
 def find_ga100s():
-    """Auto-detect GA100 CMP 170HX (10de:20c2 / 10de:2082)."""
+    """Auto-detect GA100 silicon: CMP 170HX (10de:20c2 / 10de:2082) and
+    A100 PCIe 80GB (10de:20b5) — same GA100 die, same fuse block."""
     primary = []
     for d in sorted(glob.glob("/sys/bus/pci/devices/*")):
         try:
@@ -201,7 +202,7 @@ def find_ga100s():
             continue
         if ven != "0x10de":
             continue
-        if dev.lower() in ("0x20c2", "0x2082"):
+        if dev.lower() in ("0x20c2", "0x2082", "0x20b5"):
             primary.append(os.path.basename(d))
     return primary
 

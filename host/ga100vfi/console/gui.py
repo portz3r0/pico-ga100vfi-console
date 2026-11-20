@@ -1229,6 +1229,10 @@ LIVEBAR = """
   <div class="card" id="livebar">
     <div class="flexline" style="margin:0">
       <span id="liveind" class="pill warnl">connecting…</span>
+      <span class="pill">GPU:
+        <select id="gpusel" title="select which GA100 the Fuse Explorer targets">
+          <option value="">default</option>
+        </select></span>
       <span class="pill">page poll:
         <select id="pollsel">
           <option value="0" selected>off</option>
@@ -1279,9 +1283,33 @@ LIVEBOOT = r"""
     }
     prev = j;
   }
+  // ---- GPU selection (Fuse Explorer target) ----
+  const selBdf = () => localStorage.getItem("ga100.bdf") || "";
+  const bdfQs = () => { const b = selBdf(); return b ? "?bdf=" + encodeURIComponent(b) : ""; };
+  async function populateGpuSel() {
+    try {
+      const j = await jget("/api/gpus");
+      const sel = document.getElementById("gpusel");
+      const gpus = j.gpus || [];
+      sel.innerHTML = `<option value="">default (${esc(j.default || "?")})</option>` +
+        gpus.map(g => `<option value="${esc(g.bdf)}">${esc(g.bdf)}` +
+          ` · ${esc(g.driver || "no driver")}` +
+          (g.goldilocks ? " · GOLDILOCKS" : "") +
+          (g.error ? " · " + esc(g.error.slice(0, 40)) : "") + `</option>`).join("");
+      const saved = selBdf();
+      if (saved && gpus.some(g => g.bdf === saved)) sel.value = saved;
+      sel.onchange = () => {
+        if (sel.value) localStorage.setItem("ga100.bdf", sel.value);
+        else localStorage.removeItem("ga100.bdf");
+        note("GPU target switched to " + (sel.value || "default") +
+             " — reloading…", "warnl");
+        fetchLive(true); fullDump();
+      };
+    } catch (e) { /* static mode or service error: keep default only */ }
+  }
   async function fetchLive(heavy) {
     try {
-      const r = await fetch("/api/live", { cache: "no-store" });
+      const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
@@ -1299,7 +1327,7 @@ LIVEBOOT = r"""
     const b = document.getElementById("fulldump");
     b.disabled = true; note("running full dump… (rows 0–487 + hex window)", "warnl");
     try {
-      const r = await fetch("/api/full", { cache: "no-store" });
+      const r = await fetch("/api/full" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       const hex = j.hexnonzero; delete j.hexnonzero;
@@ -1841,7 +1869,6 @@ LIVEBOOT = r"""
       </div>
       <div id="gmon" class="gmon-grid"></div>
     </div>
-    <div class="grid" id="gpu-cards" style="margin-top:12px"></div>
     <div class="card" style="margin-top:12px"><h3>PCIe link (lspci)</h3>
       <div id="gpu-link" class="mono note"></div></div>`;
   const GPU_LABELS = {"name": "GPU", "driver_version": "driver", "memory.total": "VRAM total",
@@ -1851,22 +1878,46 @@ LIVEBOOT = r"""
     "pcie.link.gen.current": "PCIe gen", "pcie.link.gen.max": "PCIe max gen",
     "clocks.sm": "SM MHz", "clocks.mem": "mem MHz", "pstate": "P-state"};
   async function renderGpu(pre) {
-    let j = pre;
-    if (!j) { try { j = await jget("/api/gpu"); } catch (e) { return; } }
-    const n = j.nvidia || {};
-    if (n.error) {
-      $("gpu-banner").innerHTML = `<b class="warn">nvidia-smi:</b> ` +
-        `<span class="mono">${esc(n.error)}</span>`;
-      $("gpu-cards").innerHTML = "";
-    } else {
-      $("gpu-banner").innerHTML = `<b class="ok">nvidia-smi online</b> — ` +
-        `updated <span class="mono">${esc(j.ts)}</span>`;
-      $("gpu-cards").innerHTML = Object.entries(GPU_LABELS)
-        .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
-        .map(([k, l]) => `<div class="card stat"><div class="k">${l}</div>` +
-          `<div class="v mono">${esc(n[k])}</div></div>`).join("");
+    // one section per GPU on the host; `pre` (from gmonTick) renders the
+    // selected card only, initial paint lists them all via /api/gpus/all
+    let list = null;
+    if (!pre) {
+      try { list = await jget("/api/gpus/all"); } catch (e) { return; }
     }
-    $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
+    const info = {};
+    if (list) for (const g of (list.gpus || [])) info[g.bdf] = g;
+    const bdfs = list ? Object.keys(info) : [pre.bdf || ""];
+    const results = await Promise.all(bdfs.map(async bdf => {
+      try { return await jget("/api/gpu" + (bdf ? "?bdf=" + encodeURIComponent(bdf) : "")); }
+      catch (e) { return { bdf, nvidia: { error: String(e) }, link: [], apps: [] }; }
+    }));
+    const sel = selBdf();
+    const target = sel || (list && list.default) || "";
+    $("gpu-banner").innerHTML = results.map(j => {
+      const n = j.nvidia || {}, bdf = j.bdf || "?";
+      const gi = info[bdf] || {};
+      const isSel = bdf === target;
+      const head = `<div class="flexline" style="margin:0 0 4px">` +
+        `<b class="mono">${esc(bdf)}</b>` +
+        (gi.ga100 ? ` <span class="tag">GA100 · fuse target</span>` : "") +
+        (isSel ? ` <span class="tag">selected</span>` : "") +
+        (n.error ? ` <span class="warn">nvidia-smi: ${esc(n.error)}</span>`
+                 : ` <span class="ok">${esc(n["name"] || gi.name || "GPU")}</span> ` +
+                   `<span class="note mono">updated ${esc(j.ts)}</span>`) +
+        (gi.driver ? ` <span class="note mono">driver=${esc(gi.driver)}</span>` : "") +
+        `</div>`;
+      const cards = n.error ? "" :
+        `<div class="grid" style="margin-bottom:8px">` +
+        Object.entries(GPU_LABELS)
+          .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
+          .map(([k, l]) => `<div class="card stat"><div class=\"k\">${l}</div>` +
+            `<div class=\"v mono\">${esc(n[k])}</div></div>`).join("") + `</div>`;
+      const link = (j.link || []).length
+        ? `<div class="mono note" style="margin-bottom:6px">${esc(j.link.join("\n"))}</div>` : "";
+      return `<div class="card" style="margin-bottom:10px">${head}${cards}${link}</div>`;
+    }).join("");
+    const cur = results.find(j => j.bdf === (sel || "")) || results[0] || {};
+    $("gpu-link").textContent = (cur.link || []).join("\n") || "no link info";
   }
   // ---- nvtop-style live monitor ----
   const gmonHist = [];
@@ -1955,7 +2006,7 @@ LIVEBOOT = r"""
   }
   async function gmonTick() {
     try {
-      const j = await jget("/api/gpu");
+      const j = await jget("/api/gpu" + bdfQs());
       renderGpu(j);
       const n = j.nvidia || {};
       const t = new Date().toTimeString().slice(0, 8);
@@ -1963,7 +2014,7 @@ LIVEBOOT = r"""
       else {
         const lim = gnum(n["power.limit"]) || 300;
         const tot = gnum(n["memory.total"]) || 81920;
-        gmonHist.unshift({t, name: n["name"],
+        gmonHist.unshift({t, name: (n["name"] || "GPU") + (j.bdf ? " · " + j.bdf : ""),
           temp: gnum(n["temperature.gpu"]), util: gnum(n["utilization.gpu"]),
           memu: gnum(n["utilization.memory"]), pw: gnum(n["power.draw"]),
           pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
@@ -1997,6 +2048,7 @@ LIVEBOOT = r"""
 
   const savedMs = +(localStorage.getItem("ga100.pollMs") || "0");
   document.getElementById("pollsel").value = String(savedMs);
+  populateGpuSel();
   fullDump().then(() => {
     fetchLive(true);
     if (savedMs > 0) heavyTimer = setInterval(() => fetchLive(true), savedMs);

@@ -198,7 +198,10 @@ def dumps_dir():
     return os.path.join(CFG["state_dir"], "dumps")
 
 
-def full_dump():
+def full_dump(bdf=None):
+    bdf = bdf or CFG["bdf"]
+    if bdf != CFG["bdf"] and not valid_bdf(bdf):
+        return {"error": f"{bdf} is not a GA100 on this host"}
     with glitch_lock:
         if GLITCH["running"]:
             # the GUI auto-loads a dump on every page open; a dump grabs
@@ -208,16 +211,16 @@ def full_dump():
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy — another full dump is running"}
     try:
-        if CFG["mock"]:
+        if CFG["mock"] and bdf == CFG["bdf"]:
             with open(CFG["mock"]) as f:
                 d = json.load(f)
             hw = os.path.join(os.path.dirname(CFG["mock"]), "hex_window_0x820000.txt")
         else:
-            out = os.path.join(dumps_dir(),
+            out = os.path.join(dumps_dir(), bdf if bdf != CFG["bdf"] else "",
                                datetime.now().strftime("%Y%m%d-%H%M%S"))
             os.makedirs(out, exist_ok=True)
             logs = []
-            d = fd.dump_card(CFG["bdf"], out, CFG["rows"], True,
+            d = fd.dump_card(bdf, out, CFG["rows"], True,
                              lambda m, flush=True: logs.append(m))
             d["log"] = logs[-30:]
             hw = os.path.join(out, "hex_window_0x820000.txt")
@@ -920,6 +923,47 @@ def gpu_state(bdf):
         os.close(f)
 
 
+def nvidia_gpu_bdfs():
+    """Every NVIDIA GPU nvidia-smi sees (any architecture), as
+    {bdf, name}. nvidia-smi reports 8-hex-digit domains; normalise."""
+    out = sh(["nvidia-smi", "--query-gpu=pci.bus_id,name",
+              "--format=csv,noheader"], timeout=10) or ""
+    res = []
+    for line in out.splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) < 2:
+            continue
+        m = re.match(r"^([0-9A-Fa-f]{4,8}):([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9])$",
+                     p[0])
+        if m:
+            res.append({"bdf": (m.group(1)[-4:] + ":" + m.group(2)).lower(),
+                        "name": p[1]})
+    return res
+
+
+def gpus_all():
+    """All GPUs on this host: every NVIDIA GPU (nvidia-smi) plus every
+    GA100 on the PCI bus (driverless ones included — those are fuse
+    targets even when nvidia-smi cannot see them)."""
+    if CFG["mock"]:
+        return {"gpus": [{"bdf": CFG["bdf"], "name": "mock", "ga100": True}],
+                "default": CFG["bdf"]}
+    out = {}
+    for bdf in (fd.find_ga100s() or []):
+        out[bdf] = {"bdf": bdf, "name": None, "ga100": True}
+    if not os.path.exists("/sys/module/nvidia"):
+        pass    # nvidia-smi would auto-load the driver — skip (see gpu_info)
+    else:
+        for g in nvidia_gpu_bdfs():
+            e = out.setdefault(g["bdf"], {"bdf": g["bdf"], "name": None,
+                                          "ga100": False})
+            e["name"] = g["name"]
+    for bdf, e in out.items():
+        e["driver"] = driver_of(bdf)
+    return {"gpus": sorted(out.values(), key=lambda e: e["bdf"]),
+            "default": CFG["bdf"]}
+
+
 def gpu_list():
     """All GA100 GPUs on this host with their live Goldilocks state."""
     if CFG["mock"]:
@@ -944,17 +988,27 @@ def gpu_list():
         try:
             for bdf in bdfs:
                 e = {"bdf": bdf, "driver": driver_of(bdf)}
-                try:
-                    e.update(gpu_state(bdf))
-                except Exception as ex:
-                    e.update({"error": str(ex), "goldilocks": False,
-                              "dsov": None})
-                if bdf not in SERIAL_CACHE:
+                bound = bool(e["driver"] and "nvidia" in e["driver"])
+                if bound:
+                    # raw BAR0 reads against a GSP-driven card can wedge it
+                    # (same policy as the poller) — skip state + serial
+                    e.update({"dsov": None, "goldilocks": False,
+                              "note": "nvidia bound — BAR0 state read "
+                                      "skipped (unload stack to probe)"})
+                else:
                     try:
-                        with Bar0(bdf) as bar:
-                            SERIAL_CACHE[bdf] = brd_serial(bar)
-                    except Exception:
-                        SERIAL_CACHE[bdf] = None
+                        e.update(gpu_state(bdf))
+                    except Exception as ex:
+                        e.update({"error": str(ex), "goldilocks": False,
+                                  "dsov": None})
+                if bdf not in SERIAL_CACHE:
+                    SERIAL_CACHE[bdf] = None
+                    if not bound:
+                        try:
+                            with Bar0(bdf) as bar:
+                                SERIAL_CACHE[bdf] = brd_serial(bar)
+                        except Exception:
+                            pass
                 e["serial"] = SERIAL_CACHE.get(bdf)
                 out.append(e)
         finally:
@@ -1034,8 +1088,13 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
               "pcie.link.width.current", "clocks.sm", "clocks.mem", "pstate"]
 
 
-def gpu_info():
-    bdf = CFG["bdf"]
+def gpu_info(bdf=None):
+    bdf = bdf or CFG["bdf"]
+    if bdf != CFG["bdf"] and not valid_bdf(bdf) \
+            and bdf not in {g["bdf"] for g in nvidia_gpu_bdfs()}:
+        return {"nvidia": {"error": f"{bdf} is not a GPU on this host"},
+                "link": [], "apps": [], "bdf": bdf,
+                "ts": datetime.now().isoformat(timespec="seconds")}
     # NVML wants the 8-hex-digit domain form for --id; slot keeps lspci happy
     nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
@@ -1071,7 +1130,7 @@ def gpu_info():
             user = (sh(["ps", "-o", "user=", "-p", p[0]], timeout=5) or "").strip()
             apps.append({"pid": p[0], "user": user or "?",
                         "cmd": p[1], "mem": p[2]})
-    return {"nvidia": nvidia, "link": link, "apps": apps,
+    return {"nvidia": nvidia, "link": link, "apps": apps, "bdf": bdf,
             "ts": datetime.now().isoformat(timespec="seconds")}
 
 
@@ -1131,6 +1190,38 @@ class Handler(BaseHTTPRequestHandler):
                 with open(CFG["html"], "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif path == "/api/live":
+                bdf = qs.get("bdf")
+                if bdf and bdf != CFG["bdf"]:
+                    # non-default GPU: on-demand pure-read probe, same
+                    # safety rule as the poller — never probe while nvidia
+                    # is bound (GSP wedge risk)
+                    if not valid_bdf(bdf):
+                        return self._send(200, json.dumps(
+                            {"error": f"{bdf} is not a GA100 on this host"}),
+                            "application/json")
+                    if CFG["mock"]:
+                        return self._send(200, json.dumps(
+                            {"error": "mock mode serves the default card only"}),
+                            "application/json")
+                    if not card_lock.acquire(timeout=2.0):
+                        return self._send(200, json.dumps(
+                            {"error": "card busy (campaign or dump in progress)"}),
+                            "application/json")
+                    try:
+                        drv = driver_of(bdf)
+                        if drv and "nvidia" in drv:
+                            snap = {"paused": f"driver '{drv}' bound — raw BAR0 "
+                                    f"live view disabled (Drivers tab -> "
+                                    f"Unload nvidia stack to resume)",
+                                    "driver": drv, "bdf": bdf,
+                                    "ts": datetime.now().isoformat(timespec="seconds")}
+                        else:
+                            snap = probe(bdf)
+                    except Exception as e:
+                        snap = {"error": f"probe failed: {e}"}
+                    finally:
+                        card_lock.release()
+                    return self._send(200, json.dumps(snap), "application/json")
                 with state_lock:
                     snap = dict(STATE)
                 if snap.get("paused"):
@@ -1142,8 +1233,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, json.dumps(snap), "application/json")
             elif path == "/api/full":
-                self._send(200, json.dumps(full_dump(), default=str),
-                           "application/json")
+                self._send(200, json.dumps(full_dump(qs.get("bdf")),
+                                           default=str), "application/json")
             elif path == "/api/glitch/status":
                 self._send(200, json.dumps(glitch_status(), default=str),
                            "application/json")
@@ -1163,6 +1254,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/gpus":
                 self._send(200, json.dumps(gpu_list(), default=str),
                            "application/json")
+            elif path == "/api/gpus/all":
+                self._send(200, json.dumps(gpus_all(), default=str),
+                           "application/json")
             elif path == "/api/ff/layout":
                 self._send(200, json.dumps(
                     ff_layout(qs.get("bdf") or CFG["bdf"]), default=str),
@@ -1171,8 +1265,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
             elif path == "/api/gpu":
-                self._send(200, json.dumps(gpu_info(), default=str),
-                           "application/json")
+                self._send(200, json.dumps(gpu_info(qs.get("bdf")),
+                                           default=str), "application/json")
             elif path == "/api/dmesg":
                 self._send(200, json.dumps(
                     {"tail": dmesg_tail(),
