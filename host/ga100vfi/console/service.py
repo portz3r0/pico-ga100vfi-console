@@ -431,7 +431,7 @@ def ff_policy(layout, row, mirror=False, value=None):
 def burn_check(row, value, mirror, bdf=None):
     """Dry check: current row value, purity, live guard states. No fuse writes."""
     if CFG["mock"]:
-        return {"error": "burn check not available in mock mode"}
+        return {"error": "burn check needs a live card — run the console without --mock"}
     bdf = bdf or CFG["bdf"]
     if not valid_bdf(bdf):
         return {"error": f"{bdf} is not a GA100 on this host"}
@@ -748,15 +748,19 @@ def glitch_start(body):
     if body.get("bdf") and not valid_bdf(body["bdf"]):
         return {"error": f"{body['bdf']} is not a GA100 on this host"}
     target = body.get("bdf") or CFG["bdf"]
-    if not CFG["mock"]:
-        bound = driver_of(target)
-        if bound:
-            # AGENTS.md rule 6: bar0.restore() writes PCI COMMAND + BAR0; doing
-            # that under a bound driver has corrupted later GSP boots.
-            return {"error": f"driver '{bound}' is bound to {target} — every glitch "
-                    "attempt reprograms PCI COMMAND/BAR0 via bar0.restore(), which "
-                    "corrupts GSP boots under a bound driver. Unload it from the "
-                    "Drivers tab first."}
+    if CFG["mock"]:
+        # Refuse up front: without this the campaign "starts", then dies
+        # asynchronously on the serial open (running -> error flip in the UI).
+        return {"error": "glitch not available in mock mode — run the console "
+                "without --mock"}
+    bound = driver_of(target)
+    if bound:
+        # AGENTS.md rule 6: bar0.restore() writes PCI COMMAND + BAR0; doing
+        # that under a bound driver has corrupted later GSP boots.
+        return {"error": f"driver '{bound}' is bound to {target} — every glitch "
+                "attempt reprograms PCI COMMAND/BAR0 via bar0.restore(), which "
+                "corrupts GSP boots under a bound driver. Unload it from the "
+                "Drivers tab first."}
     params = {
         "bdf": target,
         "adaptive": bool(body.get("adaptive")),
@@ -986,6 +990,10 @@ def driver_state():
 
 
 def driver_op_api(body):
+    if CFG["mock"]:
+        # burn_api/burn_check/vrm_revert_now all refuse in mock; driver ops
+        # run real rmmod/modprobe and write /etc/modprobe.d on THIS host.
+        return {"error": "driver ops not available in mock mode"}
     op = body.get("op")
     confirm = bool(body.get("confirm"))
     if op == "blacklist":

@@ -1774,7 +1774,10 @@ LIVEBOOT = r"""
         "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
         payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
         "OTP burns are IRREVERSIBLE.")) return;
-    }
+    } else if (!confirm("Start glitch campaign?\n" +
+        "the pico on port " + $("gc-port").value + " dips NVVDD on " +
+        (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
+        "each attempt reboots the GPU.")) return;
     const j = await jpost("/api/glitch/start", body);
     if (j.error) alert(j.error);
     pollGlitch();
