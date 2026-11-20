@@ -1415,6 +1415,7 @@ LIVEBOOT = r"""
         <button class="btn danger" id="gb-arm">Arm (120 s)</button>
         <span class="pill" id="gb-armstate">not armed</span>
         <button class="btn danger" id="gb-burnnow" disabled>Burn now (Goldilocks GPU only)</button>
+        <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
     </div>
     <div class="card" id="gb-campaign" style="margin-top:12px">
@@ -1468,7 +1469,17 @@ LIVEBOOT = r"""
     </div>`;
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
+  let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
   let targetBdf = null, targetGoldilocks = false;
+
+  // B6: the Check verdict binds to the exact payload — any edit to the burn
+  // inputs invalidates it (the check IS the safety contract).
+  function invalidateChecked() {
+    if (!payloadChecked) return;
+    payloadChecked = null;
+    $("gb-burnnow").disabled = true;
+    $("gb-editwarn").style.display = "";
+  }
 
   // ---- target GPU selector (live Goldilocks state) ----
   function gpuOption(g) {
@@ -1520,6 +1531,7 @@ LIVEBOOT = r"""
   $("gb-gpu").onchange = () => {
     targetBdf = $("gb-gpu").value; payloadChecked = null;
     $("gb-checkresult").innerHTML = "";
+    $("gb-editwarn").style.display = "none";
     loadGpus();
     loadLayout();
   };
@@ -1544,9 +1556,9 @@ LIVEBOOT = r"""
       seg(L.revert_zone[0], L.revert_zone[1], "rev", `revert ${L.tail_reserve}`);
     $("gb-budget").innerHTML =
       `safe zone rows <b>${L.burn_zone[0]}–${L.burn_zone[1]}</b> · <b>${L.free_in_zone}</b> free · last boot FF: row ${L.last_occupied}`;
-    const rv = +$("gb-row").value;               // pull the row into the zone
-    if (!(rv >= L.burn_zone[0] && rv <= L.burn_zone[1]))
-      $("gb-row").value = L.burn_zone[0];
+    // B25: never rewrite the user's typed row — updateRowHint shows the zone
+    // verdict for whatever row is in the field (a deliberate probe of the SM
+    // reserve must survive tab switches and layout refreshes).
     updateRowHint();
   }
   function updateRowHint() {
@@ -1565,7 +1577,7 @@ LIVEBOOT = r"""
     hint.className = "pill";
     hint.innerHTML = `<b class="${cls}">${txt}</b>`;
   }
-  $("gb-row").oninput = updateRowHint;
+  $("gb-row").oninput = () => { invalidateChecked(); updateRowHint(); };
   async function loadLayout() {
     try {
       const q = targetBdf ? "?bdf=" + encodeURIComponent(targetBdf) : "";
@@ -1598,23 +1610,32 @@ LIVEBOOT = r"""
     const el = $("gb-armstate");
     const armed = armToken && Date.now() < armExpiry;
     if (armed) {
+      armRefusal = null;
       el.textContent = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
       el.className = "pill okl";
     } else {
       armToken = null;
-      el.textContent = "not armed"; el.className = "pill";
+      if (armRefusal) {
+        // B5: keep the refusal visible until the phrase is edited or an arm
+        // succeeds — the 1 s tick must not erase the only failure explanation.
+        el.textContent = armRefusal; el.className = "pill badl";
+      } else {
+        el.textContent = "not armed"; el.className = "pill";
+      }
     }
-    $("gb-burnnow").disabled = !armed || !targetGoldilocks;
+    $("gb-burnnow").disabled = !payloadChecked || !armed || !targetGoldilocks;
   }
   setInterval(updateArmState, 1000);
 
   $("gb-arm").onclick = async () => {
     const j = await jpost("/api/arm", {phrase: $("gb-armphrase").value});
     if (j.error) { const el = $("gb-armstate");
-      el.textContent = "⚠ " + j.error; el.className = "pill badl"; return; }
+      armRefusal = "⚠ " + j.error;
+      el.textContent = armRefusal; el.className = "pill badl"; return; }
     armToken = j.token; armExpiry = Date.now() + j.expires_in * 1000;
     updateArmState();
   };
+  $("gb-armphrase").oninput = () => { armRefusal = null; updateArmState(); };
 
   // ---- burn value source: typed hex, or grabbed from a dump row ----
   let payloadValue = null;        // set by the dump-row grab (verify target)
@@ -1646,12 +1667,15 @@ LIVEBOOT = r"""
     }
   }
   $("gb-srcmode").onchange = () => {
+    invalidateChecked();
     const dump = $("gb-srcmode").value === "dump";
     $("gb-dumpwrap").style.display = dump ? "" : "none";
     $("gb-typedwrap").style.display = dump ? "none" : "";
     renderSrcDecode();
   };
-  $("gb-srcrow").oninput = renderSrcDecode;
+  $("gb-srcrow").oninput = () => { invalidateChecked(); renderSrcDecode(); };
+  $("gb-value").oninput = invalidateChecked;
+  $("gb-mirror").onchange = invalidateChecked;
 
   $("gb-check").onclick = async () => {
     const row = +$("gb-row").value;
@@ -1660,9 +1684,11 @@ LIVEBOOT = r"""
     const mirror = $("gb-mirror").checked;
     const res = $("gb-checkresult");
     res.innerHTML = "checking…";
+    $("gb-editwarn").style.display = "none";
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
     payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
+    updateArmState();   // re-evaluate Burn gating against the fresh check
     const guards = (j.guards || []).map(g =>
       `<div class="guardrow"><span class="gs ${g.ok ? "ok" : "bad"}">${g.ok ? "✓" : "✗"}</span>` +
       `<span>${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
