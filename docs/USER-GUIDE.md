@@ -102,7 +102,7 @@ card serial, host name, IP addresses, username and home paths are masked.*
 | Burn payload | target row; value **typed hex** or **from dump row** (grabs the value from the loaded dump and shows it decoded for verification — IFF values flagged as refused); `burn mirror row too` checkbox |
 | Preview burn (read-only) | see below — enabled on row+value alone, no window/arm/token |
 | Check row & guards | dry check: current row value, 0→1 purity, placement-policy verdict, window checks, arm-pending bits; enables Burn (with arm + open window) |
-| arm phrase + Arm (120 s) | type `BURN`, click Arm → countdown pill `● armed Ns`; wrong phrase → sticky red refusal until you edit the phrase |
+| arm phrase + Arm (120 s) | type `BURN`, click Arm → countdown pill `● armed Ns`; wrong phrase → sticky red refusal until you edit the phrase; button disabled while the selected GPU is not Goldilocks (`selected GPU not Goldilocks — glitch first`) |
 | Burn now | enabled only when checked + armed + window open; double confirm; journal-uncertain → explicit ack dialog |
 | window pill | read-only burn-window verdict from the poller: `● burn window open` / `burn window closed (<failed bits>)` / `window: n/a` |
 | Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / FBP / FBPA-pair), each word decoded, `ALREADY IN DUMP` tagged; queue all or queue a DEVID A/B pair |
@@ -228,7 +228,8 @@ shows lspci only.
 6. **Check the row & guards**: expect `SAFE TO BURN`, green window
    bits, amber arm-pending rows, policy `OK`. Any edit to row/value/
    mirror invalidates the check — re-check.
-7. **Arm**: type `BURN`, press **Arm (120 s)**; the token expires in
+7. **Arm**: type `BURN`, press **Arm (120 s)** — the button stays disabled
+   until the selected GPU reads Goldilocks; the token expires in
    120 s.
 
    ![Armed state — countdown pill; Burn stays disabled without a live window](images/console-armed.png)

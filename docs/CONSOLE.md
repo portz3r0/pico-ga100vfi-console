@@ -254,8 +254,12 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    `FUSEWDATA_PLM` are shown amber as *arm pending* — they read closed
    outside a burn by design and are opened at burn time by the SENSE_CTRL
    arm sequence; they never block the check.
-2. Type `BURN` into the arm field and press **Arm (120 s)**. The countdown
-   shows how long the arm token is valid.
+2. Type `BURN` into the arm field and press **Arm (120 s)**. The button is
+   disabled while the GPU in the target selector is not Goldilocks (tooltip
+   `selected GPU not Goldilocks — glitch first`); the server re-runs the same
+   4-check pure-read at arm time and refuses with the failing checks named if
+   the state changed between poll and arm. The countdown shows how long the
+   arm token is valid.
 3. Campaign card: mode **burn payload on first Goldilocks**. (The burn runs
    *inside the campaign process* because the Goldilocks PCIe window dies
    seconds after the campaign loop returns — a separate burn call would
@@ -311,7 +315,8 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 | value source decode | `dump row N → 0x…` + decoded `FF ch·blk·data` (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | Preview burn button | enabled whenever row+value are set — **no window/arm/token requirement** (read-only works on a cold card and in mock); panel: verdict banner `SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`, before→Δ→after with delta bits highlighted, FF decode table, LAST-WINS collision badge (green win / red lose), amber hazard list, predicted effect, window/arm/journal strip |
 | budget pill | safe zone rows, free count, last boot FF row |
-| arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase |
+| arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase or server Goldilocks refusal (failing checks named) |
+| Arm button | disabled until the current poll of the **selected** GPU says Goldilocks (tooltip `selected GPU not Goldilocks — glitch first`); re-evaluated on poll refresh and GPU-dropdown change; the server re-runs the 4-check pure-read at arm time |
 | Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
 | stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / image verify failed |
@@ -459,7 +464,7 @@ bricked.
 | POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
-| POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
+| POST | `/api/arm` | `{phrase: "BURN", bdf?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`): not Goldilocks → `{"error": "GPU <bdf> is not Goldilocks — failing: <checks>"}`, no token; success adds `bdf` + `checks` dict |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link state |

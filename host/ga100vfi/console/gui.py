@@ -1671,6 +1671,7 @@ LIVEBOOT = r"""
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
   let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
+  let gpuGoldilocks = false;      // arm gate: current poll of the SELECTED GPU only
   let targetBdf = null;
   let windowOk = false;           // live burn-window verdict (poller / fresh check)
 
@@ -1900,6 +1901,9 @@ LIVEBOOT = r"""
   function updateGpuState(j) {
     const g = (j.gpus || []).find(x => x.bdf === targetBdf);
     const pill = $("gb-gpustate");
+    // arm gate follows the SELECTED GPU's current poll only — no stale
+    // enable from a previous card (dropdown change resets this first).
+    gpuGoldilocks = !!(g && g.goldilocks);
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
     } else if (g.goldilocks) {
@@ -1920,6 +1924,7 @@ LIVEBOOT = r"""
   }
   $("gb-gpu").onchange = () => {
     targetBdf = $("gb-gpu").value; payloadChecked = null;
+    gpuGoldilocks = false; updateArmState();   // sticky: no stale enable pre-poll
     $("gb-checkresult").innerHTML = "";
     $("gb-editwarn").style.display = "none";
     loadGpus();
@@ -2025,6 +2030,12 @@ LIVEBOOT = r"""
     // Burn gating keys off the burn WINDOW verdict (window checks only) —
     // EFP/WDATA_PLM read 0 outside a burn by design; SENSE_CTRL opens them.
     $("gb-burnnow").disabled = !payloadChecked || !armed || !windowOk;
+    // Arm is gated on the selected GPU's Goldilocks state (same 4-check
+    // pure-read the server re-runs at arm time — state can change between
+    // poll and arm, so the server refusal text still surfaces below).
+    const ab = $("gb-arm");
+    ab.disabled = !gpuGoldilocks;
+    ab.title = gpuGoldilocks ? "" : "selected GPU not Goldilocks — glitch first";
   }
   setInterval(updateArmState, 1000);
 
@@ -2052,7 +2063,8 @@ LIVEBOOT = r"""
   pollWindow();
 
   $("gb-arm").onclick = async () => {
-    const j = await jpost("/api/arm", {phrase: $("gb-armphrase").value});
+    const j = await jpost("/api/arm",
+                          {phrase: $("gb-armphrase").value, bdf: targetBdf});
     if (j.error) { const el = $("gb-armstate");
       armRefusal = "⚠ " + j.error;
       el.textContent = armRefusal; el.className = "pill badl"; return; }

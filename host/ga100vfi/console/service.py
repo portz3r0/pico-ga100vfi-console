@@ -15,7 +15,7 @@ Endpoints:
                            collision scan, partial-landing hazards
   GET  /api/burn/last      last stored preview + burn report (state dir)
   POST /api/burn           {row, value, old, mirror, confirm, token, ack_uncertain}
-  POST /api/arm            {phrase: "BURN"} -> 120s arm token
+  POST /api/arm            {phrase: "BURN", bdf?} -> 120s arm token; gated on the target GPU's Goldilocks state (4-check pure-read) — not Goldilocks -> error naming the failing checks, no token
   GET  /api/driver         driver/modules/blacklist state
   POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
   GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
@@ -1180,12 +1180,62 @@ def burn_api(body):
         card_lock.release()
 
 
+def mock_gpu_state(d=None):
+    """Goldilocks approximation from the mock status registers — same
+    4-check shape as gpu_state (fpf is always readable in mock)."""
+    if d is None:
+        try:
+            with open(CFG["mock"]) as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+    s = d.get("status", {})
+    dsov = (s.get("DSOV") if isinstance(s.get("DSOV"), int) else 1) & 1
+    crc = s.get("CRC_STATUS") == 0x55
+    priv = s.get("PRIV_MASK") == 0xFFFFFFFF
+    return {"dsov": dsov, "crc_ok": crc, "priv_open": priv,
+            "fpf_readable": True, "goldilocks": dsov == 0 and crc and priv}
+
+
+def arm_gate_state(bdf):
+    """Server-side Goldilocks gate state for /api/arm: the same 4-check
+    pure-read approximation as gpu_state()/gpu_list — the authoritative
+    8-point burn-window re-check at execution stays separate and
+    unchanged."""
+    if CFG["mock"]:
+        return mock_gpu_state()
+    try:
+        return gpu_state(bdf)
+    except Exception as ex:
+        return {"error": str(ex), "goldilocks": False}
+
+
+def failing_checks(st):
+    """Names of the failing pure-read Goldilocks checks in a state dict."""
+    bad = []
+    if st.get("dsov") != 0:
+        bad.append("dsov")
+    for name in ("crc_ok", "priv_open", "fpf_readable"):
+        if not st.get(name):
+            bad.append(name)
+    return bad
+
+
 def arm_api(body):
     if str(body.get("phrase", "")).strip().upper() != "BURN":
         return {"error": 'phrase must be "BURN"'}
+    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    st = arm_gate_state(bdf)
+    if not st.get("goldilocks"):
+        # The Arm button promises Goldilocks gating: refuse the token HERE,
+        # not minutes later at the execution guards (which stay the
+        # authoritative re-check and are unchanged).
+        why = st.get("error") or ", ".join(failing_checks(st))
+        return {"error": f"GPU {bdf} is not Goldilocks — failing: {why}"}
     ARM["token"] = uuid.uuid4().hex
     ARM["expires"] = time.time() + 120
-    return {"token": ARM["token"], "expires_in": 120,
+    return {"token": ARM["token"], "expires_in": 120, "bdf": bdf,
+            "checks": st,
             "note": "armed for 120s — burns verify the burn window and "
                     "self-arm via SENSE_CTRL at execution"}
 
@@ -1744,16 +1794,9 @@ def gpu_list():
                 d = json.load(f)
         except Exception:
             d = {}
-        s = d.get("status", {})
-        dsov = (s.get("DSOV") if isinstance(s.get("DSOV"), int) else 1) & 1
-        crc = s.get("CRC_STATUS") == 0x55
-        priv = s.get("PRIV_MASK") == 0xFFFFFFFF
-        return {"gpus": [{"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock",
-                          "serial": None,
-                          "dsov": dsov, "crc_ok": crc, "priv_open": priv,
-                          "fpf_readable": True,
-                          "goldilocks": dsov == 0 and crc and priv}],
-                "default": CFG["bdf"]}
+        e = {"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock", "serial": None}
+        e.update(mock_gpu_state(d))
+        return {"gpus": [e], "default": CFG["bdf"]}
     # detected cards only — never probe a configured BDF that isn't there
     bdfs = fd.find_ga100s()
     out = []
