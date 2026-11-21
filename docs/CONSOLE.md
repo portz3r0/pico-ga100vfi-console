@@ -225,10 +225,16 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    - a **collision scan**: every existing record with the same
      `(chain, block)` key, row-numbered, with a LAST-WINS verdict badge —
      green *will win*, or red *will LOSE to row N* (the burn would be
-     **inert**; correct it by burning a later row);
-   - **partial-landing hazards**: every subset of the delta that, if only
-     it latched, would land a different record on a live key with wrong
-     data (with the mask effect it would cause); skipped above 12 delta
+     **inert**; correct it by burning a later row); a same-key record at
+     exactly a burned row is captioned *record already present at this
+     row — re-burn is a no-op/ALREADY path*;
+   - **partial-landing hazards**: every subset of the delta that, if
+     only it latched, would win its `(chain, block)` key (a partial at
+     the burned row beats every earlier record) with data different
+     from the intent — advisory only, never a gate; same-data-as-intent
+     is benign, a strictly-later override is inert; effects are relative
+     to the burned row's effective winner (baseline stated) and every
+     burn row (mirror included) is analyzed; skipped above 12 delta
      bits ("too many subsets");
    - the **predicted effect** line when decodable (e.g. `FBP_DISABLE data
      0x4290 → 0x4200 (unmasks FBP1/FBP4)`) — `STATUS_OPT_*` shadows update
@@ -306,7 +312,7 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 | Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
 | stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / image verify failed |
-| burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
+| burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero latching writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
 
 ## Burn safety model (reference)
 
@@ -437,7 +443,7 @@ bricked.
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) |
-| POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets, capped at 12 delta bits), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
+| POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |

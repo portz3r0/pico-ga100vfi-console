@@ -2133,6 +2133,8 @@ LIVEBOOT = r"""
       ((c.records || []).length
         ? `<table><tr><th>row</th><th>word</th><th>decode</th></tr>` +
           c.records.map(x => `<tr><td class="mono">${x.row}</td><td class="mono">${fmt(x.word)}</td><td>${decodeSpan(x.decode)}</td></tr>`).join("") + `</table>`
+        : c.own_row !== null && c.own_row !== undefined
+        ? `<div class="note">record already present at this row (row ${c.own_row}) — re-burn is a no-op/ALREADY path</div>`
         : `<div class="note">no existing record with this key — the burn defines it</div>`) + `</div>`;
     const hz = j.hazards || {};
     const hzHtml = hz.skipped
@@ -2140,14 +2142,14 @@ LIVEBOOT = r"""
       : `<div style="margin-top:8px"><b>partial-landing hazards</b> ` +
         `<span class="note">${(hz.hazards || []).length} hazard · ${hz.benign || 0} benign · ${hz.inert || 0} inert subset(s)</span>` +
         (hz.hazards || []).map(x =>
-          `<div class="warn" style="margin-top:3px">⚠ partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
+          `<div class="warn" style="margin-top:3px">⚠ ${x.row !== undefined && (j.rows || []).length > 1 ? `row ${x.row} ` : ""}partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
           `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") + `</div>`;
     const strip = `<div class="frow" style="margin-top:10px">` +
       `<span class="pill ${j.window_ok ? "okl" : ""}">burn window ${j.window_ok ? "open" : "closed"} — not required for preview</span>` +
       `<span class="pill warnl">arm pending — auto-armed at burn (SENSE_CTRL)</span>` +
       `<span class="pill ${j.journal_uncertain ? "badl" : "okl"}">journal ${j.journal_uncertain ? "UNCERTAIN" : "clear"}</span></div>`;
     return `<div class="verdict ${vcls}" style="padding:8px 12px;margin-top:8px">` +
-      `<b>${esc(j.verdict)} (preview)</b> — read-only, zero fuse writes · ` +
+      `<b>${esc(j.verdict)} (preview)</b> — read-only, zero latching writes (row reads use the read command) · ` +
       `${esc(j.bdf || "")} · ${esc(j.ts || "")}</div>` +
       rowsHtml + colHtml + hzHtml +
       (j.predicted ? `<div style="margin-top:8px"><b>predicted effect:</b> ${esc(j.predicted)}</div>` : "") +
@@ -2231,7 +2233,8 @@ LIVEBOOT = r"""
   };
 
   // burn report: result line colored by outcome — VERIFY OK green,
-  // ALREADY BURNED amber (partial-run recovery, zero writes), ABORT /
+  // ALREADY BURNED amber (partial-run recovery, zero latching writes),
+  // ABORT /
   // VERIFY FAIL / IMAGE VERIFY FAILED red. All server strings through esc().
   function burnResultSpan(r) {
     if (!r) return "";

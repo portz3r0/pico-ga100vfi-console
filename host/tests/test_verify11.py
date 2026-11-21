@@ -285,31 +285,33 @@ def test_c3_iff_truncates_pool():
     assert rep["collisions"]["last_wins"] == "WILL WIN"
 
 
-def test_c3_document_same_key_at_exact_preview_row():
+def test_c3_same_key_at_exact_preview_row_reports_own_row():
     """Edge: a same-key record at EXACTLY the preview row. The scan
-    EXCLUDES the preview row, so the verdict is WILL WIN with an EMPTY
-    record list — the panel then claims 'no existing record with this
-    key — the burn defines it' although the row itself already holds the
-    key (it is being overwritten in place). Verdict is right, the empty
-    table is ambiguous (gap V11-G3, MINOR)."""
+    EXCLUDES the preview row from `records` (in-place overwrite), so the
+    verdict is WILL WIN — and the report now carries own_row so the
+    panel captions it 'record already present at this row — re-burn is a
+    no-op/ALREADY path' instead of the ambiguous empty-table caption
+    (gap V11-G3 FIXED; previously records==[] with no own-row signal)."""
     bar = V11Bar()
     bar.rows[ROW] = FBP_WINNER              # same key, different data
     rep, _ = preview(bar)
     assert rep["collisions"]["records"] == []
+    assert rep["collisions"]["own_row"] == ROW
     assert rep["collisions"]["last_wins"] == "WILL WIN"
     assert rep["verdict"] == "IMPOSSIBLE"   # 0x4290 bits not in 0x4200
 
 
 # ============================ CLAIM 4 — hazards ============================
-def test_c4_known_dangerous_subsets_from_key_present_before():
+def test_c4_effects_are_relative_to_effective_winner():
     """before=0x000004C1 (key bits 0,6,7,10 already fused), value
     0x420004C1, live winner data 0x4290 at row 224. Delta = data bits
     9+14 (word bits 25+30): the two proper subsets land 0x020004C1 /
-    0x400004C1 — both must surface as HAZARDs. GAP V11-G4 (MINOR): the
-    effect string is computed against the LAST pool record, which here
-    is the preview row's OWN before word (0x0000), not the previous
-    winner (0x4290) nor the intent — so it reads 'data 0x0000 → 0x0200
-    (masks FBP6)' instead of the intent-relative 'unmasks FBP11'."""
+    0x400004C1 — both HAZARDs. GAP V11-G4 FIXED: the effect baseline is
+    the burned row's EFFECTIVE winner — the last same-key record
+    strictly before the burned row (row 224, data 0x4290) — NOT the
+    burned row's own before word (which the landing overwrites); the
+    baseline is stated in the effect text. (Previously pinned buggy
+    behaviour: 'data 0x0000 → ...' against the row's own before.)"""
     bar = V11Bar()
     bar.rows[224] = FBP_WINNER
     bar.rows[ROW] = 0x000004C1
@@ -319,9 +321,10 @@ def test_c4_known_dangerous_subsets_from_key_present_before():
     assert sorted(h["word"] for h in hz["hazards"]) == [0x020004C1,
                                                         0x400004C1]
     by_word = {h["word"]: h["effect"] for h in hz["hazards"]}
-    # observed (gap V11-G4): winner resolved to the preview row's before
-    assert by_word[0x020004C1].startswith("FBP_DISABLE data 0x0000")
-    assert by_word[0x400004C1].startswith("FBP_DISABLE data 0x0000")
+    assert by_word[0x020004C1].startswith("FBP_DISABLE data 0x4290 → 0x0200")
+    assert "baseline winner row 224" in by_word[0x020004C1]
+    assert by_word[0x400004C1].startswith("FBP_DISABLE data 0x4290 → 0x4000")
+    assert "baseline winner row 224" in by_word[0x400004C1]
 
 
 def test_c4_intent_relative_effects_from_blank_row():
@@ -352,22 +355,72 @@ def test_c4_three_hazards_from_blank_row():
     assert "FBP6" in both["effect"] and "FBP11" in both["effect"]
 
 
-def test_c4_document_benign_check_uses_winner_not_intent():
-    """GAP V11-G2 (MAJOR): BENIGN is decided by winner.data == value.data,
-    NOT by the partial word's data vs the intent, and the winner is the
-    pool's last record regardless of its position vs the preview row.
-    With the previous record's data EQUAL to the intent (0x4200 at row
-    224) and a blank preview row 304, the three key-preserving partial
-    landings (0x000004C1 / 0x020004C1 / 0x400004C1) all WIN from row 304
-    with data != intent — real hazards the panel reports as BENIGN.
-    This test pins the current (wrong) classification so a fix flips it
-    visibly."""
+def test_c4_benign_check_compares_partial_vs_intent_not_pool_last():
+    """GAP V11-G2 (MAJOR) FIXED. Previously pinned BUGGY behaviour: with
+    the previous record's data EQUAL to the intent (0x4200 at row 224)
+    and a blank preview row 304, the three key-preserving partial
+    landings (0x000004C1 / 0x020004C1 / 0x400004C1) were reported
+    BENIGN (winner.data == intent.data) although each WINS from row 304
+    with data != intent. FIXED classification: BENIGN/HAZARD compares
+    the PARTIAL word's data against the INTENT's data — all three are
+    HAZARDs here."""
     bar = V11Bar()
     bar.rows[224] = FBP_VAL                 # live data == intent data
     rep, _ = preview(bar)                   # blank preview row 304
     hz = rep["hazards"]
+    assert sorted(h["word"] for h in hz["hazards"]) == [0x000004C1,
+                                                        0x020004C1,
+                                                        0x400004C1]
+    assert hz["benign"] == 0
+
+
+def test_c4_partial_data_equals_intent_is_benign_even_if_pool_differs():
+    """The mirror image of the V11-G2 bug: a partial whose data EQUALS
+    the intent's data is BENIGN even though the pool's last record for
+    the key differs (0x4290). before=0x000004C0 (block bits fused, bit 0
+    and bit 5 open), value=0x420004E1 (bit 5 = IFF flag in the delta):
+    the subset {25,30} lands 0x420004C1 — same (chain,block) key, data
+    0x4200 == intent data → BENIGN (same mask either way). The old code
+    compared pool-last (0x4290) vs intent and called it a HAZARD."""
+    bar = V11Bar()
+    bar.rows[224] = FBP_WINNER              # pool last data 0x4290 != intent
+    bar.rows[ROW] = 0x000004C0
+    rep, _ = preview(bar, value=0x420004E1)
+    hz = rep["hazards"]
+    words = [h["word"] for h in hz["hazards"]]
+    assert 0x420004C1 not in words          # data == intent → not a hazard
+    assert hz["benign"] >= 1
+    # the data-differing key-preserving partials stay HAZARDs
+    assert 0x000004C1 in words
+
+
+def test_c4_partial_losing_to_a_later_record_is_inert():
+    """Row order honoured: a partial at the burned row beats every
+    EARLIER record, but a same-key record STRICTLY AFTER the burned row
+    wins regardless of what lands at the burned row → the partial has no
+    effect → INERT, not HAZARD."""
+    bar = V11Bar()
+    bar.rows[400] = FBP_WINNER              # later same-key winner
+    rep, _ = preview(bar)                   # blank row 304, delta 0x420004C1
+    hz = rep["hazards"]
     assert hz["hazards"] == []
-    assert hz["benign"] == 3                # documented misclassification
+    assert hz["benign"] == 0
+    assert hz["inert"] > 0                  # the would-be hazards are inert
+
+
+def test_c4_mirror_row_delta_is_hazard_analyzed_too():
+    """GAP V11-G5 FIXED: hazards run for EVERY burn row, worst-of merged
+    into the report. Row 304 blank, mirror row 305 already holds the key
+    bits (0x000004C1) so its delta is only the data bits {25,30}: its
+    two partials 0x020004C1 / 0x400004C1 are hazards tagged row 305.
+    (Row 304's own partials are inert: row 305's record is strictly
+    later and wins regardless.)"""
+    bar = V11Bar()
+    bar.rows[305] = 0x000004C1
+    rep, _ = preview(bar, mirror=True)
+    hz = rep["hazards"]
+    assert sorted((h["row"], h["word"]) for h in hz["hazards"]) == \
+        [(305, 0x020004C1), (305, 0x400004C1)]
 
 
 def test_c4_popcount_cap_clean_skip():
@@ -382,11 +435,18 @@ def test_c4_popcount_cap_clean_skip():
 
 
 def test_c4_inert_subsets_counted():
+    """EXPECTATION UPDATED (task 12, V11-G2 family): subset {bit 0} of
+    0x00010001 PRESERVES the intent key (bit 0 is a chain bit) and lands
+    data 0x0000 != intent 0x0001 — the partial itself defines the unused
+    key with wrong data, so it is a HAZARD, not INERT (the old code
+    called every unused key inert). Subset {bit 16} decodes to key
+    (0,0), unused in the pool and != the intent key -> still INERT."""
     bar = V11Bar()
     rep, _ = preview(bar, value=0x00010001)         # bits 0 + 16
     hz = rep["hazards"]
-    assert hz["hazards"] == [] and hz["benign"] == 0
-    assert hz["inert"] == 2                         # keys unused in pool
+    assert [h["word"] for h in hz["hazards"]] == [0x00000001]
+    assert hz["benign"] == 0
+    assert hz["inert"] == 1                         # key (0,0) unused
 
 
 # ============================ CLAIM 5 — verdicts ===========================

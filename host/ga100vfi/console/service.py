@@ -767,35 +767,59 @@ def _ff_pool(rd, wr):
 def _ff_collisions(pool, key, exclude_rows):
     """Every pool record sharing the after-word's (chain, block) key,
     row-ordered, with the LAST-WINS verdict for a record burned at
-    max(exclude_rows)."""
+    max(exclude_rows). A same-key record at EXACTLY a burned row is
+    excluded from the list (it is overwritten in place) but reported as
+    own_row so the panel can caption it honestly."""
     recs = [{"row": r, "word": w, "decode": ff_decode(w)}
             for r, w in sorted(pool.items())
             if ff_key(w) == key and r not in exclude_rows]
     top = max(exclude_rows)
+    own = sorted(r for r in pool
+                 if ff_key(pool[r]) == key and r in exclude_rows)
     lose = [c["row"] for c in recs if c["row"] > top]
     verdict = f"LOSE to row {max(lose)}" if lose else "WILL WIN"
     return {"key": {"chain": key[0], "block": key[1]},
             "name": FF_BLOCK_NAMES.get(key),
-            "records": recs, "preview_row": top, "last_wins": verdict}
+            "records": recs, "preview_row": top, "last_wins": verdict,
+            "own_row": own[0] if own else None}
 
 
-def _ff_hazards(pool, before, delta, value):
-    """Partial-landing analysis: if only a SUBSET of the delta bits latch,
-    the row holds a DIFFERENT record — and last-wins makes that partial
-    record authoritative for its key. Classify every non-empty proper
-    subset: HAZARD = its key is live in the pool with data differing from
-    the intended record; BENIGN = key live and data equal; INERT = key
-    unused. Enumeration is capped (popcount(delta) > FF_SUBSET_CAP skips
-    it — 2^n subsets is not worth freezing the request)."""
+def _ff_hazards(pool, row, before, delta, value):
+    """Partial-landing analysis for a record burned at `row`: if only a
+    SUBSET of the delta bits latch, the row holds a DIFFERENT record —
+    and last-wins makes that partial authoritative for its key (a partial
+    at the burned row beats every EARLIER record). Classify every
+    non-empty proper subset against the INTENT:
+      BENIGN = same (chain, block) key as the intent and its data equals
+               the intent's data (same mask either way);
+      HAZARD = data differs from the intent AND the partial would win
+               (no same-key pool record strictly after the burned row);
+      INERT  = key unused, or a later record wins regardless (no effect).
+    Effect strings are relative to the burned row's EFFECTIVE winner —
+    the last same-key record strictly before the burned row (the burned
+    row's own before word is overwritten, so never the baseline) — with
+    the baseline stated in the text. Enumeration is capped
+    (popcount(delta) > FF_SUBSET_CAP skips it — 2^n subsets is not worth
+    freezing the request)."""
     n = bin(delta).count("1")
     if n > FF_SUBSET_CAP:
         return {"skipped": f"too many subsets (popcount {n} > "
-                           f"{FF_SUBSET_CAP})", "hazards": [],
+                           f"{FF_SUBSET_CAP})", "row": row, "hazards": [],
                 "benign": 0, "inert": 0}
     bits = [b for b in range(32) if (delta >> b) & 1]
-    live = {}
-    for w in pool.values():                 # pool is row-ordered: last wins
-        live[ff_key(w)] = w
+    ikey = ff_key(value)
+    idata = (value >> 16) & 0xFFFF
+
+    def _same_key(rows_after):
+        """pool rows holding the intent's key, optionally strictly after
+        the burned row (the burned row's own before word is overwritten
+        by the landing, so it never counts)."""
+        return [r for r, w in sorted(pool.items())
+                if ff_key(w) == ikey and r != row
+                and (not rows_after or r > row)]
+
+    later = set(_same_key(True))
+    earlier = _same_key(False)
     hazards, benign, inert = [], 0, 0
     for m in range(1, 1 << n):
         sub = sum(1 << bits[i] for i in range(n) if (m >> i) & 1)
@@ -803,23 +827,51 @@ def _ff_hazards(pool, before, delta, value):
             continue                        # the full landing is the intent
         cand = before | sub
         key = ff_key(cand)
-        winner = live.get(key)
-        if winner is None:
-            inert += 1
-        elif (winner >> 16) & 0xFFFF == (value >> 16) & 0xFFFF:
-            benign += 1
+        cdata = (cand >> 16) & 0xFFFF
+        if key == ikey:
+            if cdata == idata:
+                benign += 1                 # same mask either way
+            elif later:
+                inert += 1                  # a later record wins regardless
+            else:
+                brow = earlier[-1] if earlier else None
+                base = (pool[brow] >> 16) & 0xFFFF if brow is not None else 0
+                eff = ff_mask_effect(key, base, cdata)
+                tag = f"baseline winner row {brow}" if brow is not None \
+                    else "baseline blank (no earlier record)"
+                hazards.append({
+                    "row": row, "subset": sub, "word": cand,
+                    "decode": ff_decode(cand),
+                    "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{base:04X}"
+                               f" → 0x{cdata:04X} ({eff}) · {tag}"
+                               if key in FF_BLOCK_NAMES else
+                               f"chain{key[0]}·block{key[1]} data "
+                               f"0x{base:04X} → 0x{cdata:04X} · {tag}")})
         else:
-            eff = ff_mask_effect(key, winner >> 16, cand >> 16)
-            hazards.append({
-                "subset": sub, "word": cand, "decode": ff_decode(cand),
-                "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{(winner >> 16) & 0xFFFF:04X}"
-                           f" → 0x{(cand >> 16) & 0xFFFF:04X} ({eff})"
-                           if key in FF_BLOCK_NAMES else
-                           f"chain{key[0]}·block{key[1]} data "
-                           f"0x{(cand >> 16) & 0xFFFF:04X} ≠ intended "
-                           f"0x{(value >> 16) & 0xFFFF:04X}")})
-    return {"skipped": None, "hazards": hazards, "benign": benign,
-            "inert": inert}
+            # the partial decodes to a DIFFERENT key: inert unless it
+            # would win that key's slot and change its effective data
+            live = [r for r, w in sorted(pool.items())
+                    if ff_key(w) == key and r != row]
+            if not live or any(r > row for r in live):
+                inert += 1
+            else:
+                brow = live[-1]
+                base = (pool[brow] >> 16) & 0xFFFF
+                if cdata == base:
+                    benign += 1             # same data for that key anyway
+                    continue
+                eff = ff_mask_effect(key, base, cdata)
+                tag = f"baseline winner row {brow}"
+                hazards.append({
+                    "row": row, "subset": sub, "word": cand,
+                    "decode": ff_decode(cand),
+                    "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{base:04X}"
+                               f" → 0x{cdata:04X} ({eff}) · {tag}"
+                               if key in FF_BLOCK_NAMES else
+                               f"chain{key[0]}·block{key[1]} data "
+                               f"0x{base:04X} → 0x{cdata:04X} · {tag}")})
+    return {"skipped": None, "row": row, "hazards": hazards,
+            "benign": benign, "inert": inert}
 
 
 def _raise_write(off, val):
@@ -877,7 +929,17 @@ def burn_preview(rd, row, value, mirror):
         verdict = "ALREADY BURNED"
     else:
         verdict = "SAFE TO BURN"
-    hazards = _ff_hazards(pool, befores[row], row_entries[0]["delta"], value)
+    # V11-G5: hazard-analyze EVERY burn row (the mirror's own before,
+    # hence its own delta, can differ) and merge worst-of: the union of
+    # each row's hazards feeds the panel banner.
+    hazards = {"skipped": None, "hazards": [], "benign": 0, "inert": 0}
+    for e in row_entries:
+        hz = _ff_hazards(pool, e["row"], e["before"], e["delta"], value)
+        if hz["skipped"] and not hazards["skipped"]:
+            hazards["skipped"] = f"row {e['row']}: {hz['skipped']}"
+        hazards["hazards"].extend(hz["hazards"])
+        hazards["benign"] += hz["benign"]
+        hazards["inert"] += hz["inert"]
     predicted = None
     if key in FF_BLOCK_NAMES:
         winners = [r for r in pool if ff_key(pool[r]) == key and r not in rows]

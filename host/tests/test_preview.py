@@ -219,14 +219,18 @@ def test_hazards_known_fbp_case_exactly_three():
 
 
 def test_hazards_two_bit_canary_zero():
+    # EXPECTATION UPDATED (task 12): subset {bit 0} keeps the intent key
+    # (bit 0 is a chain bit) with data 0x0000 != intent 0x0001 -> HAZARD
+    # (a partial defining the key with wrong data is not inert); subset
+    # {bit 16} decodes to unused key (0,0) -> INERT.
     bar = PrevBar()
     bar.rows[224] = FBP_WINNER
     rep, _ = preview(bar, value=0x00010001)   # bits 0 + 16 only
     hz = rep["hazards"]
     assert hz["skipped"] is None
-    assert hz["hazards"] == []
+    assert [h["word"] for h in hz["hazards"]] == [0x00000001]
     assert hz["benign"] == 0
-    assert hz["inert"] == 2                   # both subsets hit unused keys
+    assert hz["inert"] == 1                       # key (0,0) unused
 
 
 # ---------------------------------------------------------------- (f) cap

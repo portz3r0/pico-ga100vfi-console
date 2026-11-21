@@ -130,10 +130,17 @@ on a cold card and in mock (`CMD_READ` is gated by `FUSECTRL_PLM`, not
 - **collision scan**: every existing record with the same
   `(chain, block)` key and a **LAST-WINS verdict** — green *will win*,
   or red *will LOSE to row N* → the burn would be **inert** (fix: burn a
-  later row);
+  later row); a same-key record at exactly a burned row is called out
+  as *record already present at this row — re-burn is a no-op/ALREADY
+  path*;
 - **partial-landing hazards**: every delta subset that, if only it
-  latched, would land a *different* record on a live key with wrong data
-  (with the mask effect it would cause); skipped above 12 delta bits;
+  latched, would *win* its `(chain, block)` key (a partial at the burned
+  row beats every earlier record) with data different from the intent —
+  advisory only, never a gate. A subset whose data equals the intent's
+  is benign; one a strictly-later record overrides is inert. Effects
+  are stated against the burned row's effective winner (baseline named
+  in the text), and every burn row — mirror included — is analyzed;
+  skipped above 12 delta bits;
 - **predicted effect** when decodable (e.g. `GPC_DISABLE data 0x0430 →
   0x0020 (unmasks GPC1/GPC7) · STATUS_OPT_* shadows update only after
   power cycle`);
@@ -241,7 +248,7 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 | Check-before-burn | burning with no fresh guard verdict | client (Burn disabled until a successful Check) + server (a `/api/burn` without `confirm` is only a dry check) |
 | Burn preview structurally read-only | a "what-if" panel that surprises you with writes | server (`ReadOnlyFuse`/`MockFuseReader` raise on every write outside the `CMD_READ` path) |
 | Last-wins collision verdict (`WILL BE INERT`) | burning a record a later existing record already overrides — a wasted row | server (preview collision scan over the FF pool; advisory — the burn itself is not blocked) |
-| Partial-landing hazard list | a subset of the delta latching and making a *wrong* record authoritative | server (preview enumerates delta subsets, capped at 12 bits) |
+| Partial-landing hazard list | a subset of the delta latching and making a *wrong* record authoritative (a partial at the burned row wins over every earlier record) | server (preview enumerates delta subsets per burn row, mirror included, capped at 12 bits; advisory — never a gate) |
 | `IMPOSSIBLE` 1→0 refusal | planning a value that clears bits (OTP can only add) | server (preview verdict + `burn_api`/`glitch_start` pure-0→1 rejection) |
 | `ALREADY BURNED` detection | re-burning an already-latched row | server (preview; `burn_execute` returns success with zero latching writes) |
 | Goldilocks window gate | a standalone burn outside a live window | client (Burn disabled unless the window verdict is open) + server (`burn_execute` ABORTs on the window checks) |
