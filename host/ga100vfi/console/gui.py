@@ -1629,7 +1629,7 @@ LIVEBOOT = r"""
         <div class="field"><label>v_dip strategy</label>
           <select id="gc-strategy">
             <option value="fixed">fixed v_dip</option>
-            <option value="adaptive">adaptive 3D (v_dip · delay · pw)</option>
+            <option value="adaptive" selected>adaptive 3D (v_dip · delay · pw)</option>
           </select></div>
         <div class="field"><label>adaptive v min mV</label><input type="number" id="gc-vmin" value="300"></div>
         <div class="field"><label>adaptive v max mV</label><input type="number" id="gc-vmax" value="380"></div>
@@ -1637,6 +1637,7 @@ LIVEBOOT = r"""
       <div class="frow">
         <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
         <button class="btn" id="gc-ports-refresh" title="rescan serial ports">⟳ rescan</button>
+        <span class="note" id="gc-portnote"></span>
         <div class="field"><label>mode</label>
           <select id="gc-mode">
             <option value="classify">classify only — observe glitch states</option>
@@ -1979,17 +1980,26 @@ LIVEBOOT = r"""
   loadLayout();
 
   // ---- pico port selector ----
+  let portOk = true;   // false = nothing startable; gates campaign start
   async function loadPorts() {
     try {
       const j = await jget("/api/ports");
+      portOk = j.default != null;   // server returns null when nothing is present
       const sel = $("gc-port");
       const cur = (sel.value && sel.value.indexOf("scanning") < 0) ?
-                  sel.value : (j.default || "/dev/ttyACM0");
-      const opts = (j.ports || []).map(p =>
+                  sel.value : (j.default || "");
+      const ports = (j.ports || []).slice().
+        sort((a, b) => (a.pico ? 0 : 1) - (b.pico ? 0 : 1));
+      const label = p =>
+        (p.byid ? `${esc(p.byid)} (${esc(p.path)})` : esc(p.path)) +
+        (p.pico ? " (pico)" : p.vendor ? ` — ${esc(p.vendor)}` : "");
+      sel.innerHTML = ports.map(p =>
         `<option value="${esc(p.path)}" ${p.path === cur ? "selected" : ""}>` +
-        (p.byid ? `${esc(p.byid)} (${esc(p.path)})` : esc(p.path)) + `</option>`).join("");
-      sel.innerHTML = opts ||
-        `<option value="/dev/ttyACM0">/dev/ttyACM0 (not detected)</option>`;
+        label(p) + `</option>`).join("") ||
+        `<option value="" disabled selected>no pico detected</option>`;
+      $("gc-portnote").textContent = j.note || "";
+      $("gc-start").disabled = !portOk;
+      $("gc-start").title = portOk ? "" : "no pico detected — ⟳ rescan";
     } catch (e) {}
   }
   $("gc-ports-refresh").onclick = loadPorts;
@@ -2298,7 +2308,7 @@ LIVEBOOT = r"""
   // campaign
   function setCampaignUI(j) {
     $("gc-stop").disabled = !j.running;
-    $("gc-start").disabled = !!j.running;
+    $("gc-start").disabled = !!j.running || !portOk;
     $("gc-revert").disabled = !!j.running || !j.window_held;
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));

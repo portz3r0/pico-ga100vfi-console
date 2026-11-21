@@ -1595,23 +1595,79 @@ def vrm_revert_now(body):
 
 
 # ---------------------------------------------------------------- ports + gpus
-def serial_ports():
-    """Serial devices present on this host (for the pico port selector)."""
+PICO_VID = "0x2e8a"   # Raspberry Pi Ltd — what the pico (RP2350) enumerates as
+
+
+def _tty_usb_ids(tty, sysfs_tty_dir="/sys/class/tty"):
+    """(vid, vendor, product) for a tty, or (None, None, None). Walks up from
+    the resolved /sys/class/tty/<tty>/device reading uevent files: usb
+    interface nodes carry PRODUCT=<vid>/<product>/<bcd> (usb-serial port
+    nodes carry VID= directly), and the usb device node at the top adds
+    MANUFACTURER=/PRODUCTNAME= — the walk stops there. Any unreadable level
+    yields (None, None, None) — a missing vid must never hide a port that
+    is present."""
+    vid = vendor = product = None
+    path = os.path.realpath(os.path.join(sysfs_tty_dir, tty, "device"))
+    for _ in range(8):   # tty → usb interface → usb device is 2 hops; cap it
+        try:
+            with open(os.path.join(path, "uevent"),
+                      encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        at_usb_device = False
+        for line in lines:
+            key, _, val = line.partition("=")
+            val = val.strip()
+            if key == "DEVTYPE" and val == "usb_device":
+                at_usb_device = True   # last word on ids — stop after this node
+            elif vid is None and key == "VID" and len(val) == 4:
+                vid = "0x" + val.lower()
+            elif vid is None and key == "PRODUCT" and "/" in val:
+                vid = "0x" + val.split("/", 1)[0].lower()
+            elif key == "MANUFACTURER" and vendor is None:
+                vendor = val
+            elif key == "PRODUCTNAME" and product is None:
+                product = val
+        if at_usb_device:
+            return vid, vendor, product
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return vid, vendor, product
+
+
+def serial_ports(dev_dir="/dev", sysfs_tty_dir="/sys/class/tty"):
+    """Serial devices present on this host (for the pico port selector).
+    Each entry carries vid/vendor/product from sysfs and pico: True when the
+    vid is Raspberry Pi's or the by-id name names Raspberry Pi. default is
+    the first Pico, else the first device, else None — never a phantom port
+    that isn't there."""
     ports = []
-    for pat in ("/dev/ttyACM*", "/dev/ttyUSB*"):
-        for p in sorted(glob.glob(pat)):
-            ports.append({"path": p})
+    for pat in ("ttyACM*", "ttyUSB*"):
+        for p in sorted(glob.glob(os.path.join(dev_dir, pat))):
+            vid, vendor, product = _tty_usb_ids(os.path.basename(p),
+                                                sysfs_tty_dir)
+            ports.append({"path": p, "vid": vid, "vendor": vendor,
+                          "product": product})
     byid = {}
-    for p in glob.glob("/dev/serial/by-id/*"):
+    for p in glob.glob(os.path.join(dev_dir, "serial/by-id/*")):
         try:
             byid[os.path.realpath(p)] = os.path.basename(p)
         except OSError:
             pass
     for entry in ports:
         entry["byid"] = byid.get(os.path.realpath(entry["path"]))
-    default = next((p["path"] for p in ports if "ttyACM" in p["path"]),
-                   ports[0]["path"] if ports else "/dev/ttyACM0")
-    return {"ports": ports, "default": default}
+        entry["pico"] = (entry["vid"] == PICO_VID or
+                         "raspberry" in (entry["byid"] or "").lower())
+    default = next((p["path"] for p in ports if p["pico"]),
+                   ports[0]["path"] if ports else None)
+    out = {"ports": ports, "default": default}
+    if ports and not any(p["pico"] for p in ports):
+        out["note"] = ("no Raspberry Pi device found — showing other "
+                       "serial ports")
+    return out
 
 
 def gpu_state(bdf):

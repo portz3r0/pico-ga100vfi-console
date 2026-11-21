@@ -169,7 +169,8 @@ Reverse with **Load nvidia** / **Remove blacklist** when you're done.
 1. **Glitch & Burn** tab → Target card: pick the GPU (the pill shows its
    live state; the serial identifies the physical card) and the pico port
    (dropdown, with a rescan button).
-2. Campaign card: choose the **v_dip strategy**. `fixed` uses your v_dip
+2. Campaign card: choose the **v_dip strategy** — `adaptive 3D` is the
+   default selection. `fixed` uses your v_dip
    value; `adaptive` (recommended for a card you haven't characterised)
    runs the 3D CRC-guided search over (v_dip, delay, pw) and converges
    on the card's window.
@@ -447,7 +448,7 @@ bricked.
 |---|---|---|
 | GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — and the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE) |
 | GET | `/api/full` | full row dump + hex window |
-| GET | `/api/ports` | serial ports present on the host (pico selector) |
+| GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/ff/layout` | FF region occupancy + policy zones |
 | GET | `/api/glitch/status` | campaign stats + log tail |
@@ -475,7 +476,14 @@ explaining the fallback; `/api/live` and `/api/driver` carry the same
 resolves to the effective BDF, never to an absent configured one. The
 pico port is a dropdown populated from the host's serial devices
 (`/dev/ttyACM*`, `/dev/ttyUSB*`, with `/dev/serial/by-id` names when
-available).
+available). Each entry carries `vid`/`vendor`/`product` read from sysfs
+and `pico: true` when the USB vendor is Raspberry Pi (`0x2e8a`) or the
+by-id name names Raspberry Pi; Raspberry Pi devices sort first in the
+dropdown with a `(pico)` suffix. `default` is the first Pico, else the
+first device, else `null` — never a phantom port; `null` renders a
+disabled `no pico detected` option and gates campaign start until a
+rescan finds a device. A `note` is returned when serial devices exist
+but none is a Raspberry Pi.
 
 ### Network exposure
 
