@@ -1,5 +1,15 @@
 # GA100 Fuse Console — User Guide
 
+> **WARNING — FUSE BURNS ARE PERMANENT AND CAN BRICK YOUR GPU.** Every burn is
+> an irreversible one-time-programmable write: a wrong or malformed record can
+> leave the card unbootable or unusable **forever** — there is no undo, no
+> reflash, no recovery for many mistakes. **It is entirely YOUR responsibility**
+> to verify what you burn — use the read-only Burn Preview, the guard checks,
+> readbacks and your own research before arming. **The developer accepts NO
+> responsibility** for bricked cards, damaged hardware, lost work or any other
+> consequence of using this tool. You are modifying your own hardware at your
+> own risk.
+
 Operational guide for the Fuse Console (`ga100vfi console`): what every
 control does, the end-to-end unlock workflow, and the complete guard
 chain. Reference detail (HTTP API, systemd unit, flags) lives in
@@ -62,7 +72,7 @@ before exiting, so an interrupted run never leaves NVVDD low.
 
 ![Fuse Explorer tab — row table with FF records](images/console-explorer.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 Live pure-read view of the target card. Controls and indicators:
@@ -82,7 +92,7 @@ Live pure-read view of the target card. Controls and indicators:
 
 ![Glitch & Burn tab — burn payload and campaign panels](images/console-glitch-burn.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 | Card / control | Behavior |
@@ -112,7 +122,7 @@ sequence inside the burn itself — they never block the check or burn.
 
 ![Check result — green window bits, amber arm-pending rows](images/console-check-panel.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 **Burn Preview panel** (`Preview burn (read-only)`): a dry-run of the
@@ -148,7 +158,7 @@ on a cold card and in mock (`CMD_READ` is gated by `FUSECTRL_PLM`, not
 
 ![Burn Preview — decoded record, LAST-WINS collision verdict, hazards](images/console-preview.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 After a real `VERIFY OK` burn of the same payload, the burn report adds
@@ -161,7 +171,7 @@ any mismatch red. Both artifacts persist in the state dir
 
 ![Drivers tab](images/console-drivers.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 State cards (bound driver, version, blacklist, loaded modules) +
@@ -175,7 +185,7 @@ stack unloaded **and** blacklisted.
 
 ![GPU Info tab](images/console-gpu.png)
 
-*Captured from the console UI in mock mode (representative fuse data);
+*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
 
 Per-GPU nvidia-smi grid (auto-refresh 1–10 s or off) + `lspci` link
@@ -185,6 +195,16 @@ skips nvidia-smi entirely (NVML would auto-load the driver back) and
 shows lspci only.
 
 ## 4. End-to-end workflow
+
+> **WARNING — FUSE BURNS ARE PERMANENT AND CAN BRICK YOUR GPU.** Every burn is
+> an irreversible one-time-programmable write: a wrong or malformed record can
+> leave the card unbootable or unusable **forever** — there is no undo, no
+> reflash, no recovery for many mistakes. **It is entirely YOUR responsibility**
+> to verify what you burn — use the read-only Burn Preview, the guard checks,
+> readbacks and your own research before arming. **The developer accepts NO
+> responsibility** for bricked cards, damaged hardware, lost work or any other
+> consequence of using this tool. You are modifying your own hardware at your
+> own risk.
 
 1. **Explore** (read-only): open the console, press **⟳ Run full dump**,
    study topology / TPC map / FF rows. `CRC_STATUS == 0x55` = the fuse
@@ -213,11 +233,14 @@ shows lspci only.
 
    ![Armed state — countdown pill; Burn stays disabled without a live window](images/console-armed.png)
 
-   *Captured from the console UI in mock mode (representative fuse
+   *Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse
    data); card serial, host name, IP
    addresses, username and home paths are masked. Shown armed with the
-   window verdict `n/a` (mock-served card state), so Burn now is
-   disabled — it enables only with a live open window.*
+   window verdict `n/a` (mock-served card state); **Burn now** appears
+   enabled because the check response is a route-injected live-shaped
+   one reporting an open burn window — mock mode refuses the real check
+   server-side (correcting the earlier caption, which claimed Burn was
+   disabled in this shot; it was not).*
 8. **Burn**: either **Burn now** (only inside a live window) or — the
    normal path — set campaign mode **burn payload on first Goldilocks**
    and start: the burn runs *inside the campaign process* on the first

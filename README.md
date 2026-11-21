@@ -6,6 +6,16 @@ toolchain (itself inspired by
 [`kate-land/ga100vfi`](https://github.com/kate-land/ga100vfi)), on generic
 RP2350A / RP2350B boards using an I2C-only actuation path.
 
+> **WARNING — FUSE BURNS ARE PERMANENT AND CAN BRICK YOUR GPU.** Every burn is
+> an irreversible one-time-programmable write: a wrong or malformed record can
+> leave the card unbootable or unusable **forever** — there is no undo, no
+> reflash, no recovery for many mistakes. **It is entirely YOUR responsibility**
+> to verify what you burn — use the read-only Burn Preview, the guard checks,
+> readbacks and your own research before arming. **The developer accepts NO
+> responsibility** for bricked cards, damaged hardware, lost work or any other
+> consequence of using this tool. You are modifying your own hardware at your
+> own risk.
+
 Credits:
 - [`kate-land`](https://github.com/kate-land) for discovering the GA100 VFI method,
   the fuse controller map, and the original tooling ([write-up](https://blog.kate.land/posts/using-voltage-glitching-to-unlock-the-a100/)).
@@ -35,7 +45,7 @@ sudo python3 -m ga100vfi console --port 8790
 | ![Drivers tab](docs/images/console-drivers.png) | ![GPU Info tab](docs/images/console-gpu.png) |
 
 *Console screenshots were captured from the current console UI in mock
-mode (representative fuse data); card serial, host name, IP addresses,
+mode on the latest code, including the brick-risk warning banner (representative fuse data); card serial, host name, IP addresses,
 username and home paths are masked.*
 
 - Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
@@ -333,6 +343,16 @@ This is all conjecture and best guesses, though. Take it with oceans of salt and
 do not consider this advice.
 
 ## Disclaimer
+
+> **WARNING — FUSE BURNS ARE PERMANENT AND CAN BRICK YOUR GPU.** Every burn is
+> an irreversible one-time-programmable write: a wrong or malformed record can
+> leave the card unbootable or unusable **forever** — there is no undo, no
+> reflash, no recovery for many mistakes. **It is entirely YOUR responsibility**
+> to verify what you burn — use the read-only Burn Preview, the guard checks,
+> readbacks and your own research before arming. **The developer accepts NO
+> responsibility** for bricked cards, damaged hardware, lost work or any other
+> consequence of using this tool. You are modifying your own hardware at your
+> own risk.
 
 Use at your own risk. I am not responsible for bricked cards, toasted VRMs, dead
 boards, thermonuclear war, or anything else that happens from using this tool. You

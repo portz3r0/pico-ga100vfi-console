@@ -316,6 +316,16 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 
 ## Burn safety model (reference)
 
+> **WARNING — FUSE BURNS ARE PERMANENT AND CAN BRICK YOUR GPU.** Every burn is
+> an irreversible one-time-programmable write: a wrong or malformed record can
+> leave the card unbootable or unusable **forever** — there is no undo, no
+> reflash, no recovery for many mistakes. **It is entirely YOUR responsibility**
+> to verify what you burn — use the read-only Burn Preview, the guard checks,
+> readbacks and your own research before arming. **The developer accepts NO
+> responsibility** for bricked cards, damaged hardware, lost work or any other
+> consequence of using this tool. You are modifying your own hardware at your
+> own risk.
+
 Every burn — standalone or in-campaign — passes ALL of these, re-verified
 server-side immediately before `CMD_WRITE`:
 

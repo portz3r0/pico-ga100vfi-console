@@ -1502,6 +1502,11 @@ LIVEBOOT = r"""
 
   // ---------- Glitch & Burn pane ----------
   $("tab-glitch").innerHTML = `
+    <div class="card verdict" id="gb-brickwarn" style="margin-bottom:12px">
+      <b class="bad">⚠ Burns are permanent OTP writes — a wrong burn can BRICK
+      your GPU permanently. Verify with Preview first. No responsibility is
+      accepted by the developer.</b>
+    </div>
     <div class="card" id="gb-target">
       <h3>Target</h3>
       <div class="frow">
@@ -2254,7 +2259,10 @@ LIVEBOOT = r"""
     if (!windowOk) { alert("Burn window is not open — run a glitch campaign " +
       "first (EFP/WDATA_PLM auto-arm at burn; the window itself must be open)"); return; }
     if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
-                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) + "?")) return;
+                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) +
+                 "?\nBurns are permanent OTP writes — a wrong burn can BRICK your " +
+                 "GPU permanently. Verify with Preview first. No responsibility " +
+                 "is accepted by the developer.")) return;
     let j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
     // journal uncertainty: an unresolved command_may_be_issued means a
     // previous CMD_WRITE may have latched without readback — explicit
@@ -2338,9 +2346,12 @@ LIVEBOOT = r"""
           " (rows auto-assigned in the safe zone)\n"
         : "Start glitching and BURN the payload on first Goldilocks?\n" +
           "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
-          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n")) +
+          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n") +
         "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
-        "verifies OK; a burn ABORT is not final — attempts keep firing.") return;
+        "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
+        "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
+        "permanently. Verify with Preview first. No responsibility is " +
+        "accepted by the developer.")) return;
     } else if (!confirm("Start glitch campaign?\n" +
         "the pico on port " + $("gc-port").value + " dips NVVDD on " +
         (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
