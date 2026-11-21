@@ -64,7 +64,10 @@ class Card6:
                 if self.sense_breaks_crc:
                     self.r[S.CRC_STATUS] = 0x00
             elif cmd == S.CMD_WRITE:
-                self.rows[self.r[S.FUSEADDR]] = self.r[S.FUSEWDATA]
+                # OTP physics: CMD_WRITE ORs FUSEWDATA (the delta) into the
+                # row — bits can only be added (ga100_burn writes the delta)
+                self.rows[self.r[S.FUSEADDR]] = \
+                    self.rows.get(self.r[S.FUSEADDR], 0) | self.r[S.FUSEWDATA]
             elif cmd == S.CMD_READ:
                 self.r[S.FUSERDATA] = self.rows.get(self.r[S.FUSEADDR], 0)
             self.r[S.FUSECTRL] = IDLE6         # commands always retire to idle
@@ -72,6 +75,8 @@ class Card6:
             self.r[off] = val
             if val == 0 and not self.plm_stuck:
                 self.r[S.FUSEWDATA_PLM] = 0xFFFFFFFF
+        elif off == S.GPIO_TRIGGER:
+            self.r[off] = val & ~1             # bit0 self-clears on landing
         else:
             self.r[off] = val
 

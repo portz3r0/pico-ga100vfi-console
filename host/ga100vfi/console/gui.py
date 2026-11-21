@@ -1843,15 +1843,42 @@ LIVEBOOT = r"""
     loadLayout();   // budget may have changed
   };
 
+  // burn report: result line colored by outcome — VERIFY OK green,
+  // ALREADY BURNED amber (partial-run recovery, zero writes), ABORT /
+  // VERIFY FAIL / IMAGE VERIFY FAILED red. All server strings through esc().
+  function burnResultSpan(r) {
+    if (!r) return "";
+    const cls = r === "VERIFY OK" ? "ok"
+      : r === "ALREADY BURNED" ? "warn" : "bad";
+    return `<b class="${cls}">${esc(r)}</b>`;
+  }
+  function burnReportHtml(j) {
+    const m = j.mirror;
+    return `<div>burn result: ${burnResultSpan(j.result) || "—"}</div>` +
+      (m ? `<div>mirror result: ${burnResultSpan(m.result) || "—"}</div>` : "") +
+      `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
+  }
+
   $("gb-burnnow").onclick = async () => {
     if (!payloadChecked) { alert("Check the payload first"); return; }
     if (!windowOk) { alert("Burn window is not open — run a glitch campaign " +
       "first (EFP/WDATA_PLM auto-arm at burn; the window itself must be open)"); return; }
     if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
                  payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) + "?")) return;
-    const j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
-    $("gb-checkresult").innerHTML =
-      `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
+    let j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
+    // journal uncertainty: an unresolved command_may_be_issued means a
+    // previous CMD_WRITE may have latched without readback — explicit
+    // user confirm required before proceeding (ack_uncertain).
+    if (j.journal_uncertain || (j.mirror && j.mirror.journal_uncertain)) {
+      if (confirm("UNCERTAIN BURN STATE — the burn journal has an unresolved " +
+                  "command_may_be_issued: a previous CMD_WRITE may have " +
+                  "latched without a readback. Inspect burn_journal.jsonl in " +
+                  "the state dir. Proceed anyway (ack_uncertain)?")) {
+        j = await jpost("/api/burn", {...payloadChecked, confirm: true,
+                                      token: armToken, ack_uncertain: true});
+      }
+    }
+    $("gb-checkresult").innerHTML = burnReportHtml(j);
     loadLayout();   // a burn changes the zone — refresh the map
   };
 
@@ -1873,6 +1900,7 @@ LIVEBOOT = r"""
       `<span class="pill">dsov=0 <b>${s.dsov_zero || 0}</b></span>` +
       `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
       (s.burn_aborts ? `<span class="pill warnl">burn aborts <b>${s.burn_aborts}</b> (not final — attempts keep firing)</span>` : "") +
+      (s.image_verify ? `<span class="pill badl">${esc(s.image_verify)} — window NOT held</span>` : "") +
       (j.window_held ? `<span class="pill okl">window HELD open — verify/burn now, then Revert VRM or cold-boot</span>` : "");
     if ((j.log || []).length) {
       const logEl = $("gc-log");

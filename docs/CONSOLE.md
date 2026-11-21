@@ -221,10 +221,15 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 4. **▶ Start campaign**, confirm the dialog (it repeats the exact row,
    value, mirror and target). The campaign glitches; on the first
    Goldilocks it burns the records in-process: each burn re-checks the
-   window, runs the SENSE_CTRL arm sequence, `CMD_WRITE`, and read-back
-   verify logged as `row N: VERIFY OK`. The campaign ends only when EVERY
-   record verifies OK; a burn `ABORT` is logged, counted in the
-   `burn aborts` chip, and is NOT final — attempts keep firing.
+   driver-unbound state, journal, GPIO19 preflight and window, runs the
+   SENSE_CTRL arm sequence, the EN=1 + GPIO19/TRIGGER program bracket with
+   `CMD_WRITE` of the **delta**, and read-back verify logged as
+   `row N: VERIFY OK` (a row already latched by an earlier aborted run
+   logs `ALREADY BURNED` and still counts as success). The campaign ends
+   only when EVERY record succeeds AND — for ≥2-record burns — the whole
+   burned image re-reads correctly twice; a burn `ABORT` or
+   `IMAGE VERIFY FAILED` is logged and is NOT final — attempts keep
+   firing and the window is not held.
 5. Cold-boot the card, then verify honestly — see workflow 5.
 
 ### 5. After a burn: verify and, if needed, correct
@@ -258,7 +263,8 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase |
 | Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
-| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts |
+| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / image verify failed |
+| burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain` |
 
 ## Burn safety model (reference)
 
@@ -266,26 +272,68 @@ Every burn — standalone or in-campaign — passes ALL of these, re-verified
 server-side immediately before `CMD_WRITE`:
 
 1. **Arm token**: typed phrase `BURN`, 120 s TTL.
-2. **Pure 0→1 transition**: new value must be a superset of the current row
+2. **Driver unbound**: the target must have no driver bound (same sysfs
+   source as the Drivers tab) — mirrors `bar.require_unbound()`; a bound
+   driver aborts before any write.
+3. **Journal resolved**: an unresolved `command_may_be_issued` in
+   `burn_journal.jsonl` (see below) aborts with `journal_uncertain` until
+   the request carries `ack_uncertain: true` (the GUI shows an explicit
+   confirm dialog).
+4. **GPIO19 preflight** (mirrors `ga100_burn.preflight`): `GPIO (0xD65C)`
+   must read with normal mux (`& 0xFF == 0`), non-inverted push-pull and
+   low latch (`& (0x1000|0x8000|0x40000) == 0`); failure aborts with the
+   failing value in the report, before any write.
+5. **Pure 0→1 transition**: new value must be a superset of the current row
    value (OTP physics — bits can only be added).
-3. **Row state match**: the row must currently read exactly the expected old
-   value; any drift aborts.
-4. **Burn window** (static, read-only — mirrors `ga100_burn.check_window`):
+6. **Row state**: the row must currently read exactly the expected old
+   value; any drift aborts — **except** a row that already reads exactly
+   the intended value (`ALREADY BURNED`): that counts as success with zero
+   latching writes, so a mirror pair aborted halfway can still complete.
+7. **Burn window** (static, read-only — mirrors `ga100_burn.check_window`):
    `DSOV == 0`, `CRC_STATUS == 0x55`, loader `0x120060 == 0`,
    `FUSECTRL_PLM`/`PRIV_MASK` open, `DEBUGCTRL == 0`, `SWIFF == 0`,
    `IFF_CTRL == 0`, `FUSECTRL` idle (state bits[1:0]==0, stage[20:16]==4).
-5. **Arm sequence** (mirrors `ga100_burn.arm`, executed ONLY inside the
+8. **Arm sequence** (mirrors `ga100_burn.arm`, executed ONLY inside the
    burn itself): if `EFP != 1`, issue `SENSE_CTRL` (`FUSECTRL = 3`, poll to
    idle ≤2 s, at most once per burn attempt — no retry) and re-check the
    window (a failed re-check is fatal); then require `EFP == 1` and
    `PROGRAM_DIS == 0`; write `WDATA_SECURE = 0` and `SBFE = 0`; then require
-   `FUSEWDATA_PLM == 0xFFFFFFFF`. The poller, `/api/live`, the burn check
-   and fusedump NEVER write and NEVER issue SENSE — a static `EFP == 0` or
-   `FUSEWDATA_PLM == 0xFFFFFFF8` is normal outside a burn and must not
-   block the check or the burn.
-6. **Placement policy**: blank row inside the safe zone (see below).
-7. **No retries**: any window/arm failure or verify mismatch aborts; nothing
-   is retried blindly.
+   `FUSEWDATA_PLM == 0xFFFFFFFF`. The poller, `/api/live` and fusedump
+   never touch the write path at all; the burn check issues only
+   `CMD_READ` (`FUSEADDR`/`FUSECTRL`) and conditionally clears/restores
+   `EN_SW_OVERRIDE` for the read — it never issues SENSE, never writes
+   `FUSEWDATA`, never raises `EN_SW_OVERRIDE`, and never touches
+   `GPIO`/`TRIGGER`. A static `EFP == 0` or `FUSEWDATA_PLM == 0xFFFFFFF8`
+   is normal outside a burn and must not block the check or the burn.
+9. **Program bracket** (mirrors `ga100_burn.program` per row): fsync'd
+   journal `command_may_be_issued`; raise `EN_SW_OVERRIDE = 1` with
+   read-back check (no retry); `GPIO19` high + `TRIGGER (0xD604)` pulse
+   (masked write `0x30FF`, poll `TRIGGER` bit0 clear ≤2 s); `FUSEADDR = row`,
+   `FUSEWDATA = delta` (**delta = value & ~current**, not the full value —
+   same as the reference), `FUSECTRL = CMD_WRITE`, poll to idle; then in
+   `finally`: `GPIO19` low + `TRIGGER` pulse, restore the saved `GPIO` and
+   `EN_SW_OVERRIDE` values. `GPIO`/`TRIGGER`/`EN=1` writes exist ONLY in
+   this bracket.
+10. **Read-back verify** with `EN_SW_OVERRIDE` cleared for reads, then a
+    journal `verified` event.
+11. **Whole-image verify** after a multi-record burn (≥2 rows succeeded,
+    incl. a mirror pair): every burned row is re-read twice and compared to
+    the intended values; a mismatch reports `IMAGE VERIFY FAILED` — the
+    campaign does NOT hold the window and does not claim success.
+12. **Placement policy**: blank row inside the safe zone (see below).
+13. **No retries**: any window/arm/latch/verify failure aborts; nothing
+    is retried blindly.
+
+### Burn journal
+
+`<state-dir>/burn_journal.jsonl` — fsync'd JSONL, mirroring
+`ga100_burn.Journal`: `command_may_be_issued` (`ts`, `bdf`, `row`,
+`before`, `delta`, `after`) is written **before** `EN_SW_OVERRIDE = 1` can
+latch anything, and `verified` after the read-back matches (or the row is
+`ALREADY BURNED`). A burn that dies between the two leaves the journal
+uncertain; the next burn refuses to start (`uncertain burn state — resolve
+journal`) until a human resolves it or explicitly acks
+(`ack_uncertain: true`).
 
 ### FF placement policy (hard-enforced)
 
@@ -335,7 +383,7 @@ bricked.
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) |
-| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`) |
+| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |

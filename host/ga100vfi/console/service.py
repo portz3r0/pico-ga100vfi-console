@@ -5,11 +5,11 @@ Endpoints:
   GET  /api/live         fast probe: status + shadow regs. PURE reads, safe any time.
   GET  /api/full         full 488-row dump via CMD_READ + hex window (manual only).
   GET  /api/glitch/status  campaign stats + log tail
-  POST /api/glitch/start   {params..., mode, records[], token, no_revert}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open)
+  POST /api/glitch/start   {params..., mode, records[], token, no_revert, ack_uncertain}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open; ack_uncertain proceeds despite an unresolved burn journal)
   POST /api/glitch/stop
   POST /api/revert         {port?} — hand PMBus control back (undo a held window)
   GET  /api/burn/check?row=&value=&mirror=   guards + current row value (dry)
-  POST /api/burn           {row, value, old, mirror, confirm, token}
+  POST /api/burn           {row, value, old, mirror, confirm, token, ack_uncertain}
   POST /api/arm            {phrase: "BURN"} -> 120s arm token
   GET  /api/driver         driver/modules/blacklist state
   POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
@@ -26,6 +26,10 @@ Safety model:
     (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM — mirrors
     ga100_burn.arm); EFP/WDATA_PLM reading 0 statically does NOT block a
     burn. Standalone burns outside a window are structurally refused.
+    Each programmed row then mirrors ga100_burn.program: driver-unbound,
+    journal (fsync'd command_may_be_issued before EN=1 can latch), GPIO19
+    preflight, EN_SW_OVERRIDE=1 raise, GPIO(0xD65C)/TRIGGER(0xD604) strobe
+    bracket around ADDR/WDATA(delta)/CMD_WRITE, restore in finally.
   * The glitch campaign can burn records IN-PROCESS on the first Goldilocks
     (the PCIe window dies seconds after the campaign loop returns, so a
     separate burn call would miss it). Campaign/burn logic mirrors
@@ -94,6 +98,11 @@ PROGRAM_DIS, WDATA_SECURE = 0x82007C, 0x82048C
 SWIFF, IFF_CTRL = 0x820088, 0x820028          # fusedump EXTRA controller-state regs
 LOADER_120060 = 0x120060                      # loader must be quiescent (ga100_dump)
 CMD_READ, CMD_WRITE, CMD_SENSE = 1, 2, 3
+
+# GPIO19 program strobe (ga100_burn: GPIO=0xD65C, TRIGGER=0xD604). Written
+# ONLY inside the burn_execute write bracket — never by probe/poller/check.
+GPIO_REG, GPIO_TRIGGER = 0xD65C, 0xD604
+GPIO_MASK = 0x30FF          # mux[7:0] | out[12] | output-enable[13]
 
 # opened by arm_window at burn time (SENSE_CTRL restores EFP; WDATA_SECURE=0
 # opens FUSEWDATA_PLM). A static read of these must NOT block a burn check
@@ -295,6 +304,74 @@ def _fusectrl_idle(rd, timeout_s):
     return False
 
 
+# ---------------------------------------------------------------- burn journal
+def _journal_path():
+    return os.path.join(CFG["state_dir"], "burn_journal.jsonl")
+
+
+def journal_append(path, event, **fields):
+    """fsync'd JSONL line — ga100_burn.Journal discipline: the
+    'command_may_be_issued' record must be on disk BEFORE any write that
+    can latch, so a crash mid-burn leaves provable uncertainty."""
+    rec = {"event": event,
+           "ts": datetime.now().isoformat(timespec="seconds"), **fields}
+    with open(path, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def journal_uncertain(path):
+    """True when the journal's last unresolved event is a
+    command_may_be_issued — the CMD_WRITE may have latched without a
+    readback, so the next burn must not proceed blindly."""
+    uncertain = False
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    ev = json.loads(line).get("event")
+                except ValueError:
+                    continue
+                if ev == "command_may_be_issued":
+                    uncertain = True
+                elif ev in ("verified", "card_stopped"):
+                    uncertain = False
+    except OSError:
+        return False
+    return uncertain
+
+
+def _gpio_strobe(rd, wr, saved_gpio, high):
+    """GPIO19 program strobe, mirroring ga100_burn.gpio: masked write
+    (normal mux, push-pull enable, out=high), TRIGGER pulse, poll bit0
+    clear. write_checked semantics on the GPIO write — verify the masked
+    latch once, no retry."""
+    value = (saved_gpio & ~GPIO_MASK) | 0x2000 | (0x1000 if high else 0)
+    wr(GPIO_REG, value)
+    actual = rd(GPIO_REG)
+    if actual & GPIO_MASK != value & GPIO_MASK:
+        raise RuntimeError(f"GPIO write did not latch at 0x{GPIO_REG:x}: "
+                           f"requested 0x{value:08X}, read 0x{actual:08X}")
+    wr(GPIO_TRIGGER, 1)
+    t0 = time.time()
+    while rd(GPIO_TRIGGER) & 1:
+        if time.time() - t0 > 2.0:
+            raise RuntimeError("GPIO update timed out (TRIGGER bit0 stuck)")
+        time.sleep(0.0001)
+
+
+def burn_image_verify(rd, wr, burned):
+    """Whole-image check after a multi-record burn (ref:
+    read_rows(passes=2) == final_rows). Two passes over every burned row,
+    compared against the intended values."""
+    for _ in range(2):
+        for row, want in burned:
+            if read_row_via(rd, wr, row) != want:
+                return False
+    return True
+
+
 def arm_window(rd, wr):
     """Open the write path inside a verified window, mirroring ga100_burn.arm.
     SENSE_CTRL (FUSECTRL=CMD_SENSE) restores EFP (PROGRAM_EN); it is issued
@@ -330,48 +407,103 @@ def arm_window(rd, wr):
     return plm == 0xFFFFFFFF, checks
 
 
-def burn_execute(rd, wr, row, value, old) -> dict:
-    """Guarded single-row burn. Returns report dict. NEVER retries.
-    Window check then SENSE arm sequence (arm_window is the ONLY SENSE
-    caller); guards = window checks + arm checks, in order."""
+def burn_execute(rd, wr, row, value, old, bdf=None, journal=None,
+                 ack_uncertain=False) -> dict:
+    """Guarded single-row burn mirroring ga100_burn.program per row.
+    Returns report dict. NEVER retries. Order: driver-unbound, journal
+    uncertainty, GPIO19 preflight, window+arm, row read/old-match,
+    fsync'd journal, EN=1 raise, GPIO19-high + TRIGGER bracket around
+    ADDR/WDATA(delta)/CMD_WRITE, GPIO-low in finally, readback with EN
+    cleared, EN restore in finally. GPIO/TRIGGER/EN=1 writes exist ONLY
+    here — never in probe / poller / burn_check / fusedump / mock."""
     rep = {"row": row, "value": value, "old": old}
+    bdf = bdf or CFG["bdf"]
+    bound = driver_of(bdf)                    # ref bar.require_unbound
+    if bound:
+        rep["result"] = (f"ABORT — driver '{bound}' is bound to {bdf}; "
+                         "unbind first (no writes issued)")
+        return rep
+    if journal and journal_uncertain(journal) and not ack_uncertain:
+        rep["result"] = ("ABORT — uncertain burn state — resolve journal "
+                         "(unresolved command_may_be_issued)")
+        rep["journal_uncertain"] = True
+        return rep
+    saved_gpio = rd(GPIO_REG)                 # ref preflight GPIO19 check
+    if saved_gpio & 0xFF or saved_gpio & (0x1000 | 0x8000 | 0x40000):
+        rep["result"] = (f"ABORT — GPIO19 preflight: 0x{saved_gpio:08X} — "
+                         "GPIO19 must have its normal mux, non-inverted "
+                         "push-pull output and low latch (no writes issued)")
+        return rep
     ok, checks = arm_window(rd, wr)
     rep["guards"] = checks
     if not ok:
         rep["result"] = "ABORT — guard failure (no Goldilocks window)"
         return rep
-    en_sw = rd(EN_SW_OVERRIDE)
-    wr(EN_SW_OVERRIDE, 0)
+    saved_en = rd(EN_SW_OVERRIDE)
+    wr(EN_SW_OVERRIDE, 0)                     # EN cleared for reads
     time.sleep(0.05)
+    gpio_touched = False
     try:
         cur = read_row_via(rd, wr, row)
         rep["row_before"] = cur
+        if cur == value and (value & old) == old and value != old:
+            # partial-campaign recovery: this row latched in an earlier
+            # aborted run — success with zero latching writes, so a
+            # mirror-pair partner can still complete the campaign.
+            rep["result"] = "ALREADY BURNED"
+            if journal:
+                journal_append(journal, "verified", bdf=bdf, row=row,
+                               word=value)
+            return rep
         if cur != old:
             rep["result"] = (f"ABORT — row {row} reads 0x{cur:08X}, "
                              f"expected old 0x{old:08X}")
             return rep
-        wr(FUSECTRL, 0)
-        wr(FUSEADDR, row)
-        wr(FUSEWDATA, value)
-        wr(FUSECTRL, CMD_WRITE)
-        t0 = time.time()
-        while time.time() - t0 < 2.0:
-            c = rd(FUSECTRL)
-            if ((c >> 16) & 0x1F) == 4 and (c & 3) == 0:
-                break
-            time.sleep(0.001)
-        else:
-            rep["result"] = "ABORT — CMD_WRITE did not return to IDLE"
+        delta = value & ~cur & 0xFFFFFFFF     # ref writes the delta, not the value
+        rep["delta"] = delta
+        if journal:
+            # synced BEFORE FUSE_EN can be raised (ref program())
+            journal_append(journal, "command_may_be_issued", bdf=bdf,
+                           row=row, before=cur, delta=delta, after=value)
+        wr(EN_SW_OVERRIDE, 1)                 # ref write_checked(EN, 1)
+        en_rb = rd(EN_SW_OVERRIDE)
+        if en_rb != 1:
+            rep["result"] = (f"ABORT — EN_SW_OVERRIDE did not latch: "
+                             f"requested 1, read 0x{en_rb:08X}")
+            return rep
+        gpio_touched = True
+        try:
+            try:
+                _gpio_strobe(rd, wr, saved_gpio, True)
+                wr(FUSECTRL, 0)
+                wr(FUSEADDR, row)
+                wr(FUSEWDATA, delta)
+                wr(FUSECTRL, CMD_WRITE)
+                if not _fusectrl_idle(rd, 2.0):
+                    rep["result"] = "ABORT — CMD_WRITE did not return to IDLE"
+                    return rep
+            finally:
+                _gpio_strobe(rd, wr, saved_gpio, False)
+        except RuntimeError as e:
+            rep["result"] = f"ABORT — {e}"
             return rep
         wr(EN_SW_OVERRIDE, 0)
         time.sleep(0.05)
         rb = read_row_via(rd, wr, row)
         rep["readback"] = rb
-        rep["result"] = ("VERIFY OK" if rb == value else
-                         "VERIFY FAIL — readback does not match")
+        if rb == value:
+            rep["result"] = "VERIFY OK"
+            if journal:
+                journal_append(journal, "verified", bdf=bdf, row=row,
+                               word=value)
+        else:
+            rep["result"] = "VERIFY FAIL — readback does not match"
         return rep
     finally:
-        wr(EN_SW_OVERRIDE, en_sw)
+        if gpio_touched:                      # ref finally: restore GPIO19
+            wr(GPIO_REG, saved_gpio)
+            wr(GPIO_TRIGGER, 1)
+        wr(EN_SW_OVERRIDE, saved_en)
         time.sleep(0.05)
 
 
@@ -598,12 +730,31 @@ def burn_api(body):
                 "policy": {"ok": False, "issues": issues, "layout": layout}}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
+    journal = _journal_path()
+    ack = bool(body.get("ack_uncertain"))
     try:
         with Bar0(bdf) as bar:
-            rep = burn_execute(bar.rd32, bar.wr32, row, value, old)
-            if rep.get("result") == "VERIFY OK" and body.get("mirror"):
+            rep = burn_execute(bar.rd32, bar.wr32, row, value, old, bdf=bdf,
+                               journal=journal, ack_uncertain=ack)
+            if rep.get("journal_uncertain"):
+                rep["error"] = ("uncertain burn state — resolve journal; "
+                                "re-send with ack_uncertain=true to proceed")
+            ok_res = ("VERIFY OK", "ALREADY BURNED")
+            if rep.get("result") in ok_res and body.get("mirror"):
                 mrow = row + 1 if row % 2 == 0 else row - 1
-                rep["mirror"] = burn_execute(bar.rd32, bar.wr32, mrow, value, old)
+                rep["mirror"] = burn_execute(bar.rd32, bar.wr32, mrow, value,
+                                             old, bdf=bdf, journal=journal,
+                                             ack_uncertain=ack)
+                if rep["mirror"].get("journal_uncertain"):
+                    rep["mirror"]["error"] = ("uncertain burn state — resolve "
+                                              "journal; re-send with "
+                                              "ack_uncertain=true to proceed")
+                # M4: a mirror pair is a 2-record burn — verify the whole
+                # burned image twice before claiming success (ref final check)
+                if rep["mirror"].get("result") in ok_res:
+                    if not burn_image_verify(bar.rd32, bar.wr32,
+                                             [(row, value), (mrow, value)]):
+                        rep["result"] = "IMAGE VERIFY FAILED"
             rep["bdf"] = bdf
             return rep
     finally:
@@ -681,12 +832,14 @@ def _log_goldilocks(bdf, bar, att, attempts, v_dip, params):
 def burn_campaign_final(records, results):
     """Pure decision for burn-on-goldilocks campaigns: does this Goldilocks
     hit END the campaign? Classify mode (no records): always yes. Burn mode:
-    only when EVERY record burned VERIFY OK — an ABORT (e.g. window closed
-    mid-arm) or VERIFY FAIL is NOT final; the campaign keeps firing attempts
-    (no-retry: each attempt is a fresh glitch, not a re-burn)."""
+    only when EVERY record reached success (VERIFY OK, or ALREADY BURNED by
+    an earlier partial run) — an ABORT (e.g. window closed mid-arm) or
+    VERIFY FAIL is NOT final; the campaign keeps firing attempts (no-retry:
+    each attempt is a fresh glitch, not a re-burn)."""
     if not records:
         return True
-    return len(results) == len(records) and all(r == "VERIFY OK" for r in results)
+    return len(results) == len(records) and all(
+        r in ("VERIFY OK", "ALREADY BURNED") for r in results)
 
 
 def campaign_worker(params, records):
@@ -783,23 +936,47 @@ def campaign_worker(params, records):
                                     glog(">>> GOLDILOCKS — burning records now "
                                          "(same process, no further restore)")
                                     results = []
+                                    burned_ok = []
+                                    journal = _journal_path()
                                     for rec in records:
-                                        rrep = burn_execute(bar.rd32, bar.wr32,
-                                                            rec["row"], rec["value"],
-                                                            rec.get("old", 0))
+                                        rrep = burn_execute(
+                                            bar.rd32, bar.wr32,
+                                            rec["row"], rec["value"],
+                                            rec.get("old", 0), bdf=bdf,
+                                            journal=journal,
+                                            ack_uncertain=bool(
+                                                params.get("ack_uncertain")))
                                         res = rrep.get("result")
                                         glog(f"    row {rec['row']}: {res}")
                                         stats["burned"].append(
                                             {"row": rec["row"], "result": res})
                                         results.append(res)
-                                        if res != "VERIFY OK" and \
-                                                str(res).startswith("ABORT"):
+                                        if res in ("VERIFY OK",
+                                                   "ALREADY BURNED"):
+                                            burned_ok.append((rec["row"],
+                                                              rec["value"]))
+                                        elif str(res).startswith("ABORT"):
                                             stats["burn_aborts"] += 1
-                                    # Only an all-VERIFY-OK burn is final; an
+                                    # Only an all-success burn is final; an
                                     # ABORT is logged, not counted, and the
                                     # loop keeps firing attempts (re-glitch).
                                     if burn_campaign_final(records, results):
-                                        stats["goldilocks"] = True
+                                        # M4: multi-record burn — re-read the
+                                        # whole burned image twice (ref
+                                        # read_rows(passes=2) == final_rows)
+                                        # before claiming/holding the window.
+                                        if len(burned_ok) >= 2 and not \
+                                                burn_image_verify(bar.rd32,
+                                                                  bar.wr32,
+                                                                  burned_ok):
+                                            stats["image_verify"] = \
+                                                "IMAGE VERIFY FAILED"
+                                            glog(">>> IMAGE VERIFY FAILED — "
+                                                 "burned rows do not match "
+                                                 "the intended image; NOT "
+                                                 "holding the window")
+                                        else:
+                                            stats["goldilocks"] = True
                                     else:
                                         glog(">>> burn not final — not holding "
                                              "the window; continuing attempts")
@@ -885,6 +1062,9 @@ def glitch_start(body):
         # Goldilocks keeps the window open unless the caller explicitly asks
         # for the classic always-revert behaviour (misses/stops always revert).
         "no_revert": bool(body.get("no_revert", True)),
+        # explicit user confirm: proceed despite an unresolved
+        # command_may_be_issued in the burn journal
+        "ack_uncertain": bool(body.get("ack_uncertain")),
     }
     if not (200 <= params["v_dip"] <= 500):
         # the firmware clamps pulses/pw/gap but not vd — a fat-fingered

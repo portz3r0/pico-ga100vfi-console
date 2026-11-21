@@ -53,7 +53,10 @@ class FakeBar:
                 self.regs[S.EFP] = 1
             elif cmd == S.CMD_WRITE:
                 self.cmd_write_seen = True
-                self.rows[self.regs[S.FUSEADDR]] = self.regs[S.FUSEWDATA]
+                # OTP physics: CMD_WRITE ORs FUSEWDATA (the delta) into the
+                # row — bits can only be added (ga100_burn writes the delta)
+                self.rows[self.regs[S.FUSEADDR]] = \
+                    self.rows.get(self.regs[S.FUSEADDR], 0) | self.regs[S.FUSEWDATA]
             elif cmd == S.CMD_READ:
                 self.regs[S.FUSERDATA] = self.rows.get(self.regs[S.FUSEADDR], 0)
             self.regs[S.FUSECTRL] = IDLE   # every command returns to idle
@@ -61,7 +64,9 @@ class FakeBar:
             self.regs[off] = val
             if val == 0:
                 self.regs[S.FUSEWDATA_PLM] = 0xFFFFFFFF
-        else:
+        elif off == S.GPIO_TRIGGER:
+            self.regs[off] = val & ~1          # bit0 self-clears when the
+        else:                                  # GPIO update lands
             self.regs[off] = val
 
 
