@@ -1198,7 +1198,7 @@ def campaign_worker(params, records):
         from ..glitch import Card, Attempt          # lazy: needs pyserial + pico
         from ..bar0 import Bar0, restore
         from ..classify import classify
-        from ..adaptive import Planner
+        from ..adaptive import Planner, classify_outcome
     except Exception as e:
         glog(f"ABORT — ga100vfi import failed: {e}")
         with glitch_lock:
@@ -1223,11 +1223,17 @@ def campaign_worker(params, records):
                  ", ".join(f"row {r['row']} <- 0x{r['value']:08X}" for r in records))
         planner = None
         v_dip = params.get("v_dip", 354)
+        delay = params.get("delay", 117)
+        pw = params.get("pw", 198)
+        shot = None
         if params.get("adaptive"):
-            planner = Planner(params.get("min_v", 300), params.get("max_v", 380))
-            glog(f"adaptive: Thompson sampling over "
+            # upstream v0.1.0: 3D CRC-guided planner searching (v_dip, delay,
+            # pw) together. The campaign's delay/pw values become the seeds.
+            planner = Planner(params.get("min_v", 300), params.get("max_v", 380),
+                              seed_delay=delay, seed_pw=pw)
+            glog(f"adaptive: 3D (v_dip, delay, pw) CRC-guided search over "
                  f"{params.get('min_v', 300)}-{params.get('max_v', 380)} mV "
-                 f"(fixed v_dip ignored)")
+                 f"(seed delay {delay} µs, pw {pw} µs; fixed v_dip ignored)")
         for n in range(1, params.get("max_attempts", 100) + 1):
             if glitch_stop.is_set():
                 glog("STOPPED by user")
@@ -1237,12 +1243,13 @@ def campaign_worker(params, records):
                 glog("VRM unlock failed — stopping")
                 break
             if planner:
-                v_dip = planner.next_mv()
+                shot = planner.next_shot()
+                v_dip, delay, pw = shot.v_dip_mv, shot.delay_us, shot.pw_us
             att = Attempt(v_dip_mv=v_dip, t_dip_us=-60,
                           v_restore_mv=750, t_restore_us=-20, t_revert_us=0,
                           fast=1, hold_ms=0, pulses=params.get("pulses", 3),
-                          pw=params.get("pw", 198), gap=params.get("gap", 150),
-                          delay=params.get("delay", 117), revert=0)
+                          pw=pw, gap=params.get("gap", 150),
+                          delay=delay, revert=0)
             try:
                 rep = card.attempt(att)
             except IOError as e:
@@ -1255,7 +1262,7 @@ def campaign_worker(params, records):
             if not restore(bdf, wait_s=2.0):
                 stats["lost"] += 1
                 if planner:      # a lost link reads as a too-deep shot
-                    planner.record(v_dip, "lost")
+                    planner.record(shot if shot is not None else v_dip, "lost")
                 glog(f"[{n}] link lost")
                 continue
             with card_lock:
@@ -1266,9 +1273,10 @@ def campaign_worker(params, records):
                             glog(f"[{n}] ffff")
                         else:
                             v = classify(bar)
-                            outcome = ("goldilocks" if v.passed else
-                                       "hit" if v.dsov == 0 and v.crc_status == 0x55
-                                       else "over" if v.dsov == 0 else "under")
+                            outcome = classify_outcome(v) if planner else (
+                                "goldilocks" if v.passed else
+                                "hit" if v.dsov == 0 and v.crc_status == 0x55
+                                else "over" if v.dsov == 0 else "under")
                             stats["valid"] += 1
                             if v.dsov == 0:
                                 stats["dsov_zero"] += 1
@@ -1331,7 +1339,7 @@ def campaign_worker(params, records):
                 except Exception as e:
                     glog(f"[{n}] classify err {e}")
                 if planner and outcome != "goldilocks":
-                    planner.record(v_dip, outcome)
+                    planner.record(shot if shot is not None else v_dip, outcome)
                 if outcome == "lost":
                     stats["lost"] += 1
                 if outcome == "goldilocks" and (not records

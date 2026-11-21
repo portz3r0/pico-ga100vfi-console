@@ -1611,7 +1611,7 @@ LIVEBOOT = r"""
         <div class="field"><label>v_dip strategy</label>
           <select id="gc-strategy">
             <option value="fixed">fixed v_dip</option>
-            <option value="adaptive">adaptive (Thompson)</option>
+            <option value="adaptive">adaptive 3D (v_dip · delay · pw)</option>
           </select></div>
         <div class="field"><label>adaptive v min mV</label><input type="number" id="gc-vmin" value="300"></div>
         <div class="field"><label>adaptive v max mV</label><input type="number" id="gc-vmax" value="380"></div>
