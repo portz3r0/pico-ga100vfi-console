@@ -29,7 +29,9 @@ sudo python3 -m ga100vfi.console --port 8790
 # or, after `pip install -e host/`:
 sudo ga100vfi-console --port 8790
 # the card is auto-detected; pass --bdf only to choose which card the
-# Fuse Explorer watches on a multi-GPU host (burns pick any GA100 at runtime)
+# Fuse Explorer watches on a multi-GPU host (burns pick any GA100 at runtime).
+# If the configured BDF is not present (card moved slots), the console
+# follows the detected GA100 and says so via default_note — never a phantom.
 ```
 
 Then open `http://<host>:8790`. The service generates its own `live.html`
@@ -446,7 +448,7 @@ bricked.
 | GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — and the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE) |
 | GET | `/api/full` | full row dump + hex window |
 | GET | `/api/ports` | serial ports present on the host (pico selector) |
-| GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials |
+| GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/ff/layout` | FF region occupancy + policy zones |
 | GET | `/api/glitch/status` | campaign stats + log tail |
 | POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, records, `no_revert` — default **true**: a Goldilocks result holds the window open) |
@@ -465,7 +467,12 @@ bricked.
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the burn-window verdict is open
 (`window_ok`), and the server-side window+arm sequence enforces it
-regardless. The
+regardless. GPU-list endpoints (`/api/gpus`, `/api/gpus/all`) return
+`default` = the **effective** BDF: the configured one when present, else
+the first detected GA100 (`null` when none is), with `default_note`
+explaining the fallback; `/api/live` and `/api/driver` carry the same
+`default_note`. An empty/absent `bdf` in burn/glitch/dump requests
+resolves to the effective BDF, never to an absent configured one. The
 pico port is a dropdown populated from the host's serial devices
 (`/dev/ttyACM*`, `/dev/ttyUSB*`, with `/dev/serial/by-id` names when
 available).

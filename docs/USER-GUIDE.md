@@ -80,7 +80,7 @@ Live pure-read view of the target card. Controls and indicators:
 | Control / indicator | Behavior |
 |---|---|
 | live pill | `● live — <time>` · `⏸ driver bound` (server poller pauses — raw BAR0 reads under GSP can wedge it; unload on Drivers to resume) · `⚠ BAR0 unreadable` (normal mid-glitch) |
-| GPU selector | pick which GA100 the Explorer watches (multi-GPU hosts) |
+| GPU selector | lists **detected** GA100s only (multi-GPU hosts); the effective default carries a `(default)` suffix; an amber banner appears when the configured BDF is absent and the console follows another card |
 | page poll | heavy register-grid redraw rate; default **off** — the interpretation feed, dmesg tail, campaign log and GPU monitor refresh regardless, and all pollers pause when the browser tab is hidden |
 | ⟳ Run full dump | rows 0–487 via fuse `CMD_READ` + hex window, archived to `<state-dir>/dumps/<ts>/`; refused while a campaign runs |
 | interpretation feed | register-change diff (`DSOV: 0x1 → 0x0` the moment a glitch lands) |

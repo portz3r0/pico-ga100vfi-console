@@ -1372,6 +1372,7 @@ LIVEBAR = """
         by default; the interpretation feed, dmesg tail, campaign log and GPU
         monitor keep refreshing on their own.</span>
     </div>
+    <div class="card verdict warnv" id="live-follow" style="display:none;margin-top:8px"></div>
     <div id="feed" class="mono" aria-live="polite"></div>
   </div>
 """
@@ -1385,6 +1386,13 @@ LIVEBOOT = r"""
   let prev = null, timer = null;
 
   function note(msg, cls) { ind.textContent = msg; ind.className = "pill " + (cls || ""); }
+  function followNote(id, n) {
+    // amber honesty banner: console follows a card other than the configured BDF
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (n) { el.textContent = "⚠ " + n; el.style.display = ""; }
+    else el.style.display = "none";
+  }
   function feed(line) {
     const ts = new Date().toTimeString().slice(0, 8);
     feedLines.unshift(ts + "  " + line);
@@ -1417,13 +1425,16 @@ LIVEBOOT = r"""
       const j = await jget("/api/gpus");
       const sel = document.getElementById("gpusel");
       const gpus = j.gpus || [];
-      sel.innerHTML = `<option value="">default (${esc(j.default || "?")})</option>` +
-        gpus.map(g => `<option value="${esc(g.bdf)}">${esc(g.bdf)}` +
-          ` · ${esc(g.driver || "no driver")}` +
-          (g.goldilocks ? " · GOLDILOCKS" : "") +
-          (g.error ? " · " + esc(g.error.slice(0, 40)) : "") + `</option>`).join("");
+      // detected cards only — a configured-but-absent BDF is never an
+      // option; the effective default carries the (default) suffix
+      sel.innerHTML = gpus.map(g => `<option value="${esc(g.bdf)}">${esc(g.bdf)}` +
+        ` · ${esc(g.driver || "no driver")}` +
+        (g.goldilocks ? " · GOLDILOCKS" : "") +
+        (g.bdf === j.default ? " (default)" : "") +
+        (g.error ? " · " + esc(g.error.slice(0, 40)) : "") + `</option>`).join("");
       const saved = selBdf();
-      if (saved && gpus.some(g => g.bdf === saved)) sel.value = saved;
+      sel.value = (saved && gpus.some(g => g.bdf === saved)) ? saved : (j.default || "");
+      followNote("live-follow", j.default_note);
       sel.onchange = () => {
         if (sel.value) localStorage.setItem("ga100.bdf", sel.value);
         else localStorage.removeItem("ga100.bdf");
@@ -1437,6 +1448,7 @@ LIVEBOOT = r"""
     try {
       const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
+      followNote("live-follow", j.default_note);
       if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       D.status = j.status; D.shadow = j.shadow;
@@ -1514,6 +1526,7 @@ LIVEBOOT = r"""
         <span class="pill" id="gb-gpustate">checking…</span>
         <span class="pill" id="gb-gpuserial">—</span>
       </div>
+      <div class="verdict warnv" id="gb-follow" style="display:none;margin-top:8px"></div>
       <div class="note" style="margin-top:6px">Standalone burns are only allowed on a
       GPU currently in the <b>Goldilocks</b> state (DSOV=0, CRC=0x55, PLMs open) —
       the campaign's burn-on-goldilocks mode creates that state on the selected GPU.</div>
@@ -1856,10 +1869,11 @@ LIVEBOOT = r"""
   };
 
   // ---- target GPU selector (live Goldilocks state) ----
-  function gpuOption(g) {
+  function gpuOption(g, defBdf) {
     const badge = g.goldilocks ? "● Goldilocks" :
                   g.error ? "⚠ unreadable" : "locked";
-    return `<option value="${esc(g.bdf)}">${esc(g.bdf)} — ${badge}</option>`;
+    return `<option value="${esc(g.bdf)}">${esc(g.bdf)} — ${badge}` +
+      (g.bdf === defBdf ? " (default)" : "") + `</option>`;
   }
   async function loadGpus() {
     try {
@@ -1870,11 +1884,12 @@ LIVEBOOT = r"""
         return;
       }
       const sel = $("gb-gpu");
+      followNote("gb-follow", j.default_note);
       const prev = targetBdf || j.default;
       const sig = (j.gpus || []).map(g => g.bdf + (g.goldilocks ? "+" : "-")).join();
       if (sel.dataset.sig !== sig) {           // rebuild only when the set changes
         sel.dataset.sig = sig;
-        sel.innerHTML = (j.gpus || []).map(gpuOption).join("");
+        sel.innerHTML = (j.gpus || []).map(g => gpuOption(g, j.default)).join("");
         const match = (j.gpus || []).find(g => g.bdf === prev) || (j.gpus || [])[0];
         if (match) { sel.value = match.bdf; targetBdf = match.bdf; }
       }

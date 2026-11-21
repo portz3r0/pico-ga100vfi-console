@@ -193,21 +193,32 @@ def poller(interval):
                 except Exception as e:        # a bad mock path must not kill
                     snap = {"error": f"mock failed: {e}"}  # the poll thread
             else:
+                # follow the card that is actually present — the unit file
+                # may pin a --bdf from before the card moved slots
+                bdf = effective_bdf(fd.find_ga100s())
                 try:
-                    drv = driver_of(CFG["bdf"])
-                    if drv and "nvidia" in drv:
-                        # Raw BAR0 reads against a GSP-driven card can wedge
-                        # the GSP (WPR2 stuck -> cold-boot-only recovery).
-                        # Never probe while the nvidia driver is bound.
-                        snap = {"paused": f"driver '{drv}' bound — raw BAR0 "
-                                        f"live view disabled (Drivers tab -> "
-                                        f"Unload nvidia stack to resume)",
-                               "driver": drv, "bdf": CFG["bdf"],
-                               "ts": datetime.now().isoformat(timespec="seconds")}
+                    if bdf is None:
+                        snap = {"error": "no GA100 detected on this host",
+                                "ts": datetime.now().isoformat(
+                                    timespec="seconds")}
                     else:
-                        snap = probe(CFG["bdf"])
+                        drv = driver_of(bdf)
+                        if drv and "nvidia" in drv:
+                            # Raw BAR0 reads against a GSP-driven card can wedge
+                            # the GSP (WPR2 stuck -> cold-boot-only recovery).
+                            # Never probe while the nvidia driver is bound.
+                            snap = {"paused": f"driver '{drv}' bound — raw BAR0 "
+                                            f"live view disabled (Drivers tab -> "
+                                            f"Unload nvidia stack to resume)",
+                                   "driver": drv, "bdf": bdf,
+                                   "ts": datetime.now().isoformat(timespec="seconds")}
+                        else:
+                            snap = probe(bdf)
                 except Exception as e:
                     snap = {"error": f"probe failed: {e}"}
+                note = default_note(bdf)
+                if note:
+                    snap["default_note"] = note
         finally:
             card_lock.release()
         with state_lock:
@@ -232,7 +243,7 @@ def dumps_dir():
 
 
 def full_dump(bdf=None):
-    bdf = bdf or CFG["bdf"]
+    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if bdf != CFG["bdf"] and not valid_bdf(bdf):
         return {"error": f"{bdf} is not a GA100 on this host"}
     with glitch_lock:
@@ -535,7 +546,7 @@ def ff_layout(bdf=None):
         attempts are finite
       * rows are reserved for re-disabling SMs that turn out actually bad.
     """
-    bdf = bdf or CFG["bdf"]
+    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if bdf != CFG["bdf"] and not valid_bdf(bdf):
         # ff_layout writes EN_SW_OVERRIDE + FUSECTRL CMD_READs through
         # fd.Bar — never point those at an arbitrary PCI device
@@ -1002,7 +1013,7 @@ def burn_preview_api(body):
     READ-ONLY: works outside any window, on a cold card, and in mock mode
     (read-only over the mock rows). Stores the preview as last-preview.json
     so the UI can show predicted-vs-actual after a real burn."""
-    bdf = body.get("bdf") or CFG["bdf"]
+    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     try:
         row = int(body["row"])
         value = int(str(body["value"]), 0)
@@ -1045,7 +1056,7 @@ def burn_check(row, value, mirror, bdf=None):
     they open at burn time via arm_window and must not block the check."""
     if CFG["mock"]:
         return {"error": "burn check needs a live card — run the console without --mock"}
-    bdf = bdf or CFG["bdf"]
+    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if not valid_bdf(bdf):
         return {"error": f"{bdf} is not a GA100 on this host"}
     layout = ff_layout(bdf)          # own card_lock pass — scan the FF region
@@ -1108,7 +1119,7 @@ def burn_api(body):
     Goldilocks state (guards enforce this; /api/gpus reports it)."""
     if CFG["mock"]:
         return {"error": "burn not available in mock mode"}
-    bdf = body.get("bdf") or CFG["bdf"]
+    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if not valid_bdf(bdf):
         return {"error": f"{bdf} is not a GA100 on this host"}
     try:
@@ -1449,7 +1460,7 @@ def glitch_start(body):
             return {"error": "campaign already running"}
     if body.get("bdf") and not valid_bdf(body["bdf"]):
         return {"error": f"{body['bdf']} is not a GA100 on this host"}
-    target = body.get("bdf") or CFG["bdf"]
+    target = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if CFG["mock"]:
         # Refuse up front: without this the campaign "starts", then dies
         # asynchronously on the serial open (running -> error flip in the UI).
@@ -1666,8 +1677,7 @@ def gpus_all():
             e["name"] = g["name"]
     for bdf, e in out.items():
         e["driver"] = driver_of(bdf)
-    return {"gpus": sorted(out.values(), key=lambda e: e["bdf"]),
-            "default": CFG["bdf"]}
+    return gpus_response(sorted(out.values(), key=lambda e: e["bdf"]))
 
 
 def gpu_list():
@@ -1688,7 +1698,8 @@ def gpu_list():
                           "fpf_readable": True,
                           "goldilocks": dsov == 0 and crc and priv}],
                 "default": CFG["bdf"]}
-    bdfs = fd.find_ga100s() or [CFG["bdf"]]
+    # detected cards only — never probe a configured BDF that isn't there
+    bdfs = fd.find_ga100s()
     out = []
     if card_lock.acquire(timeout=2.0):
         try:
@@ -1720,29 +1731,75 @@ def gpu_list():
         finally:
             card_lock.release()
     else:
-        return {"error": "card busy (campaign or dump in progress)",
-                "gpus": out, "default": CFG["bdf"]}
-    return {"gpus": out, "default": CFG["bdf"]}
+        res = gpus_response(out)
+        res["error"] = "card busy (campaign or dump in progress)"
+        return res
+    return gpus_response(out)
 
 
 def valid_bdf(bdf):
     return bdf == CFG["bdf"] or bdf in fd.find_ga100s()
 
 
+def effective_bdf(detected):
+    """The BDF the console actually targets. Mock mode: the mock card.
+    Otherwise CFG["bdf"] when that card is present in `detected` (BDF
+    strings, or dicts with "bdf" and optionally a "ga100" flag — GA100
+    entries preferred), else the first detected GA100: the card can move
+    slots between boots while the unit file keeps the old --bdf. None
+    when no GA100 is present."""
+    if CFG["mock"]:
+        return CFG["bdf"]
+    entries = [(d.get("bdf"), d.get("ga100", True))
+               if isinstance(d, dict) else (d, True) for d in detected]
+    entries = [e for e in entries if e[0]]
+    if any(b == CFG["bdf"] for b, _ in entries):
+        return CFG["bdf"]
+    return next((b for b, ga in entries if ga),
+                entries[0][0] if entries else None)
+
+
+def default_note(eff):
+    """Honest note when the console follows a card other than the
+    configured one; None when no fallback happened."""
+    if CFG["mock"] or eff == CFG["bdf"]:
+        return None
+    return (f"configured BDF {CFG['bdf']} not present — following {eff}"
+            if eff else
+            f"configured BDF {CFG['bdf']} not present — no GA100 detected")
+
+
+def gpus_response(gpus):
+    """GPU-list payload: detected cards + dynamic default + honest note
+    when the default follows a card other than the configured one."""
+    eff = effective_bdf(gpus)
+    res = {"gpus": gpus, "default": eff}
+    note = default_note(eff)
+    if note:
+        res["default_note"] = note
+    return res
+
+
 # ---------------------------------------------------------------- drivers
 def driver_state():
-    bdf = CFG["bdf"]
+    # follow the card that is actually present (see effective_bdf)
+    eff = effective_bdf(fd.find_ga100s())
+    bdf = eff or CFG["bdf"]
     loaded = [l.split()[0] for l in sh(["lsmod"]).splitlines()
               if l.startswith(("nvidia", "nouveau"))]
     version = sh(["modinfo", "-F", "version", "nvidia"]) or ""
     bl_files = sorted(f for f in os.listdir("/etc/modprobe.d")
                       if re.search(r"nvidia|nouveau|vfi|cmp", f))
     our_bl = os.path.exists(BLACKLIST_FILE)
-    return {"bdf": bdf, "bound": driver_of(bdf), "loaded": loaded,
-            "version": version, "blacklist_active": our_bl,
-            "blacklist_file": BLACKLIST_FILE,
-            "other_modprobe_d": [f for f in bl_files
-                                 if f != os.path.basename(BLACKLIST_FILE)]}
+    res = {"bdf": bdf, "bound": driver_of(bdf), "loaded": loaded,
+           "version": version, "blacklist_active": our_bl,
+           "blacklist_file": BLACKLIST_FILE,
+           "other_modprobe_d": [f for f in bl_files
+                                if f != os.path.basename(BLACKLIST_FILE)]}
+    note = default_note(eff)
+    if note:
+        res["default_note"] = note
+    return res
 
 
 def driver_op_api(body):
@@ -1771,7 +1828,7 @@ def driver_op_api(body):
     if op == "unload":
         if not confirm:
             return {"error": "confirm required"}
-        bdf = CFG["bdf"]
+        bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
         bound = driver_of(bdf)
         if bound:
             try:      # sysfs unbind — plain write, no shell
@@ -1799,7 +1856,7 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
 
 
 def gpu_info(bdf=None):
-    bdf = bdf or CFG["bdf"]
+    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
     if bdf != CFG["bdf"] and not valid_bdf(bdf) \
             and bdf not in {g["bdf"] for g in nvidia_gpu_bdfs()}:
         return {"nvidia": {"error": f"{bdf} is not a GPU on this host"},
@@ -1846,7 +1903,8 @@ def gpu_info(bdf=None):
 
 def dmesg_tail(n=80):
     """Live GPU-relevant dmesg tail (nvidia/NVRM/Xid + this card's slot)."""
-    slot = CFG["bdf"].split(":", 1)[1] if CFG["bdf"].count(":") == 2 else CFG["bdf"]
+    bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     pat = re.compile(r"nvidia|NVRM|Xid|ga100|" + re.escape(slot), re.I)
     out = sh(["dmesg", "-T"], timeout=10) or ""
     return [l for l in out.splitlines() if pat.search(l)][-n:]
@@ -1901,8 +1959,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif path == "/api/live":
                 bdf = qs.get("bdf")
-                if bdf and bdf != CFG["bdf"]:
-                    # non-default GPU: on-demand pure-read probe, same
+                if bdf and bdf != effective_bdf(fd.find_ga100s()):
+                    # non-watched GPU: on-demand pure-read probe, same
                     # safety rule as the poller — never probe while nvidia
                     # is bound (GSP wedge risk)
                     if not valid_bdf(bdf):
@@ -1937,9 +1995,10 @@ class Handler(BaseHTTPRequestHandler):
                 if snap.get("paused"):
                     self._send(200, json.dumps(snap), "application/json")
                 elif "error" in snap or snap.get("status") is None:
-                    self._send(200, json.dumps(
-                        {"error": snap.get("error", "no probe yet")}),
-                        "application/json")
+                    err = {"error": snap.get("error", "no probe yet")}
+                    if snap.get("default_note"):
+                        err["default_note"] = snap["default_note"]
+                    self._send(200, json.dumps(err), "application/json")
                 else:
                     self._send(200, json.dumps(snap), "application/json")
             elif path == "/api/full":
@@ -1974,7 +2033,8 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json")
             elif path == "/api/ff/layout":
                 self._send(200, json.dumps(
-                    ff_layout(qs.get("bdf") or CFG["bdf"]), default=str),
+                    ff_layout(qs.get("bdf") or effective_bdf(fd.find_ga100s())
+                              or CFG["bdf"]), default=str),
                     "application/json")
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
