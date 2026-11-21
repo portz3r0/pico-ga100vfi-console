@@ -193,6 +193,9 @@ Reverse with **Load nvidia** / **Remove blacklist** when you're done.
 
 ### 4. Burn an FF record (the full sequence)
 
+The full confidence sequence is **preview → check → arm → burn →
+predicted-vs-actual**.
+
 Prerequisite: a record derived from **this card's own defect masks**
 (e.g. via ffcalc) — never blind ffcalc output, and never a payload copied
 from another card. Plan the burn against the placement policy: the row map
@@ -205,7 +208,34 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    (`FF ch·blk·data`, plus the known block names) for you to verify —
    no hex typing, no fat fingers. (Re-applying an existing record at a
    later row is exactly how you override a block: last record wins.)
-   Press **Check row & guards**. The result shows the row's current value,
+   Press **Preview burn (read-only)** first — the console's version of
+   `ga100_burn.py`'s default preview mode. It works ANY time, even on a
+   cold-booted card outside any window, with no arm and no token
+   (`CMD_READ` is gated by `FUSECTRL_PLM`, not `EFP`), and issues **zero
+   fuse writes**: the server path receives a handle whose writes are
+   restricted to the `CMD_READ` controller path and raises on anything
+   that could latch. The panel shows:
+   - `before → Δ → after` per row (mirror included) with the delta bits
+     highlighted on the bit strip;
+   - both words decoded as FF records (`chain/iff/block/data` + known
+     block names) when the row is in the FF region;
+   - a **collision scan**: every existing record with the same
+     `(chain, block)` key, row-numbered, with a LAST-WINS verdict badge —
+     green *will win*, or red *will LOSE to row N* (the burn would be
+     **inert**; correct it by burning a later row);
+   - **partial-landing hazards**: every subset of the delta that, if only
+     it latched, would land a different record on a live key with wrong
+     data (with the mask effect it would cause); skipped above 12 delta
+     bits ("too many subsets");
+   - the **predicted effect** line when decodable (e.g. `FBP_DISABLE data
+     0x4290 → 0x4200 (unmasks FBP1/FBP4)`) — `STATUS_OPT_*` shadows update
+     only after a power cycle;
+   - a read-only window / arm-pending / journal status strip.
+   Verdict banner: `SAFE TO BURN` (green) / `WILL BE INERT` (red) /
+   `IMPOSSIBLE` (red, bits would clear) / `ALREADY BURNED` (amber).
+   Preview is also the one burn-adjacent feature that works in `--mock`
+   mode (read-only over the mock rows).
+   Then press **Check row & guards**. The result shows the row's current value,
    the 0→1 purity, the **placement policy verdict** (bit-5/IFF values are
    refused), and the **burn window** checks (top-line `SAFE TO BURN` /
    `REFUSED`). `EFP`, `PROGRAM_DIS`, `SBFE`, `WDATA_SECURE` and
@@ -230,7 +260,15 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    burned image re-reads correctly twice; a burn `ABORT` or
    `IMAGE VERIFY FAILED` is logged and is NOT final — attempts keep
    firing and the window is not held.
-5. Cold-boot the card, then verify honestly — see workflow 5.
+5. **Predicted vs actual**: a standalone burn that reaches `VERIFY OK`
+   re-reads the burned row(s) and re-runs the collision scan
+   (`after_state` in the report). If you ran a Preview of the same payload
+   first, the burn report shows a **Predicted vs Actual** table: the
+   preview's after-word and LAST-WINS verdict against the post-burn
+   readback and post-burn scan — any mismatch is red. Both the last
+   preview and the last burn report are stored in the state dir
+   (`last-preview.json`, `last-burn.json`, served by `/api/burn/last`).
+6. Cold-boot the card, then verify honestly — see workflow 5.
 
 ### 5. After a burn: verify and, if needed, correct
 
@@ -259,12 +297,13 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
 | row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve` · `✗ revert tail` |
 | value source decode | `dump row N → 0x…` + decoded `FF ch·blk·data` (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
+| Preview burn button | enabled whenever row+value are set — **no window/arm/token requirement** (read-only works on a cold card and in mock); panel: verdict banner `SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`, before→Δ→after with delta bits highlighted, FF decode table, LAST-WINS collision badge (green win / red lose), amber hazard list, predicted effect, window/arm/journal strip |
 | budget pill | safe zone rows, free count, last boot FF row |
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase |
 | Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
 | stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / image verify failed |
-| burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain` |
+| burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
 
 ## Burn safety model (reference)
 
@@ -305,6 +344,18 @@ server-side immediately before `CMD_WRITE`:
    `FUSEWDATA`, never raises `EN_SW_OVERRIDE`, and never touches
    `GPIO`/`TRIGGER`. A static `EFP == 0` or `FUSEWDATA_PLM == 0xFFFFFFF8`
    is normal outside a burn and must not block the check or the burn.
+8a. **Preview** (`/api/burn/preview`, mirrors `ga100_burn`'s default
+   preview mode) is structurally read-only: it receives a card handle
+   whose writes are restricted to the `CMD_READ` controller path
+   (`FUSEADDR`, `FUSECTRL = CMD_READ`, `EN_SW_OVERRIDE` clear/restore)
+   and RAISE on anything that could latch (`FUSEWDATA`, `GPIO`/`TRIGGER`,
+   `WDATA_SECURE`/`SBFE`, `CMD_WRITE`/`CMD_SENSE`). It never SENSEs,
+   never arms, needs no token — `CMD_READ` is gated by `FUSECTRL_PLM`,
+   not `EFP`, so the preview works on a cold-booted card. It reads the
+   FF pool (rows 222–487, stopping at the first IFF record), decodes
+   `chain=word[4:0] iff=bit5 block=word[15:6] data=word[31:16]`, and
+   applies the controller's last-record-per-(chain,block)-wins rule to
+   flag inert burns and partial-landing hazards.
 9. **Program bracket** (mirrors `ga100_burn.program` per row): fsync'd
    journal `command_may_be_issued`; raise `EN_SW_OVERRIDE = 1` with
    read-back check (no retry); `GPIO19` high + `TRIGGER (0xD604)` pulse
@@ -383,6 +434,8 @@ bricked.
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) |
+| POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets, capped at 12 delta bits), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
+| GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN"}` → 120 s token |
 | GET | `/api/driver` | driver state |
