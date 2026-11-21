@@ -34,6 +34,9 @@ sudo python3 -m ga100vfi console --port 8790
 | **Drivers** | **GPU Info** |
 | ![Drivers tab](docs/images/console-drivers.png) | ![GPU Info tab](docs/images/console-gpu.png) |
 
+*Console screenshots were captured on a live CMP 170HX bench rig; card
+serial, host name, IP addresses, username and home paths are masked.*
+
 - Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
   **Drivers**, **GPU Info**
@@ -44,10 +47,15 @@ sudo python3 -m ga100vfi console --port 8790
   row-state matching, the Goldilocks guard chain, and a hard FF placement
   policy (boot-FF buffer, SM re-disable reserve, revert tail) — all
   enforced server-side
-- Campaigns use a fixed `v_dip` or the Thompson-sampling adaptive planner,
+- Campaigns use a fixed `v_dip` or the 3D CRC-guided adaptive planner
+  (v_dip/delay/pw),
   and can burn the checked payload in-process on the first Goldilocks
 - Campaigns refuse to start while a driver is bound to the card
-- Full user guide — requirements, step-by-step workflows
+- **User guide** — plain-language operating manual: mental model, every
+  control, the complete safeguard table, success-reading features,
+  failure recovery, glossary:
+  **[docs/USER-GUIDE.md](docs/USER-GUIDE.md)**
+- Full reference — requirements, step-by-step workflows
   (explore → prep drivers → glitch → burn → verify), indicator reference,
   HTTP API, systemd unit, troubleshooting:
   **[docs/CONSOLE.md](docs/CONSOLE.md)**

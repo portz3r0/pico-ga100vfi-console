@@ -7,6 +7,8 @@ and GPU status — all in the `ga100vfi` package, driven from a browser.
 This document has three parts: **how to run it**, **how to use it**
 (a tour of the tabs, the step-by-step workflows, and what every indicator
 means), and **reference** (burn safety model, HTTP API, systemd, testing).
+For a plain-language operating manual (safeguard table, success reading,
+failure recovery, glossary) see the [User Guide](USER-GUIDE.md).
 
 ## Requirements
 
@@ -55,7 +57,7 @@ minutes late on slow boots.
 
 The live view of the card the service was started with.
 
-![Fuse Explorer tab](../images/console-explorer.png)
+![Fuse Explorer tab](images/console-explorer.png)
 
 - **Refresh model (default: calm)**: the heavy full-page register redraw
   is **off by default** — pick a rate in the `page poll` selector only
@@ -117,7 +119,7 @@ grabs its value from the loaded dump and shows it decoded
 burn values never have to be typed by hand. Blank or missing source rows
 warn instead of proposing a burn of zero.
 
-![Glitch & Burn tab](../images/console-glitch-burn.png)
+![Glitch & Burn tab](images/console-glitch-burn.png)
 
 ### Drivers
 
@@ -128,7 +130,7 @@ blacklisted — the driver re-locks the VRM and binds the card before you can
 inspect BAR0. The blacklist written here still allows manual `modprobe`, so
 you stay in control.
 
-![Drivers tab](../images/console-drivers.png)
+![Drivers tab](images/console-drivers.png)
 
 ### GPU Info
 
@@ -136,7 +138,7 @@ nvidia-smi card grid (auto-refresh) + `lspci` link state. Reports the
 `nvidia-smi` error string honestly when the card is GFW-dead — that banner
 is normal until the card boots cleanly.
 
-![GPU Info tab](../images/console-gpu.png)
+![GPU Info tab](images/console-gpu.png)
 
 ## Workflows
 
@@ -167,7 +169,8 @@ Reverse with **Load nvidia** / **Remove blacklist** when you're done.
    (dropdown, with a rescan button).
 2. Campaign card: choose the **v_dip strategy**. `fixed` uses your v_dip
    value; `adaptive` (recommended for a card you haven't characterised)
-   Thompson-samples the whole v range and converges on the card's window.
+   runs the 3D CRC-guided search over (v_dip, delay, pw) and converges
+   on the card's window.
 3. Mode: **classify only** — no burns, just observe.
 4. **▶ Start campaign** and watch the log: every shot gets a line with its
    `v_dip` and outcome (`under` / `hit` / `over` / `lost`) plus the
