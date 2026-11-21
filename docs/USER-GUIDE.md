@@ -62,8 +62,8 @@ before exiting, so an interrupted run never leaves NVVDD low.
 
 ![Fuse Explorer tab — row table with FF records](images/console-explorer.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 Live pure-read view of the target card. Controls and indicators:
 
@@ -82,8 +82,8 @@ Live pure-read view of the target card. Controls and indicators:
 
 ![Glitch & Burn tab — burn payload and campaign panels](images/console-glitch-burn.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 | Card / control | Behavior |
 |---|---|
@@ -112,8 +112,8 @@ sequence inside the burn itself — they never block the check or burn.
 
 ![Check result — green window bits, amber arm-pending rows](images/console-check-panel.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 **Burn Preview panel** (`Preview burn (read-only)`): a dry-run of the
 exact payload that **cannot write** — the server runs it through a card
@@ -148,8 +148,8 @@ on a cold card and in mock (`CMD_READ` is gated by `FUSECTRL_PLM`, not
 
 ![Burn Preview — decoded record, LAST-WINS collision verdict, hazards](images/console-preview.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 After a real `VERIFY OK` burn of the same payload, the burn report adds
 the **Predicted vs Actual** block: preview after-word and LAST-WINS
@@ -161,8 +161,8 @@ any mismatch red. Both artifacts persist in the state dir
 
 ![Drivers tab](images/console-drivers.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 State cards (bound driver, version, blacklist, loaded modules) +
 two-step-confirm actions: **Load nvidia**, **Unload nvidia stack**
@@ -175,8 +175,8 @@ stack unloaded **and** blacklisted.
 
 ![GPU Info tab](images/console-gpu.png)
 
-*Captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked.*
+*Captured from the console UI in mock mode (representative fuse data);
+card serial, host name, IP addresses, username and home paths are masked.*
 
 Per-GPU nvidia-smi grid (auto-refresh 1–10 s or off) + `lspci` link
 state + compute apps. Honest banners: `No devices were found` is normal
@@ -213,7 +213,8 @@ shows lspci only.
 
    ![Armed state — countdown pill; Burn stays disabled without a live window](images/console-armed.png)
 
-   *Captured on a live CMP 170HX bench rig; card serial, host name, IP
+   *Captured from the console UI in mock mode (representative fuse
+   data); card serial, host name, IP
    addresses, username and home paths are masked. Shown armed with the
    window verdict `n/a` (mock-served card state), so Burn now is
    disabled — it enables only with a live open window.*
@@ -337,8 +338,7 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 ---
 
 *Screenshot provenance: all console screenshots in this repo were
-captured on a live CMP 170HX bench rig; card serial, host name, IP
-addresses, username and home paths are masked. The card-state panels
-were served from a recorded dump of that rig's card (the rig's miner
-held the driver bound during capture); the Drivers and GPU Info tabs are
-live rig data.*
+captured from the current console UI running in mock mode (a recorded,
+representative fuse dump served to the UI — the bench rig's miner held
+the driver bound during capture). Card serial, host name, IP addresses,
+username and home paths are masked throughout.*

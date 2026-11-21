@@ -34,8 +34,9 @@ sudo python3 -m ga100vfi console --port 8790
 | **Drivers** | **GPU Info** |
 | ![Drivers tab](docs/images/console-drivers.png) | ![GPU Info tab](docs/images/console-gpu.png) |
 
-*Console screenshots were captured on a live CMP 170HX bench rig; card
-serial, host name, IP addresses, username and home paths are masked.*
+*Console screenshots were captured from the current console UI in mock
+mode (representative fuse data); card serial, host name, IP addresses,
+username and home paths are masked.*
 
 - Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
