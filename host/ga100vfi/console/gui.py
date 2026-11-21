@@ -127,6 +127,8 @@ HTML = r"""<!DOCTYPE html>
              background: linear-gradient(90deg, rgba(248,81,73,.09), rgba(248,81,73,0) 55%); }
   .verdict.good { border-left-color: var(--ok);
              background: linear-gradient(90deg, rgba(63,185,80,.09), rgba(63,185,80,0) 55%); }
+  .verdict.warnv { border-left-color: var(--warn);
+             background: linear-gradient(90deg, rgba(210,153,34,.09), rgba(210,153,34,0) 55%); }
 
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border-soft); }
@@ -158,6 +160,11 @@ HTML = r"""<!DOCTYPE html>
   input[type=text] { background: var(--bg-deep); border: 1px solid var(--border);
                      color: var(--foreground); border-radius: 7px; padding: 5px 10px;
                      font-size: 12px; width: 200px; transition: border-color .15s, box-shadow .15s; }
+  /* number inputs: hide the UA spinner — in Firefox/WebKit it renders as a
+     solid white square against the dark theme (looked like a broken glyph) */
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   input[type=text]:focus { border-color: var(--accent); outline: none;
                            box-shadow: 0 0 0 3px rgba(76,194,255,.12); }
   select { background: var(--card-hi); border: 1px solid var(--border); color: var(--foreground);
@@ -224,6 +231,15 @@ HTML = r"""<!DOCTYPE html>
   .sev2 { border-left: 3px solid #58a6ff; }
   .sev3 { border-left: 3px solid var(--border); }
   .auditclose { float: right; }
+  /* suggested burns + burn queue */
+  .planrow, .qrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    padding: 6px 8px; border: 1px solid var(--border-soft);
+                    border-radius: 8px; margin: 4px 0; font-size: 12px; }
+  .planword { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 10px;
+              flex-wrap: wrap; width: 100%; }
+  .qrow.qexists { background: rgba(63,185,80,.07); border-color: rgba(63,185,80,.35); }
+  .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
+            border-color: rgba(63,185,80,.4); }
   /* record timeline */
   .tl { margin: 6px 0 2px; padding-left: 4px; }
   .tlstep { position: relative; padding: 5px 0 5px 24px; }
@@ -253,6 +269,8 @@ HTML = r"""<!DOCTYPE html>
              font-family: ui-monospace, Menlo, Consolas, monospace; }
   .bitset { background: rgba(76,194,255,.22); color: var(--foreground);
             border-color: rgba(76,194,255,.45); }
+  .bitcell.dbit { background: rgba(210,153,34,.30); color: var(--foreground);
+            border-color: rgba(210,153,34,.6); }
 
   details { border: 1px solid var(--border-soft); border-radius: 10px; padding: 10px 14px;
             margin: 10px 0; background: var(--card); }
@@ -343,8 +361,10 @@ HTML = r"""<!DOCTYPE html>
                background: var(--muted-foreground); }
   .frow { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin: 8px 0; }
   .field { display: flex; flex-direction: column; gap: 4px; }
-  .field label { font-size: 10.5px; color: var(--fg-subtle); text-transform: uppercase;
+  .field label { font-size: 10.5px; color: var(--fg-subtle);
                  letter-spacing: .07em; }
+  /* NOTE: no text-transform here — uppercase mangles µ (U+00B5) into Greek
+     capital Mu (Μ), so 'pw µs' rendered as 'PW ΜS' (looked like 'PW MS'). */
   input[type=number] { background: var(--bg-deep); border: 1px solid var(--border);
                        color: var(--foreground); border-radius: 7px; padding: 5px 8px;
                        font-size: 12px; width: 92px;
@@ -1335,6 +1355,10 @@ LIVEBAR = """
   <div class="card" id="livebar">
     <div class="flexline" style="margin:0">
       <span id="liveind" class="pill warnl" aria-live="polite">connecting…</span>
+      <span class="pill">GPU:
+        <select id="gpusel" title="select which GA100 the Fuse Explorer targets">
+          <option value="">default</option>
+        </select></span>
       <span class="pill">page poll:
         <select id="pollsel">
           <option value="0" selected>off</option>
@@ -1385,9 +1409,33 @@ LIVEBOOT = r"""
     }
     prev = j;
   }
+  // ---- GPU selection (Fuse Explorer target) ----
+  const selBdf = () => localStorage.getItem("ga100.bdf") || "";
+  const bdfQs = () => { const b = selBdf(); return b ? "?bdf=" + encodeURIComponent(b) : ""; };
+  async function populateGpuSel() {
+    try {
+      const j = await jget("/api/gpus");
+      const sel = document.getElementById("gpusel");
+      const gpus = j.gpus || [];
+      sel.innerHTML = `<option value="">default (${esc(j.default || "?")})</option>` +
+        gpus.map(g => `<option value="${esc(g.bdf)}">${esc(g.bdf)}` +
+          ` · ${esc(g.driver || "no driver")}` +
+          (g.goldilocks ? " · GOLDILOCKS" : "") +
+          (g.error ? " · " + esc(g.error.slice(0, 40)) : "") + `</option>`).join("");
+      const saved = selBdf();
+      if (saved && gpus.some(g => g.bdf === saved)) sel.value = saved;
+      sel.onchange = () => {
+        if (sel.value) localStorage.setItem("ga100.bdf", sel.value);
+        else localStorage.removeItem("ga100.bdf");
+        note("GPU target switched to " + (sel.value || "default") +
+             " — reloading…", "warnl");
+        fetchLive(true); fullDump();
+      };
+    } catch (e) { /* static mode or service error: keep default only */ }
+  }
   async function fetchLive(heavy) {
     try {
-      const r = await fetch("/api/live", { cache: "no-store" });
+      const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
@@ -1398,6 +1446,7 @@ LIVEBOOT = r"""
       D.started = j.ts;
       diff(j);
       renderLive();  // cheap cards refresh on the light poll too; rows/hex stay heavy-only
+      renderPlan(); renderQueue();
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
   }
@@ -1405,12 +1454,13 @@ LIVEBOOT = r"""
     const b = document.getElementById("fulldump");
     b.disabled = true; note("running full dump… (rows 0–487 + hex window)", "warnl");
     try {
-      const r = await fetch("/api/full", { cache: "no-store" });
+      const r = await fetch("/api/full" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       const hex = j.hexnonzero; delete j.hexnonzero;
       Object.assign(D, j); D.hexnonzero = hex || [];
       renderAll();
+      renderPlan(); renderQueue();
       note("full dump loaded — " + j.started, "okl");
     } catch (e) { note("⚠ full dump failed (" + e + ")", "badl"); }
     finally { b.disabled = false; }
@@ -1502,8 +1552,10 @@ LIVEBOOT = r"""
         <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" value="304" min="0" max="487"></div>
         <label class="checkline"><input type="checkbox" id="gb-mirror" checked> burn mirror row too</label>
         <button class="btn" id="gb-check">Check row &amp; guards</button>
+        <button class="btn" id="gb-preview" title="read-only burn preview: FF decode, last-wins collision scan, partial-landing hazards — works any time (no window/arm/token; CMD_READ is gated by FUSECTRL_PLM, not EFP)">Preview burn (read-only)</button>
       </div>
       <div id="gb-srcdecode" class="note"></div>
+      <div id="gb-previewresult" class="note" style="margin-top:6px"></div>
       <div id="gb-checkresult" class="note"></div>
       <div class="frow" style="margin-top:10px">
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
@@ -1513,6 +1565,39 @@ LIVEBOOT = r"""
         <span class="pill" id="gb-windowstate" title="read-only burn-window verdict from the live poller (window checks; EFP/WDATA_PLM auto-arm at burn)">window: …</span>
         <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
+    </div>
+    <div class="card" id="gb-plan" style="margin-top:12px">
+      <h3>Suggested burns — minimum common unlock</h3>
+      <div class="note" style="margin-bottom:8px">Derived from <b>this card's own defect
+      masks</b> (loaded dump): every disabled-but-healthy unit is re-enabled in one pass.
+      Minimum common set: <b>GPC 1 word + FBP 1 word + FBPA 2 words = 4 words</b>
+      (optional DEVID identity change adds 2). Queued records burn together inside
+      <b>one</b> Goldilocks window.</div>
+      <div id="plan-rows"></div>
+      <div class="frow" style="margin-top:8px">
+        <button class="btn go" id="plan-queue-all">⤓ Queue all needed records</button>
+        <span class="pill" id="plan-summary">…</span>
+      </div>
+      <div class="frow" style="margin-top:10px; align-items:end">
+        <div class="field"><label>optional: DEVID change (hex, e.g. 0x20B5)</label>
+          <input type="text" id="plan-devid" value="0x20B5" class="mono" style="width:100px"></div>
+        <button class="btn" id="plan-devid-add">+ Queue DEVID A/B pair</button>
+        <span class="note" id="plan-devid-note"></span>
+      </div>
+    </div>
+    <div class="card" id="gb-queue" style="margin-top:12px">
+      <h3>Burn queue <span class="note">(all of these burn in one Goldilocks window)</span></h3>
+      <div id="queue-rows" class="queue-rows"></div>
+      <div class="frow" style="margin-top:8px; align-items:end">
+        <div class="field"><label>custom record — row</label>
+          <input type="number" id="cq-row" value="306" min="222" max="487"></div>
+        <div class="field"><label>value (hex FF record)</label>
+          <input type="text" id="cq-value" value="0x420004C1" class="mono" style="width:120px"></div>
+        <button class="btn" id="cq-add">+ Add custom record</button>
+        <label class="checkline"><input type="checkbox" id="cq-mirror"> mirror each</label>
+        <button class="btn" id="queue-clear">clear queue</button>
+      </div>
+      <div id="cq-decode" class="note"></div>
     </div>
     <div class="card" id="gb-campaign" style="margin-top:12px">
       <h3>Glitch campaign</h3>
@@ -1578,6 +1663,192 @@ LIVEBOOT = r"""
     $("gb-burnnow").disabled = true;
     $("gb-editwarn").style.display = "";
   }
+
+  // ---- burn queue (suggested + custom records) ----
+  // All queued records burn in ONE campaign pass (service supports records[]).
+  let burnQueue = [];
+  const encFF = (ch, off, data) => ((ch & 0x3F) | ((off & 0x3FF) << 6) |
+    ((data & 0xFFFF) << 16)) >>> 0;
+  // Decode a record's effect for humans: which units it acts on, disable→what.
+  const FF_FIELD = [{ blk: 8, w: 0xFF, name: "GPC" }, { blk: 19, w: 0xFFF, name: "FBP" }];
+  function ffEffect(word) {
+    const ch = word & 0x1F, off = (word >> 6) & 0x3FF, data = (word >>> 16) & 0xFFFF;
+    const mask = (data >> 3) & 0xFFFFFF;
+    for (const f of FF_FIELD) {
+      if (ch === 1 && off === f.blk) {
+        const bits = [];
+        for (let i = 0; i < 16; i++) if ((mask >> i) & 1) bits.push(f.name + i);
+        return { key: `chain1·off${f.blk}`, field: f.name, mask, bits, width: f.w };
+      }
+    }
+    if (ch === 1 && (off === 5 || off === 6)) {
+      return { key: `chain1·off5+6 (FBPA split)`, field: "FBPA", mask, bits: [], two: off };
+    }
+    if (ch === 2 && (off === 37 || off === 38)) {
+      return { key: `chain2·off${off} DEVID`, field: "DEVID", devid: (data >> 1) >>> 0, bits: [] };
+    }
+    return { key: `chain${ch}·off${off}`, field: null, mask, bits: [] };
+  }
+  function existingRecordFor(word) {
+    // Does the loaded dump already contain this exact record word? (user asked:
+    // "if a burn already exists that is also represented")
+    for (const k of Object.keys(D.rows || {})) {
+      if (D.rows[k] === word) return +k;
+    }
+    return null;
+  }
+  function suggestPlan() {
+    const sh = D.shadow || {};
+    const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
+    const fbpDef = sh.FBP_DEFECTIVE ?? 0, fbpDis = sh.FBP_DISABLE ?? 0;
+    const fbpaDef = sh.FBPA_DEFECTIVE ?? 0;
+    const fbpaDisEff = auditWord(AOFF.FBPA_DIS_EFF, "FBPA_DISABLE_EFF").v ??
+                       (sh.FBPA_DISABLE ?? 0);
+    const out = [];
+    if (((gpcDis & 0xFF) !== (gpcDef & 0xFF)) && (gpcDef & 0xFF) !== 0 || (gpcDis & 0xFF) !== (gpcDef & 0xFF)) {
+      const bits = [];
+      for (let i = 0; i < 8; i++) if (((gpcDis & ~gpcDef) >> i) & 1) bits.push("GPC" + i);
+      out.push({ label: "GPC unlock", word: encFF(1, 8, (gpcDef & 0xFF) << 3),
+        effect: `GPC_DISABLE ${fmt(gpcDis & 0xFF)} → ${fmt(gpcDef & 0xFF)}` +
+          (bits.length ? ` — re-enables ${bits.join(", ")}` : " — masks already equal"),
+        recs: gpcDef ? "re-enables every non-defective GPC" : "no defective GPCs — record would disable all (skip)" });
+    }
+    if ((fbpDis & 0xFFF) !== (fbpDef & 0xFFF)) {
+      const bits = [];
+      for (let i = 0; i < 12; i++) if (((fbpDis & ~fbpDef) >> i) & 1) bits.push("FBP" + i);
+      const gb = bits.length * 8;
+      out.push({ label: "FBP unlock", word: encFF(1, 19, (fbpDef & 0xFFF) << 3),
+        effect: `FBP_DISABLE ${fmt(fbpDis & 0xFFF)} → ${fmt(fbpDef & 0xFFF)}` +
+          (bits.length ? ` — re-enables ${bits.join(", ")} (+${gb} GB)` : " — masks already equal"),
+        recs: gb ? `+${gb} GB VRAM from healthy-but-floorswept stacks` : "no healthy FBP held off — nothing to gain" });
+    }
+    if ((fbpaDisEff & 0xFFFFFF) !== (fbpaDef & 0xFFFFFF)) {
+      const w = ((fbpaDef & 0xFFFFFF) << 3) >>> 0;
+      const lo = w & 0xFFFF, hi = (w >>> 16) & 0xFFFF;
+      const bits = [];
+      for (let i = 0; i < 24; i++) if (((fbpaDisEff & ~fbpaDef) >> i) & 1) bits.push("FBPA" + i);
+      out.push({ label: "FBPA unlock (2 words)", pair: true,
+        words: [encFF(1, 5, lo), encFF(1, 6, hi)],
+        effect: `FBPA_DISABLE ${fmt(fbpaDisEff & 0xFFFFFF)} → ${fmt(fbpaDef & 0xFFFFFF)}` +
+          (bits.length ? ` — re-enables channels ${bits.join(", ")} (belong to the FBP unlock — burn together)` : " — masks already equal"),
+        recs: "24-bit split field: off5 = low word, off6 = high word" });
+    }
+    return out;
+  }
+  function renderPlan() {
+    const el = document.getElementById("plan-rows");
+    if (!D.shadow) { el.innerHTML = `<span class="note">load a dump first</span>`; return; }
+    const plan = suggestPlan();
+    const needed = plan.length;
+    document.getElementById("plan-summary").innerHTML = needed
+      ? `<b>${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s)</b> in ${needed} record group(s)`
+      : `<b class="ok">masks already equal to defective — this card needs no unlock burns</b>`;
+    el.innerHTML = plan.map(p => {
+      const words = p.pair ? p.words : [p.word];
+      const rows = words.map(w => ({ w, ex: existingRecordFor(w) }));
+      return `<div class="planrow">` +
+        `<div><b>${p.label}</b> <span class="note">${esc(p.recs)}</span></div>` +
+        rows.map(r => {
+          const f = ffEffect(r.w);
+          return `<div class="planword">` +
+            `<span class="mono">0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</span>` +
+            `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+            (r.ex !== null
+              ? ` <span class="tag ok-tag">ALREADY IN DUMP — row ${r.ex}</span>`
+              : ` <button class="btn" data-plan-add="${r.w}">+ queue</button>`) +
+            `</div>`;
+        }).join("") + `</div>`;
+    }).join("") || `<span class="note">no records needed — disable masks already match the card's defects</span>`;
+    el.querySelectorAll("[data-plan-add]").forEach(b => b.onclick = () => {
+      queueAdd(+b.dataset.planAdd, "suggested");
+    });
+  }
+  function queueAdd(word, src, customRow, mirror) {
+    burnQueue.push({ word, src, customRow, mirror: !!mirror });
+    renderQueue();
+  }
+  function renderQueue() {
+    const el = document.getElementById("queue-rows");
+    if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
+    el.innerHTML = burnQueue.map((q, i) => {
+      const f = ffEffect(q.word);
+      const ex = existingRecordFor(q.word);
+      return `<div class="qrow${ex !== null ? " qexists" : ""}">` +
+        `<span class="mono">#${i + 1}</span>` +
+        `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
+        `<span class="note">${esc(f.key)}</span>` +
+        (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
+        (ex !== null ? ` <span class="tag ok-tag">⚠ already in dump — row ${ex} (duplicate)</span>` : "") +
+        `<span class="note">via ${esc(q.src)}</span>` +
+        `<button class="btn" data-q-del="${i}">✕</button></div>`;
+    }).join("");
+    el.querySelectorAll("[data-q-del]").forEach(b => b.onclick = () => {
+      burnQueue.splice(+b.dataset.qDel, 1); renderQueue(); });
+  }
+  function queueRecords() {
+    // assign free safe-zone rows to queue entries that lack one (ascending,
+    // skipping occupied rows; mirror entries consume an even/odd pair).
+    // The server re-validates every row against ff_policy — this only picks
+    // plausible candidates so the common case needs no manual row typing.
+    if (!ffLayout || !ffLayout.burn_zone) {
+      alert("FF layout not loaded — reload the page before burning the queue");
+      return null;
+    }
+    const L = ffLayout;
+    const used = new Set(Object.keys(D.rows || {}).map(Number));
+    let cur = Math.max(L.burn_zone[0], L.last_occupied + 1);
+    const alloc = (mirror) => {
+      if (mirror && (cur & 1)) { if (used.has(cur)) return null; used.add(cur); cur++; }
+      while (used.has(cur) && cur <= L.burn_zone[1]) cur++;
+      if (cur > L.burn_zone[1]) return null;
+      used.add(cur);
+      if (mirror) used.add(cur + 1);
+      return cur++;
+    };
+    const recs = [];
+    for (const q of burnQueue) {
+      const row = q.customRow || alloc(!!q.mirror);
+      if (row === null || row === undefined) {
+        alert("no free rows left in the safe burn zone — shrink the queue");
+        return null;
+      }
+      recs.push({ row, value: q.word, old: (D.rows || {})[row] || 0,
+                  mirror: !!q.mirror });
+    }
+    return recs;
+  }
+  document.getElementById("plan-queue-all").onclick = () => {
+    for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
+      queueAdd(w, p.label);
+    note("all suggested records queued — review the queue, then start the campaign in burn mode", "okl");
+  };
+  document.getElementById("queue-clear").onclick = () => { burnQueue = []; renderQueue(); };
+  document.getElementById("cq-row").oninput = document.getElementById("cq-value").oninput = () => {
+    const v = parseInt($("cq-value").value, 16);
+    const el = document.getElementById("cq-decode");
+    if (isNaN(v)) { el.innerHTML = ""; return; }
+    const f = ffDecode(v);
+    const ef = ffEffect(v);
+    el.innerHTML = `decode: chain ${f.ch} · ${f.iff ? '<b class="warn">IFF — REFUSED (bit 5 set)</b>' : `block ${f.blk} · data 0x${f.data.toString(16)}`} · ${esc(ef.key)}`;
+  };
+  document.getElementById("cq-add").onclick = () => {
+    const row = +document.getElementById("cq-row").value;
+    const v = parseInt(document.getElementById("cq-value").value, 16);
+    if (isNaN(v)) { alert("bad hex value"); return; }
+    const mirror = document.getElementById("cq-mirror").checked;
+    queueAdd(v, `custom row ${row}${mirror ? " + mirror" : ""}`, row, mirror);
+  };
+  document.getElementById("plan-devid-add").onclick = () => {
+    let dv = parseInt(document.getElementById("plan-devid").value, 16);
+    const noteEl = document.getElementById("plan-devid-note");
+    if (isNaN(dv) || dv < 0x100 || dv > 0xFFFF) {
+      noteEl.innerHTML = `<span class="warn">invalid devid (use 0x100–0xFFFF, e.g. 0x20B5)</span>`; return; }
+    // data = devid << 1: the DATA word's low bit is always 0 by construction
+    // (the skill's reference encodes 0x20B5 -> data 0x416A directly).
+    queueAdd(encFF(2, 37, dv << 1), `DEVIDA → 0x${dv.toString(16).toUpperCase()}`);
+    queueAdd(encFF(2, 38, dv << 1), `DEVIDB → 0x${dv.toString(16).toUpperCase()}`);
+    note("DEVID pair queued — identity change takes effect at next cold boot", "okl");
+  };
 
   // ---- target GPU selector (live Goldilocks state) ----
   function gpuOption(g) {
@@ -1800,6 +2071,122 @@ LIVEBOOT = r"""
   $("gb-value").oninput = invalidateChecked;
   $("gb-mirror").onchange = invalidateChecked;
 
+  // ---- read-only burn preview: ga100_burn's default preview mode inside
+  // the UI. Works ANY time — CMD_READ is gated by FUSECTRL_PLM, not EFP —
+  // no window, no arm, no token, and the server path cannot write fuses.
+  let lastPreview = null;
+  function currentPayload() {
+    const fromDump = $("gb-srcmode").value === "dump";
+    return {row: +$("gb-row").value,
+            value: fromDump ? (payloadValue === null ? "" : "0x" + payloadValue.toString(16))
+                            : $("gb-value").value.trim(),
+            mirror: $("gb-mirror").checked};
+  }
+  function updatePreviewBtn() {   // enabled on row+value alone — no window/arm gate
+    const p = currentPayload();
+    let v = NaN;
+    try { v = parseInt(p.value, 0); } catch (e) {}
+    $("gb-preview").disabled = !(p.row >= 0 && p.row <= 487 &&
+                                 Number.isInteger(v) && v >= 0 && v <= 0xFFFFFFFF);
+  }
+  ["gb-row", "gb-value", "gb-srcrow"].forEach(id =>
+    $(id).addEventListener("input", updatePreviewBtn));
+  ["gb-srcmode", "gb-mirror"].forEach(id =>
+    $(id).addEventListener("change", updatePreviewBtn));
+  updatePreviewBtn();
+
+  function decodeSpan(d) {
+    if (!d) return `<span class="note">— not a live FF record</span>`;
+    return `<span class="mono">chain=${d.chain}${d.iff ? "·IFF" : ""} ` +
+      `block=${d.block} data=0x${d.data.toString(16).toUpperCase().padStart(4, "0")}</span>` +
+      (d.name ? ` <b class="ok">→ ${esc(d.name)}</b>` : "");
+  }
+  function bitStrip(v, delta) {   // delta bits highlighted amber
+    let h = "";
+    for (let i = 31; i >= 0; i--) {
+      const set = (v >>> i) & 1, d = (delta >>> i) & 1;
+      h += `<span class="bitcell${set ? " bitset" : ""}${d ? " dbit" : ""}" ` +
+           `title="bit ${i}${d ? " · delta (0→1)" : ""}">${i}</span>`;
+    }
+    return `<div class="bits">${h}</div>`;
+  }
+  function collisionBadge(c) {
+    return c.last_wins === "WILL WIN"
+      ? `<span class="pill okl">LAST-WINS: will win</span>`
+      : `<span class="pill badl">LAST-WINS: will ${esc(c.last_wins)}</span>`;
+  }
+  function previewHtml(j) {
+    const vcls = j.verdict === "SAFE TO BURN" ? "good"
+               : j.verdict === "ALREADY BURNED" ? "warnv" : "";
+    const rowsHtml = (j.rows || []).map(r =>
+      `<div style="margin-top:8px"><b class="mono">row ${r.row}</b> ` +
+      `<span class="pill${r.row_verdict === "SAFE TO BURN" ? " okl" : r.row_verdict === "ALREADY BURNED" ? " warnl" : " badl"}">${esc(r.row_verdict)}</span></div>` +
+      `<div class="mono">${fmt(r.before)} <b class="warn">Δ ${fmt(r.delta)}</b> → ${fmt(r.after)}</div>` +
+      bitStrip(r.after, r.delta) +
+      `<table><tr><th></th><th>word</th><th>FF decode</th></tr>` +
+      `<tr><td>before</td><td class="mono">${fmt(r.before)}</td><td>${decodeSpan(r.decode_before)}</td></tr>` +
+      `<tr><td>after</td><td class="mono">${fmt(r.after)}</td><td>${decodeSpan(r.decode_after)}</td></tr></table>`).join("");
+    const c = j.collisions || {};
+    const colHtml = `<div style="margin-top:10px"><b>collision scan · key ` +
+      `chain${c.key ? c.key.chain : "?"}·block${c.key ? c.key.block : "?"}` +
+      `${c.name ? " → " + esc(c.name) : ""}</b> ${collisionBadge(c)}` +
+      ((c.records || []).length
+        ? `<table><tr><th>row</th><th>word</th><th>decode</th></tr>` +
+          c.records.map(x => `<tr><td class="mono">${x.row}</td><td class="mono">${fmt(x.word)}</td><td>${decodeSpan(x.decode)}</td></tr>`).join("") + `</table>`
+        : `<div class="note">no existing record with this key — the burn defines it</div>`) + `</div>`;
+    const hz = j.hazards || {};
+    const hzHtml = hz.skipped
+      ? `<div class="note" style="margin-top:8px">partial-landing hazards: skipped — ${esc(hz.skipped)}</div>`
+      : `<div style="margin-top:8px"><b>partial-landing hazards</b> ` +
+        `<span class="note">${(hz.hazards || []).length} hazard · ${hz.benign || 0} benign · ${hz.inert || 0} inert subset(s)</span>` +
+        (hz.hazards || []).map(x =>
+          `<div class="warn" style="margin-top:3px">⚠ partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
+          `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") + `</div>`;
+    const strip = `<div class="frow" style="margin-top:10px">` +
+      `<span class="pill ${j.window_ok ? "okl" : ""}">burn window ${j.window_ok ? "open" : "closed"} — not required for preview</span>` +
+      `<span class="pill warnl">arm pending — auto-armed at burn (SENSE_CTRL)</span>` +
+      `<span class="pill ${j.journal_uncertain ? "badl" : "okl"}">journal ${j.journal_uncertain ? "UNCERTAIN" : "clear"}</span></div>`;
+    return `<div class="verdict ${vcls}" style="padding:8px 12px;margin-top:8px">` +
+      `<b>${esc(j.verdict)} (preview)</b> — read-only, zero fuse writes · ` +
+      `${esc(j.bdf || "")} · ${esc(j.ts || "")}</div>` +
+      rowsHtml + colHtml + hzHtml +
+      (j.predicted ? `<div style="margin-top:8px"><b>predicted effect:</b> ${esc(j.predicted)}</div>` : "") +
+      strip;
+  }
+  $("gb-preview").onclick = async () => {
+    const p = currentPayload();
+    const res = $("gb-previewresult");
+    res.innerHTML = "previewing… (read-only — CMD_READ only, no window/arm needed)";
+    let j;
+    try { j = await jpost("/api/burn/preview", {...p, bdf: targetBdf || ""}); }
+    catch (e) { res.innerHTML = `<span class="bad">⚠ ${esc(String(e))}</span>`; return; }
+    if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; return; }
+    lastPreview = j;
+    res.innerHTML = previewHtml(j);
+  };
+
+  // predicted-vs-actual: preview after-word + collision verdict against
+  // the post-burn readback + post-burn last-wins scan; mismatch red.
+  function pvaRowHtml(name, predAfter, predWin, as) {
+    if (!as) return "";
+    const okRb = as.readback === predAfter, okWin = predWin === as.last_wins;
+    return `<tr><td>${esc(name)}</td>` +
+      `<td class="mono">${fmt(predAfter)}</td><td>${esc(predWin || "—")}</td>` +
+      `<td class="mono ${okRb ? "ok" : "bad"}">${fmt(as.readback)} ${okRb ? "✓" : "✗ MISMATCH"}</td>` +
+      `<td class="${okWin ? "ok" : "bad"}">${esc(as.last_wins)}${okWin ? " ✓" : " ✗ MISMATCH"}</td></tr>`;
+  }
+  function predictedVsActualHtml(j) {
+    if (!lastPreview || !j || !j.after_state) return "";
+    if (lastPreview.row !== j.row || lastPreview.value !== j.value) return "";
+    const pv = lastPreview.value >>> 0, pw = (lastPreview.collisions || {}).last_wins;
+    return `<div style="margin-top:8px"><b>Predicted vs Actual</b>` +
+      `<table><tr><th></th><th>predicted after</th><th>predicted last-wins</th>` +
+      `<th>actual readback</th><th>actual last-wins</th></tr>` +
+      pvaRowHtml("row " + j.row, pv, pw, j.after_state) +
+      (j.mirror ? pvaRowHtml("mirror row " + j.mirror.row, pv, pw, j.mirror.after_state) : "") +
+      `</table></div>`;
+  }
+
   $("gb-check").onclick = async () => {
     const row = +$("gb-row").value;
     const fromDump = $("gb-srcmode").value === "dump";
@@ -1878,7 +2265,7 @@ LIVEBOOT = r"""
                                       token: armToken, ack_uncertain: true});
       }
     }
-    $("gb-checkresult").innerHTML = burnReportHtml(j);
+    $("gb-checkresult").innerHTML = burnReportHtml(j) + predictedVsActualHtml(j);
     loadLayout();   // a burn changes the zone — refresh the map
   };
 
@@ -1923,21 +2310,34 @@ LIVEBOOT = r"""
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
       no_revert: $("gc-hold").value === "hold"};
     if (mode === "burn") {
-      if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
       if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
-      if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
-        alert("Burn payload was checked on " + payloadChecked.bdf +
-              " but the target is " + targetBdf + " — re-check first"); return;
+      let recs;
+      if (burnQueue.length) {
+        // queue mode: every queued record burns in ONE window (the service
+        // replays records[] in row order on the first Goldilocks hit)
+        recs = queueRecords();
+        if (!recs) return;
+      } else {
+        if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
+        if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
+          alert("Burn payload was checked on " + payloadChecked.bdf +
+                " but the target is " + targetBdf + " — re-check first"); return;
+        }
+        recs = [{row: payloadChecked.row, value: payloadChecked.value,
+                 old: payloadChecked.old, mirror: payloadChecked.mirror,
+                 bdf: targetBdf}];
       }
-      body.records = [{row: payloadChecked.row, value: payloadChecked.value,
-                       old: payloadChecked.old, mirror: payloadChecked.mirror,
-                       bdf: targetBdf}];
+      body.records = recs;
       body.token = armToken;
-      if (!confirm("Start glitching and BURN the payload on first Goldilocks?\n" +
-        "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
-        payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
+      if (!confirm((burnQueue.length
+        ? `Start glitching and BURN ${recs.length} queued record(s) on first Goldilocks?\n` +
+          "target " + targetBdf + " — rows " + recs.map(r => r.row).join(", ") +
+          " (rows auto-assigned in the safe zone)\n"
+        : "Start glitching and BURN the payload on first Goldilocks?\n" +
+          "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
+          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n")) +
         "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
-        "verifies OK; a burn ABORT is not final — attempts keep firing.")) return;
+        "verifies OK; a burn ABORT is not final — attempts keep firing.") return;
     } else if (!confirm("Start glitch campaign?\n" +
         "the pico on port " + $("gc-port").value + " dips NVVDD on " +
         (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
@@ -2045,7 +2445,6 @@ LIVEBOOT = r"""
       </div>
       <div id="gmon" class="gmon-grid"></div>
     </div>
-    <div class="grid" id="gpu-cards" style="margin-top:12px"></div>
     <div class="card" style="margin-top:12px"><h3>PCIe link (lspci)</h3>
       <div id="gpu-link" class="mono note"></div></div>`;
   const GPU_LABELS = {"name": "GPU", "driver_version": "driver", "memory.total": "VRAM total",
@@ -2055,22 +2454,46 @@ LIVEBOOT = r"""
     "pcie.link.gen.current": "PCIe gen", "pcie.link.gen.max": "PCIe max gen",
     "clocks.sm": "SM MHz", "clocks.mem": "mem MHz", "pstate": "P-state"};
   async function renderGpu(pre) {
-    let j = pre;
-    if (!j) { try { j = await jget("/api/gpu"); } catch (e) { return; } }
-    const n = j.nvidia || {};
-    if (n.error) {
-      $("gpu-banner").innerHTML = `<b class="warn">nvidia-smi:</b> ` +
-        `<span class="mono">${esc(n.error)}</span>`;
-      $("gpu-cards").innerHTML = "";
-    } else {
-      $("gpu-banner").innerHTML = `<b class="ok">nvidia-smi online</b> — ` +
-        `updated <span class="mono">${esc(j.ts)}</span>`;
-      $("gpu-cards").innerHTML = Object.entries(GPU_LABELS)
-        .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
-        .map(([k, l]) => `<div class="card stat"><div class="k">${l}</div>` +
-          `<div class="v mono">${esc(n[k])}</div></div>`).join("");
+    // one section per GPU on the host; `pre` (from gmonTick) renders the
+    // selected card only, initial paint lists them all via /api/gpus/all
+    let list = null;
+    if (!pre) {
+      try { list = await jget("/api/gpus/all"); } catch (e) { return; }
     }
-    $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
+    const info = {};
+    if (list) for (const g of (list.gpus || [])) info[g.bdf] = g;
+    const bdfs = list ? Object.keys(info) : [pre.bdf || ""];
+    const results = await Promise.all(bdfs.map(async bdf => {
+      try { return await jget("/api/gpu" + (bdf ? "?bdf=" + encodeURIComponent(bdf) : "")); }
+      catch (e) { return { bdf, nvidia: { error: String(e) }, link: [], apps: [] }; }
+    }));
+    const sel = selBdf();
+    const target = sel || (list && list.default) || "";
+    $("gpu-banner").innerHTML = results.map(j => {
+      const n = j.nvidia || {}, bdf = j.bdf || "?";
+      const gi = info[bdf] || {};
+      const isSel = bdf === target;
+      const head = `<div class="flexline" style="margin:0 0 4px">` +
+        `<b class="mono">${esc(bdf)}</b>` +
+        (gi.ga100 ? ` <span class="tag">GA100 · fuse target</span>` : "") +
+        (isSel ? ` <span class="tag">selected</span>` : "") +
+        (n.error ? ` <span class="warn">nvidia-smi: ${esc(n.error)}</span>`
+                 : ` <span class="ok">${esc(n["name"] || gi.name || "GPU")}</span> ` +
+                   `<span class="note mono">updated ${esc(j.ts)}</span>`) +
+        (gi.driver ? ` <span class="note mono">driver=${esc(gi.driver)}</span>` : "") +
+        `</div>`;
+      const cards = n.error ? "" :
+        `<div class="grid" style="margin-bottom:8px">` +
+        Object.entries(GPU_LABELS)
+          .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
+          .map(([k, l]) => `<div class="card stat"><div class=\"k\">${l}</div>` +
+            `<div class=\"v mono\">${esc(n[k])}</div></div>`).join("") + `</div>`;
+      const link = (j.link || []).length
+        ? `<div class="mono note" style="margin-bottom:6px">${esc(j.link.join("\n"))}</div>` : "";
+      return `<div class="card" style="margin-bottom:10px">${head}${cards}${link}</div>`;
+    }).join("");
+    const cur = results.find(j => j.bdf === (sel || "")) || results[0] || {};
+    $("gpu-link").textContent = (cur.link || []).join("\n") || "no link info";
   }
   // ---- nvtop-style live monitor ----
   const gmonHist = [];
@@ -2159,7 +2582,7 @@ LIVEBOOT = r"""
   }
   async function gmonTick() {
     try {
-      const j = await jget("/api/gpu");
+      const j = await jget("/api/gpu" + bdfQs());
       renderGpu(j);
       const n = j.nvidia || {};
       const t = new Date().toTimeString().slice(0, 8);
@@ -2167,7 +2590,7 @@ LIVEBOOT = r"""
       else {
         const lim = gnum(n["power.limit"]) || 300;
         const tot = gnum(n["memory.total"]) || 81920;
-        gmonHist.unshift({t, name: n["name"],
+        gmonHist.unshift({t, name: (n["name"] || "GPU") + (j.bdf ? " · " + j.bdf : ""),
           temp: gnum(n["temperature.gpu"]), util: gnum(n["utilization.gpu"]),
           memu: gnum(n["utilization.memory"]), pw: gnum(n["power.draw"]),
           pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
@@ -2201,6 +2624,7 @@ LIVEBOOT = r"""
 
   const savedMs = +(localStorage.getItem("ga100.pollMs") || "0");
   document.getElementById("pollsel").value = String(savedMs);
+  populateGpuSel();
   fullDump().then(() => {
     fetchLive(true);
     if (savedMs > 0) heavyTimer = setInterval(() => fetchLive(true), savedMs);

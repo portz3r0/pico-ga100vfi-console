@@ -9,11 +9,18 @@ Endpoints:
   POST /api/glitch/stop
   POST /api/revert         {port?} — hand PMBus control back (undo a held window)
   GET  /api/burn/check?row=&value=&mirror=   guards + current row value (dry)
+  POST /api/burn/preview   {row, value, mirror} — READ-ONLY preview (no
+                           window/arm/token; works on a cold card and in
+                           mock): before/delta/after, FF decode, last-wins
+                           collision scan, partial-landing hazards
+  GET  /api/burn/last      last stored preview + burn report (state dir)
   POST /api/burn           {row, value, old, mirror, confirm, token, ack_uncertain}
   POST /api/arm            {phrase: "BURN"} -> 120s arm token
   GET  /api/driver         driver/modules/blacklist state
   POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
-  GET  /api/gpu            nvidia-smi + lspci link state
+  GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
+  GET  /api/gpus/all     every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF
+  GET  /api/gpu            nvidia-smi + lspci link state (?bdf= any GPU on the host)
 
 Safety model:
   * /api/live never writes to the card.
@@ -224,7 +231,10 @@ def dumps_dir():
     return os.path.join(CFG["state_dir"], "dumps")
 
 
-def full_dump():
+def full_dump(bdf=None):
+    bdf = bdf or CFG["bdf"]
+    if bdf != CFG["bdf"] and not valid_bdf(bdf):
+        return {"error": f"{bdf} is not a GA100 on this host"}
     with glitch_lock:
         if GLITCH["running"]:
             # the GUI auto-loads a dump on every page open; a dump grabs
@@ -234,16 +244,16 @@ def full_dump():
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy — another full dump is running"}
     try:
-        if CFG["mock"]:
+        if CFG["mock"] and bdf == CFG["bdf"]:
             with open(CFG["mock"]) as f:
                 d = json.load(f)
             hw = os.path.join(os.path.dirname(CFG["mock"]), "hex_window_0x820000.txt")
         else:
-            out = os.path.join(dumps_dir(),
+            out = os.path.join(dumps_dir(), bdf if bdf != CFG["bdf"] else "",
                                datetime.now().strftime("%Y%m%d-%H%M%S"))
             os.makedirs(out, exist_ok=True)
             logs = []
-            d = fd.dump_card(CFG["bdf"], out, CFG["rows"], True,
+            d = fd.dump_card(bdf, out, CFG["rows"], True,
                              lambda m, flush=True: logs.append(m))
             d["log"] = logs[-30:]
             hw = os.path.join(out, "hex_window_0x820000.txt")
@@ -496,6 +506,10 @@ def burn_execute(rd, wr, row, value, old, bdf=None, journal=None,
             if journal:
                 journal_append(journal, "verified", bdf=bdf, row=row,
                                word=value)
+            # predicted-vs-actual: re-read the burned row and re-run the
+            # last-wins collision scan AFTER verify (read-only here — the
+            # task-08 write sequence above is unchanged)
+            rep["after_state"] = burn_after_state(rd, wr, row, value)
         else:
             rep["result"] = "VERIFY FAIL — readback does not match"
         return rep
@@ -631,6 +645,337 @@ def ff_policy(layout, row, mirror=False, value=None):
     return issues
 
 
+# ---------------------------------------------------------------- FF decode + read-only preview
+# Verified FF-record field map (same as the Explorer tab's JS ffDecode):
+#   chain = word[4:0], iff = bit 5, block = word[15:6], data = word[31:16]
+# The controller replays FF records in row order; the LAST record per
+# (chain, block) key wins. An IFF record (bit 5) truncates the pool.
+FF_BLOCK_NAMES = {(1, 8): "GPC_DISABLE", (1, 19): "FBP_DISABLE"}
+FF_UNIT_PREFIX = {8: "GPC", 19: "FBP"}
+FF_UNIT_WIDTH = {8: 8, 19: 12}     # GPC count / FBP count (fusedump live_fbp)
+FF_SUBSET_CAP = 12                 # hazard enumeration cap (2^12 subsets)
+
+
+def ff_decode(word):
+    """Decode an FF record word with the verified field map."""
+    return {"chain": word & 0x1F, "iff": (word >> 5) & 1,
+            "block": (word >> 6) & 0x3FF, "data": (word >> 16) & 0xFFFF}
+
+
+def ff_key(word):
+    """The controller's last-wins key for a record word: (chain, block)."""
+    return (word & 0x1F, (word >> 6) & 0x3FF)
+
+
+def ff_decode_if(row, word):
+    """Decode for display when row is in the FF record region and the word
+    is a live (non-blank, non-IFF) record; None otherwise."""
+    if row < FF_START or row > FF_END or word in (0, 0xFFFFFFFF) \
+            or (word >> 5) & 1:
+        return None
+    d = ff_decode(word)
+    d["name"] = FF_BLOCK_NAMES.get((d["chain"], d["block"]))
+    return d
+
+
+def ff_mask_effect(key, data_from, data_to):
+    """Human line describing the decoded-mask change (mask = data >> 3,
+    the Explorer tab's verified OPT_* decode) for a known block; None for
+    unknown keys."""
+    if key not in FF_BLOCK_NAMES:
+        return None
+    unit = FF_UNIT_PREFIX[key[1]]
+    m0, m1 = data_from >> 3, data_to >> 3
+    un = [i for i in range(FF_UNIT_WIDTH[key[1]]) if (m0 >> i) & 1 and not (m1 >> i) & 1]
+    mk = [i for i in range(FF_UNIT_WIDTH[key[1]]) if (m1 >> i) & 1 and not (m0 >> i) & 1]
+    parts = []
+    if un:
+        parts.append("unmasks " + "/".join(f"{unit}{i}" for i in un))
+    if mk:
+        parts.append("masks " + "/".join(f"{unit}{i}" for i in mk))
+    return ", ".join(parts) or "no mask change"
+
+
+class ReadOnlyFuse:
+    """Card handle for the preview path: reads pass through; writes are
+    allowed ONLY on the CMD_READ controller path (FUSEADDR, FUSECTRL=CMD_READ,
+    EN_SW_OVERRIDE clear/restore). Any other write — FUSEWDATA, GPIO19/
+    TRIGGER, WDATA_SECURE/SBFE, CMD_WRITE/CMD_SENSE — RAISES: a preview
+    that could latch is a bug, not a warning. CMD_READ is gated by
+    FUSECTRL_PLM, not EFP, so this path works on a cold-booted card."""
+
+    def __init__(self, rd, wr):
+        self._rd, self._wr = rd, wr
+
+    def __call__(self, off):
+        return self._rd(off)
+
+    def wr(self, off, val):
+        if off == FUSEADDR or off == EN_SW_OVERRIDE \
+                or (off == FUSECTRL and (val & 3) == CMD_READ):
+            return self._wr(off, val)
+        raise RuntimeError(f"preview write refused: 0x{off:05X} = 0x{val:08X}")
+
+
+class MockFuseReader:
+    """Read-only handle over mock rows + mock status registers: models the
+    CMD_READ controller path so burn_preview runs UNCHANGED in mock mode —
+    the one burn-adjacent feature mock allows (zero real hardware touched)."""
+
+    def __init__(self, rows, status):
+        self.rows = {int(k): v for k, v in rows.items() if isinstance(v, int)}
+        self.r = {off: status.get(name, 0)
+                  for name, off in fd.STATUS_REGS.items()}
+        self.r[FUSECTRL] = self.r.get(FUSECTRL) or (4 << 16)   # idle
+        self.wr_calls = []
+
+    def __call__(self, off):
+        if off == FUSERDATA:
+            return self.rows.get(self.r.get(FUSEADDR, 0), 0)
+        return self.r.get(off, 0)
+
+    def wr(self, off, val):
+        self.wr_calls.append((off, val))
+        if off == FUSEADDR:
+            self.r[FUSEADDR] = val
+        elif off == FUSECTRL and (val & 3) == CMD_READ:
+            self.r[FUSECTRL] = 4 << 16
+        elif off == EN_SW_OVERRIDE:
+            self.r[off] = val
+        else:
+            raise RuntimeError(f"preview write refused: 0x{off:05X} = 0x{val:08X}")
+
+
+def _ff_pool(rd, wr):
+    """Read the FF record pool (rows FF_START..FF_END) via CMD_READ.
+    Stops at the first IFF record (bit 5) — an IFF truncates the pool the
+    controller replays. Returns {row: word} of non-blank FF records."""
+    pool = {}
+    for r in range(FF_START, FF_END + 1):
+        try:
+            v = read_row_via(rd, wr, r)
+        except RuntimeError:
+            continue
+        if v in (0, 0xFFFFFFFF):
+            continue
+        if (v >> 5) & 1:
+            break
+        pool[r] = v
+    return pool
+
+
+def _ff_collisions(pool, key, exclude_rows):
+    """Every pool record sharing the after-word's (chain, block) key,
+    row-ordered, with the LAST-WINS verdict for a record burned at
+    max(exclude_rows)."""
+    recs = [{"row": r, "word": w, "decode": ff_decode(w)}
+            for r, w in sorted(pool.items())
+            if ff_key(w) == key and r not in exclude_rows]
+    top = max(exclude_rows)
+    lose = [c["row"] for c in recs if c["row"] > top]
+    verdict = f"LOSE to row {max(lose)}" if lose else "WILL WIN"
+    return {"key": {"chain": key[0], "block": key[1]},
+            "name": FF_BLOCK_NAMES.get(key),
+            "records": recs, "preview_row": top, "last_wins": verdict}
+
+
+def _ff_hazards(pool, before, delta, value):
+    """Partial-landing analysis: if only a SUBSET of the delta bits latch,
+    the row holds a DIFFERENT record — and last-wins makes that partial
+    record authoritative for its key. Classify every non-empty proper
+    subset: HAZARD = its key is live in the pool with data differing from
+    the intended record; BENIGN = key live and data equal; INERT = key
+    unused. Enumeration is capped (popcount(delta) > FF_SUBSET_CAP skips
+    it — 2^n subsets is not worth freezing the request)."""
+    n = bin(delta).count("1")
+    if n > FF_SUBSET_CAP:
+        return {"skipped": f"too many subsets (popcount {n} > "
+                           f"{FF_SUBSET_CAP})", "hazards": [],
+                "benign": 0, "inert": 0}
+    bits = [b for b in range(32) if (delta >> b) & 1]
+    live = {}
+    for w in pool.values():                 # pool is row-ordered: last wins
+        live[ff_key(w)] = w
+    hazards, benign, inert = [], 0, 0
+    for m in range(1, 1 << n):
+        sub = sum(1 << bits[i] for i in range(n) if (m >> i) & 1)
+        if sub == delta:
+            continue                        # the full landing is the intent
+        cand = before | sub
+        key = ff_key(cand)
+        winner = live.get(key)
+        if winner is None:
+            inert += 1
+        elif (winner >> 16) & 0xFFFF == (value >> 16) & 0xFFFF:
+            benign += 1
+        else:
+            eff = ff_mask_effect(key, winner >> 16, cand >> 16)
+            hazards.append({
+                "subset": sub, "word": cand, "decode": ff_decode(cand),
+                "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{(winner >> 16) & 0xFFFF:04X}"
+                           f" → 0x{(cand >> 16) & 0xFFFF:04X} ({eff})"
+                           if key in FF_BLOCK_NAMES else
+                           f"chain{key[0]}·block{key[1]} data "
+                           f"0x{(cand >> 16) & 0xFFFF:04X} ≠ intended "
+                           f"0x{(value >> 16) & 0xFFFF:04X}")})
+    return {"skipped": None, "hazards": hazards, "benign": benign,
+            "inert": inert}
+
+
+def _raise_write(off, val):
+    raise RuntimeError(f"preview write refused: 0x{off:05X} = 0x{val:08X}")
+
+
+def burn_preview(rd, row, value, mirror):
+    """Read-only burn preview — ga100_burn's default preview mode, inside
+    the console. `rd` is a read-only card handle (callable reads + .wr
+    restricted to the CMD_READ controller path; a plain function gets a
+    wr that RAISES on any call, so preview structurally cannot write).
+    Never SENSE, never arm, no token: CMD_READ works outside a Goldilocks
+    window (gated by FUSECTRL_PLM, not EFP), so this runs on a cold card.
+    Returns {verdict, rows[], collisions, hazards, predicted, window_ok,
+    arm_pending, journal_uncertain, ...}."""
+    wr = getattr(rd, "wr", None) or _raise_write
+    rows = [row]
+    if mirror:
+        rows.append(row + 1 if row % 2 == 0 else row - 1)
+    en_sw = rd(EN_SW_OVERRIDE)
+    if en_sw != 0:                          # EN cleared for reads, restored
+        wr(EN_SW_OVERRIDE, 0)
+        time.sleep(0.05)
+    try:
+        pool = _ff_pool(rd, wr)
+        befores = {r: read_row_via(rd, wr, r) for r in rows}
+    finally:
+        if en_sw != 0:
+            wr(EN_SW_OVERRIDE, en_sw)
+            time.sleep(0.05)
+    key = ff_key(value)
+    collisions = _ff_collisions(pool, key, set(rows))
+    row_entries = []
+    for r in rows:
+        before = befores[r]
+        delta = value & ~before & 0xFFFFFFFF
+        if before == value:
+            rv = "ALREADY BURNED"
+        elif before & ~value & 0xFFFFFFFF:
+            rv = "IMPOSSIBLE"               # bits would clear — OTP cannot
+        elif collisions["last_wins"].startswith("LOSE"):
+            rv = "WILL BE INERT"            # a later record already wins
+        else:
+            rv = "SAFE TO BURN"
+        row_entries.append({"row": r, "before": before, "delta": delta,
+                            "after": value, "row_verdict": rv,
+                            "decode_before": ff_decode_if(r, before),
+                            "decode_after": ff_decode_if(r, value)})
+    rvs = [e["row_verdict"] for e in row_entries]
+    if "IMPOSSIBLE" in rvs:
+        verdict = "IMPOSSIBLE"
+    elif "WILL BE INERT" in rvs:
+        verdict = "WILL BE INERT"
+    elif all(v == "ALREADY BURNED" for v in rvs):
+        verdict = "ALREADY BURNED"
+    else:
+        verdict = "SAFE TO BURN"
+    hazards = _ff_hazards(pool, befores[row], row_entries[0]["delta"], value)
+    predicted = None
+    if key in FF_BLOCK_NAMES:
+        winners = [r for r in pool if ff_key(pool[r]) == key and r not in rows]
+        if winners:
+            cur = pool[max(winners)] >> 16
+            eff = ff_mask_effect(key, cur, value >> 16)
+            predicted = (f"{FF_BLOCK_NAMES[key]} data 0x{cur:04X} → "
+                         f"0x{(value >> 16) & 0xFFFF:04X} ({eff})")
+        else:
+            eff = ff_mask_effect(key, 0, value >> 16)
+            predicted = (f"{FF_BLOCK_NAMES[key]}: new record — data "
+                         f"0x{(value >> 16) & 0xFFFF:04X} ({eff})")
+        predicted += " · STATUS_OPT_* shadows update only after power cycle"
+    window_ok, window_checks = burn_window(rd)
+    arm_pending = [{"name": n, "value": rd(o), "want": w, "ok": None,
+                    "note": "auto-armed at burn via SENSE_CTRL"}
+                   for n, o, w in ARM_PENDING]
+    return {"verdict": verdict, "rows": row_entries,
+            "collisions": collisions, "hazards": hazards,
+            "predicted": predicted,
+            "window_ok": window_ok, "window_checks": window_checks,
+            "arm_pending": arm_pending,
+            "journal_uncertain": journal_uncertain(_journal_path()),
+            "row": row, "value": value, "mirror": mirror,
+            "read_only": True,
+            "ts": datetime.now().isoformat(timespec="seconds")}
+
+
+def burn_after_state(rd, wr, row, value):
+    """Post-burn visibility (predicted-vs-actual): re-read the burned row
+    and re-run the last-wins collision scan against the updated pool."""
+    pool = _ff_pool(rd, wr)
+    col = _ff_collisions(pool, ff_key(value), {row})
+    return {"row": row, "readback": read_row_via(rd, wr, row),
+            "collisions": col["records"], "last_wins": col["last_wins"]}
+
+
+def _state_file(name):
+    return os.path.join(CFG["state_dir"], name)
+
+
+def _save_state(name, obj):
+    try:
+        with open(_state_file(name), "w") as f:
+            json.dump(obj, f, default=str)
+    except OSError:
+        pass
+
+
+def _load_state(name):
+    try:
+        with open(_state_file(name)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def burn_preview_api(body):
+    """POST /api/burn/preview — same body as /api/burn minus token/confirm.
+    READ-ONLY: works outside any window, on a cold card, and in mock mode
+    (read-only over the mock rows). Stores the preview as last-preview.json
+    so the UI can show predicted-vs-actual after a real burn."""
+    bdf = body.get("bdf") or CFG["bdf"]
+    try:
+        row = int(body["row"])
+        value = int(str(body["value"]), 0)
+    except (KeyError, ValueError, TypeError):
+        return {"error": "row/value required (int / 0x-hex)"}
+    if not (0 <= row <= 487) or not (0 <= value <= 0xFFFFFFFF):
+        return {"error": "row out of range or value not 32-bit"}
+    mirror = bool(body.get("mirror"))
+    if CFG["mock"]:
+        try:
+            with open(CFG["mock"]) as f:
+                mj = json.load(f)
+        except Exception as e:
+            return {"error": f"mock read failed: {e}"}
+        rep = burn_preview(MockFuseReader(mj.get("rows", {}),
+                                          mj.get("status", {})),
+                           row, value, mirror)
+        rep["bdf"] = bdf
+        _save_state("last-preview.json", rep)
+        return rep
+    if not valid_bdf(bdf):
+        return {"error": f"{bdf} is not a GA100 on this host"}
+    if not card_lock.acquire(timeout=1.0):
+        return {"error": "card busy"}
+    try:
+        with Bar0(bdf) as bar:
+            rep = burn_preview(ReadOnlyFuse(bar.rd32, bar.wr32),
+                               row, value, mirror)
+        rep["bdf"] = bdf
+        _save_state("last-preview.json", rep)
+        return rep
+    finally:
+        card_lock.release()
+
+
 def burn_check(row, value, mirror, bdf=None):
     """Dry check: current row value, purity, live burn-window verdict.
     Read-only — never SENSE, never a fuse write. Arm bits (EFP, PROGRAM_DIS,
@@ -756,6 +1101,7 @@ def burn_api(body):
                                              [(row, value), (mrow, value)]):
                         rep["result"] = "IMAGE VERIFY FAILED"
             rep["bdf"] = bdf
+            _save_state("last-burn.json", rep)   # predicted-vs-actual store
             return rep
     finally:
         card_lock.release()
@@ -1213,6 +1559,47 @@ def gpu_state(bdf):
         os.close(f)
 
 
+def nvidia_gpu_bdfs():
+    """Every NVIDIA GPU nvidia-smi sees (any architecture), as
+    {bdf, name}. nvidia-smi reports 8-hex-digit domains; normalise."""
+    out = sh(["nvidia-smi", "--query-gpu=pci.bus_id,name",
+              "--format=csv,noheader"], timeout=10) or ""
+    res = []
+    for line in out.splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) < 2:
+            continue
+        m = re.match(r"^([0-9A-Fa-f]{4,8}):([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9])$",
+                     p[0])
+        if m:
+            res.append({"bdf": (m.group(1)[-4:] + ":" + m.group(2)).lower(),
+                        "name": p[1]})
+    return res
+
+
+def gpus_all():
+    """All GPUs on this host: every NVIDIA GPU (nvidia-smi) plus every
+    GA100 on the PCI bus (driverless ones included — those are fuse
+    targets even when nvidia-smi cannot see them)."""
+    if CFG["mock"]:
+        return {"gpus": [{"bdf": CFG["bdf"], "name": "mock", "ga100": True}],
+                "default": CFG["bdf"]}
+    out = {}
+    for bdf in (fd.find_ga100s() or []):
+        out[bdf] = {"bdf": bdf, "name": None, "ga100": True}
+    if not os.path.exists("/sys/module/nvidia"):
+        pass    # nvidia-smi would auto-load the driver — skip (see gpu_info)
+    else:
+        for g in nvidia_gpu_bdfs():
+            e = out.setdefault(g["bdf"], {"bdf": g["bdf"], "name": None,
+                                          "ga100": False})
+            e["name"] = g["name"]
+    for bdf, e in out.items():
+        e["driver"] = driver_of(bdf)
+    return {"gpus": sorted(out.values(), key=lambda e: e["bdf"]),
+            "default": CFG["bdf"]}
+
+
 def gpu_list():
     """All GA100 GPUs on this host with their live Goldilocks state."""
     if CFG["mock"]:
@@ -1237,17 +1624,27 @@ def gpu_list():
         try:
             for bdf in bdfs:
                 e = {"bdf": bdf, "driver": driver_of(bdf)}
-                try:
-                    e.update(gpu_state(bdf))
-                except Exception as ex:
-                    e.update({"error": str(ex), "goldilocks": False,
-                              "dsov": None})
-                if bdf not in SERIAL_CACHE:
+                bound = bool(e["driver"] and "nvidia" in e["driver"])
+                if bound:
+                    # raw BAR0 reads against a GSP-driven card can wedge it
+                    # (same policy as the poller) — skip state + serial
+                    e.update({"dsov": None, "goldilocks": False,
+                              "note": "nvidia bound — BAR0 state read "
+                                      "skipped (unload stack to probe)"})
+                else:
                     try:
-                        with Bar0(bdf) as bar:
-                            SERIAL_CACHE[bdf] = brd_serial(bar)
-                    except Exception:
-                        SERIAL_CACHE[bdf] = None
+                        e.update(gpu_state(bdf))
+                    except Exception as ex:
+                        e.update({"error": str(ex), "goldilocks": False,
+                                  "dsov": None})
+                if bdf not in SERIAL_CACHE:
+                    SERIAL_CACHE[bdf] = None
+                    if not bound:
+                        try:
+                            with Bar0(bdf) as bar:
+                                SERIAL_CACHE[bdf] = brd_serial(bar)
+                        except Exception:
+                            pass
                 e["serial"] = SERIAL_CACHE.get(bdf)
                 out.append(e)
         finally:
@@ -1331,8 +1728,13 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
               "pcie.link.width.current", "clocks.sm", "clocks.mem", "pstate"]
 
 
-def gpu_info():
-    bdf = CFG["bdf"]
+def gpu_info(bdf=None):
+    bdf = bdf or CFG["bdf"]
+    if bdf != CFG["bdf"] and not valid_bdf(bdf) \
+            and bdf not in {g["bdf"] for g in nvidia_gpu_bdfs()}:
+        return {"nvidia": {"error": f"{bdf} is not a GPU on this host"},
+                "link": [], "apps": [], "bdf": bdf,
+                "ts": datetime.now().isoformat(timespec="seconds")}
     # NVML wants the 8-hex-digit domain form for --id; slot keeps lspci happy
     nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
     slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
@@ -1368,7 +1770,7 @@ def gpu_info():
             user = (sh(["ps", "-o", "user=", "-p", p[0]], timeout=5) or "").strip()
             apps.append({"pid": p[0], "user": user or "?",
                         "cmd": p[1], "mem": p[2]})
-    return {"nvidia": nvidia, "link": link, "apps": apps,
+    return {"nvidia": nvidia, "link": link, "apps": apps, "bdf": bdf,
             "ts": datetime.now().isoformat(timespec="seconds")}
 
 
@@ -1428,6 +1830,38 @@ class Handler(BaseHTTPRequestHandler):
                 with open(CFG["html"], "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif path == "/api/live":
+                bdf = qs.get("bdf")
+                if bdf and bdf != CFG["bdf"]:
+                    # non-default GPU: on-demand pure-read probe, same
+                    # safety rule as the poller — never probe while nvidia
+                    # is bound (GSP wedge risk)
+                    if not valid_bdf(bdf):
+                        return self._send(200, json.dumps(
+                            {"error": f"{bdf} is not a GA100 on this host"}),
+                            "application/json")
+                    if CFG["mock"]:
+                        return self._send(200, json.dumps(
+                            {"error": "mock mode serves the default card only"}),
+                            "application/json")
+                    if not card_lock.acquire(timeout=2.0):
+                        return self._send(200, json.dumps(
+                            {"error": "card busy (campaign or dump in progress)"}),
+                            "application/json")
+                    try:
+                        drv = driver_of(bdf)
+                        if drv and "nvidia" in drv:
+                            snap = {"paused": f"driver '{drv}' bound — raw BAR0 "
+                                    f"live view disabled (Drivers tab -> "
+                                    f"Unload nvidia stack to resume)",
+                                    "driver": drv, "bdf": bdf,
+                                    "ts": datetime.now().isoformat(timespec="seconds")}
+                        else:
+                            snap = probe(bdf)
+                    except Exception as e:
+                        snap = {"error": f"probe failed: {e}"}
+                    finally:
+                        card_lock.release()
+                    return self._send(200, json.dumps(snap), "application/json")
                 with state_lock:
                     snap = dict(STATE)
                 if snap.get("paused"):
@@ -1439,8 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, json.dumps(snap), "application/json")
             elif path == "/api/full":
-                self._send(200, json.dumps(full_dump(), default=str),
-                           "application/json")
+                self._send(200, json.dumps(full_dump(qs.get("bdf")),
+                                           default=str), "application/json")
             elif path == "/api/glitch/status":
                 self._send(200, json.dumps(glitch_status(), default=str),
                            "application/json")
@@ -1454,11 +1888,19 @@ class Handler(BaseHTTPRequestHandler):
                                                       qs.get("mirror") == "1",
                                                       qs.get("bdf")),
                                            default=str), "application/json")
+            elif path == "/api/burn/last":
+                self._send(200, json.dumps(
+                    {"preview": _load_state("last-preview.json"),
+                     "burn": _load_state("last-burn.json")},
+                    default=str), "application/json")
             elif path == "/api/ports":
                 self._send(200, json.dumps(serial_ports(), default=str),
                            "application/json")
             elif path == "/api/gpus":
                 self._send(200, json.dumps(gpu_list(), default=str),
+                           "application/json")
+            elif path == "/api/gpus/all":
+                self._send(200, json.dumps(gpus_all(), default=str),
                            "application/json")
             elif path == "/api/ff/layout":
                 self._send(200, json.dumps(
@@ -1468,8 +1910,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
             elif path == "/api/gpu":
-                self._send(200, json.dumps(gpu_info(), default=str),
-                           "application/json")
+                self._send(200, json.dumps(gpu_info(qs.get("bdf")),
+                                           default=str), "application/json")
             elif path == "/api/dmesg":
                 self._send(200, json.dumps(
                     {"tail": dmesg_tail(),
@@ -1505,6 +1947,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = vrm_revert_now(body)
             elif path == "/api/burn":
                 resp = burn_api(body)
+            elif path == "/api/burn/preview":
+                resp = burn_preview_api(body)
             elif path == "/api/arm":
                 resp = arm_api(body)
             elif path == "/api/driver/op":
