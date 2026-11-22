@@ -1397,6 +1397,7 @@ LIVEBAR = """
     </div>
     <div class="card verdict warnv" id="live-follow" style="display:none;margin-top:8px"></div>
     <div class="card verdict warnv" id="boundpanel" style="display:none;margin-top:8px"></div>
+    <div class="card verdict warnv" id="boundbar" style="display:none;margin-top:8px;padding:6px 14px"></div>
     <div id="feed" class="mono" aria-live="polite"></div>
   </div>
 """
@@ -1518,17 +1519,43 @@ LIVEBOOT = r"""
   function boundHide() {
     const el = document.getElementById("boundpanel");
     if (el) { el.style.display = "none"; el.dataset.bound = "0"; }
+    const bar = document.getElementById("boundbar");
+    if (bar) bar.style.display = "none";
+  }
+  function boundBar(j) {
+    // collapsed view: one line saying capture is still available, with the age
+    const el = document.getElementById("boundpanel");
+    if (el) { el.style.display = "none"; el.dataset.bound = "0"; }
+    const bar = document.getElementById("boundbar");
+    if (!bar) return;
+    const age = (j.last_dump_age_s === null || j.last_dump_age_s === undefined)
+      ? "no complete dump saved yet"
+      : "last dump " + fmtAge(j.last_dump_age_s) + " ago";
+    bar.innerHTML = `<span class="pill warnl">Fuse capture available (driver bound)</span> ` +
+      `<span class="note">${esc(age)}.</span> ` +
+      `<button class="btn" id="boundexpand">Expand ▾</button>`;
+    bar.style.display = "";
+    document.getElementById("boundexpand").onclick = () => {
+      localStorage.removeItem("ga100.boundCollapsed");
+      bar.style.display = "none";
+      fetchLive(false);   // dataset.bound is "0" — next poll rebuilds the panel now
+    };
   }
   function boundPanel(j) {
     const el = document.getElementById("boundpanel");
     if (!el) return;
     if (!j.manual_dump_available) { boundHide(); return; }
+    if (localStorage.getItem("ga100.boundCollapsed") === "1") { boundBar(j); return; }
+    const bar = document.getElementById("boundbar");
+    if (bar) bar.style.display = "none";
     if (el.dataset.bound === "1") return;   // keep an open panel across polls
     el.dataset.bound = "1";
     const age = (j.last_dump_age_s === null || j.last_dump_age_s === undefined)
       ? "no complete dump saved yet"
       : "last complete dump " + fmtAge(j.last_dump_age_s) + " ago";
-    el.innerHTML = `<div><b>${esc(j.paused || "")}</b></div>` +
+    el.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">` +
+      `<b>${esc(j.paused || "")}</b>` +
+      `<button class="btn" id="boundcollapse">Collapse ▴</button></div>` +
       `<div class="note" style="margin-top:4px">${esc(j.paused_hint || "")}</div>` +
       `<div class="note">${esc(age)}.</div>` +
       `<div style="margin-top:6px"><button class="btn" id="boundcap">` +
@@ -1537,6 +1564,11 @@ LIVEBOOT = r"""
       `<div id="boundresult" style="display:none;margin-top:8px"></div>`;
     el.style.display = "";
     document.getElementById("boundcap").onclick = boundConsent;
+    document.getElementById("boundcollapse").onclick = () => {
+      localStorage.setItem("ga100.boundCollapsed", "1");
+      boundHide();
+      boundBar(j);   // show the slim bar immediately, not only on the next poll
+    };
   }
   function condLines(conds, onlyFailed) {
     return (conds || []).filter(c => !onlyFailed || !c.ok).map(c =>
@@ -1559,7 +1591,9 @@ LIVEBOOT = r"""
       `<div style="margin-top:6px"><button class="btn" id="boundgo"` +
       (j.all_ok ? "" : " disabled") + `>Capture now</button>` +
       (j.all_ok ? "" : ` <span class="note">fix the failed conditions first</span>`) +
-      `</div>`;
+      ` <button class="btn" id="boundcancel">Cancel</button></div>`;
+    document.getElementById("boundcancel").onclick =
+      () => { c.style.display = "none"; };   // back out; outer panel untouched
     if (j.all_ok) document.getElementById("boundgo").onclick = boundRun;
   }
   async function boundRun() {
