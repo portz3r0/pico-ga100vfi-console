@@ -2056,10 +2056,24 @@ def _bundle_dump_dirs():
     return sorted(dirs, key=os.path.getmtime)
 
 
-def _repo_git_sha():
-    out = sh(["git", "-C", str(Path(__file__).resolve().parents[3]),
-              "rev-parse", "HEAD"])
-    return out if re.fullmatch(r"[0-9a-f]{40}", out or "") else "unknown"
+def _git_sha_and_source():
+    """(sha, source) for the bundle manifest. Resolved from the package
+    location, not CWD: production runs the service from /opt/ga100-fuse-view,
+    which is not a git repo. Order: git in the repo containing the package
+    (<pkg>/../..), then a .git_sha file shipped next to the package by the
+    deploy step, then ("unknown", "unknown")."""
+    pkg = Path(__file__).resolve().parents[1]        # .../ga100vfi
+    out = sh(["git", "-C", str(pkg.parent.parent), "rev-parse", "HEAD"],
+             timeout=5)
+    if re.fullmatch(r"[0-9a-f]{40}", out or ""):
+        return out, "git"
+    try:
+        sha = (pkg / ".git_sha").read_text().strip()
+    except OSError:
+        sha = ""
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return sha, "file"
+    return "unknown", "unknown"
 
 
 def interpretation_txt(dumps):
@@ -2160,6 +2174,9 @@ def support_bundle():
 
     # newest BUNDLE_DUMP_KEEP dump dirs, emitted oldest first
     dump_dirs = _bundle_dump_dirs()
+    if not dump_dirs:
+        warnings.append("no complete dumps found in state dir "
+                        "(dump.json missing in all dump dirs)")
     for old in dump_dirs[:-BUNDLE_DUMP_KEEP]:
         truncated.append(os.path.relpath(old, dumps_dir()))
     groups = []                        # (rel, {path: bytes}, dump_dict)
@@ -2198,8 +2215,10 @@ def support_bundle():
     members["interpretation.txt"] = interpretation_txt(
         [(sorted(g[1])[0], g[2]) for g in groups])
 
+    git_sha, git_sha_source = _git_sha_and_source()
     manifest = {
-        "tool_git_sha": _repo_git_sha(),
+        "tool_git_sha": git_sha,
+        "git_sha_source": git_sha_source,
         "built_at": datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"),
         "host": {"hostname": socket.gethostname(),
