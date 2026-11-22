@@ -90,9 +90,12 @@ The live view of the card the service was started with.
   disabled-but-healthy (unlock headroom), **red** = defective silicon
   (never usable). Per-GPC line: `SM now · after unlock · defective SM
   (+ recoverable)`; totals pills at the bottom.
-  - Sources: TPC **defective** array `0x820760 + gpc·4`, effective TPC
-    **disable** array `0x820C38 + gpc·4` (defective ⊆ disable; the extra
-    bits are factory-disabled-but-healthy).
+  - Sources: TPC **defective** from the FF-region per-GPC words
+    (`TPC_DEFECT_FF`) — ground truth, the only defect source that survives
+    GPC power-gating; the runtime word `0x820760 + gpc·4` is a legacy
+    fallback for old dumps only. Effective TPC **disable** array
+    `0x820C38 + gpc·4` (defective ⊆ disable; the extra bits are
+    factory-disabled-but-healthy).
   - *After unlock* is the **fuse ceiling**: `(8 − defective TPC) × 2 SM`
     per non-defective GPC. It assumes the GPC-level floorsweep is
     unlocked too — the TPC mask is separate from `GPC_DISABLE`. Cells in
@@ -469,6 +472,7 @@ bricked.
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link state |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
+| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the burn-window verdict is open
@@ -506,6 +510,42 @@ refused regardless of the bind:
 
 Non-browser clients (curl, scripts) send no `Origin` and are allowed. Run
 on a trusted network or front it with your own auth proxy.
+
+## Submitting a support bundle
+
+The header **Support bundle** button (or `GET /api/support_bundle`)
+downloads one `tar.gz` built on the fly — everything a developer needs to
+reproduce an interpretation bug on *your* card without logging into your
+machine. It contains, under `support/`:
+
+- `manifest.json` — tool git SHA, build time (UTC), host
+  hostname/kernel/python, the BDFs involved, the member list with sizes,
+  and any truncation/warning notes.
+- `console.log` and `goldilocks.jsonl` (tail 2 MiB each) and
+  `last-preview.json` — the console's own working logs.
+- `dumps/<bdf>/<ts>/dump.json` + `hex_window_0x820000.txt` for the newest
+  5 dump dirs (oldest first). If the total would exceed 25 MiB the oldest
+  dumps are dropped and listed in `manifest.truncated`.
+- `live_snapshot.json` — the same snapshot `/api/live` serves right now
+  (a `{"paused": ...}` body while the driver is bound is normal).
+- `system.txt` — `lspci -nn -vv` stanzas for the GA100 device IDs
+  (`[10de:20c2]`/`[10de:20b5]`/`[10de:2082]`) and the GPU-relevant
+  `dmesg` tail.
+- `nvidia_smi.txt` — `nvidia-smi` snapshot (index, name, serial, VBIOS,
+  driver, compute cap, clocks, power limit, PCIe link) for the
+  console's BDF; SM count is not an nvidia-smi query field — read it from
+  `live_snapshot.json` / `interpretation.txt` instead. States `driver unbound`
+  when the nvidia module is absent
+  (calling nvidia-smi then would auto-load the driver).
+- `interpretation.txt` — the **interpretation trace**: for every bundled
+  dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
+  totals, per-GPC lines, ceilings, `crc_ok` and fingerprint are printed,
+  together with which defect-word source actually fed the ceilings (FF
+  words from the hex window vs legacy shadow keys). A developer can
+  replay the exact numbers offline from the shipped `dump.json` alone.
+
+The bundle contains board serials and PCI info but **no credentials**.
+Attach it when reporting an issue — send it to the developers.
 
 ## Standalone tools (reference)
 

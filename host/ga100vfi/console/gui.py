@@ -45,27 +45,31 @@ def load_dump(dump_path):
                 hexnon.append([int(m.group(1), 16), int(m.group(2), 16)])
     d["hexnonzero"] = hexnon
     # Backfill per-GPC TPC shadow keys from the hex window for dumps made
-    # before the TPC_DEFECTIVE_GPC/TPC_DISABLE_GPC keys existed (0x820760 =
-    # defective, 0x820C38 = effective disable). The window stores only
-    # non-zero words, so a covered-but-absent offset means zero — treat the
-    # arrays as fully present once the window reaches the last GPC word.
+    # before the TPC keys existed. DEFECTIVE = FF-region words
+    # (fd.TPC_DEFECT_FF, correct even for floorswept GPCs);
+    # FFDISABLE = 0x820760 (SKU mask); DISABLE = 0x820C38 (runtime mask).
+    # The window stores only non-zero words, so a covered-but-absent offset
+    # means zero — treat the arrays as fully present once the window
+    # reaches the last GPC word. Old dumps whose TPC_DEFECTIVE_GPC keys
+    # were captured from 0x820760 are REPAIRED here from the FF words.
     sh = d.get("shadow")
     if isinstance(sh, dict) and hexnon:
         by_off = {off: val for off, val in hexnon}
         covered = max(o for o, _ in hexnon) >= 0x820C54
-        for g in range(8):
-            if covered:
-                sh.setdefault(f"TPC_DEFECTIVE_GPC{g}", by_off.get(0x820760 + 4 * g, 0))
-                sh.setdefault(f"TPC_DISABLE_GPC{g}", by_off.get(0x820C38 + 4 * g, 0))
-            else:
-                sh.setdefault(f"TPC_DEFECTIVE_GPC{g}",
-                             by_off.get(0x820760 + 4 * g))
+        try:
+            from .. import fusedump as _fd
+            ff = _fd.TPC_DEFECT_FF
+            for g in range(8):
+                sh[f"TPC_DEFECTIVE_GPC{g}"] = by_off.get(ff[g], 0 if covered else None)
+                sh.setdefault(f"TPC_FFDISABLE_GPC{g}",
+                              by_off.get(0x820760 + 4 * g, 0 if covered else None))
                 sh.setdefault(f"TPC_DISABLE_GPC{g}",
-                             by_off.get(0x820C38 + 4 * g))
+                              by_off.get(0x820C38 + 4 * g, 0 if covered else None))
+        except Exception:
+            pass
         if "tpc" not in d:
             try:
-                from .. import fusedump as _fd
-                d["tpc"] = _fd.tpc_summary(sh)
+                d["tpc"] = _fd.tpc_summary(sh, hexnon)
             except Exception:
                 pass
     return d
@@ -417,7 +421,11 @@ HTML = r"""<!DOCTYPE html>
       <h1>GA100 Fuse Console</h1>
       <div class="sub mono" id="meta"></div>
     </div>
-    <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
+    <div style="display:flex; align-items:center; gap:10px">
+      <a class="topbadge" href="/api/support_bundle" style="text-decoration:none"
+         title="Download console logs + dumps + interpretation trace as one tar.gz — attach it when reporting an issue">Support bundle</a>
+      <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
+    </div>
   </header>
   <nav class="tabs" role="tablist" aria-label="console views">
     <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"
@@ -644,41 +652,53 @@ function renderTopo() {
 }
 
 // TPC map -----------------------------------------------------------------
+const TPC_FFDEF = [0x8205c8,0x820508,0x82050c,0x820514,0x820564,0x8205ac,0x820b84,0x820b80];
 function computeTpc() {
-  // Mirror of fusedump.tpc_summary() for payloads without a precomputed
-  // "tpc" key (old static dumps). Legacy TPC_DISABLE_{g} held 0x820760.
+  // Mirror of fusedump.tpc_summary(). DEFECTIVE = FF-region words
+  // (TPC_FFDEF, kate-land ga100-options offsets) — readable and correct
+  // even for floorswept GPCs; the hex window, when present, is ground
+  // truth and repairs old dumps whose shadow keys came from the runtime
+  // word. 0x820760 (SKU) and 0x820C38 (runtime) both read 0xFF on a
+  // power-gated GPC — power artifact, never a defect count.
   const sh = D.shadow || {};
+  const hw = D.hexnonzero || [];
+  const word = off => { const e = hw.find(([o]) => o === off); return e ? e[1] >>> 0 : null; };
   const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
   const gpcs = [], totals = { sm_now: 0, sm_max: 0, sm_defective: 0,
                               sm_recoverable: 0, tpc_defective: 0,
                               tpc_recoverable: 0, have_data: false };
   const pop = v => { let n = 0; while (v) { n += v & 1; v >>>= 1; } return n; };
   for (let g = 0; g < 8; g++) {
-    let def = sh["TPC_DEFECTIVE_GPC" + g];
-    if (def == null) def = sh["TPC_DISABLE_" + g];
+    // FF word: authoritative; window present means a covered offset that
+    // is absent reads ZERO (do not fall through to the poisoned shadow key)
+    let def = hw.length ? (word(TPC_FFDEF[g]) ?? 0)
+                        : (sh["TPC_DEFECTIVE_GPC" + g] ?? sh["TPC_DISABLE_" + g]);
     let dis = sh["TPC_DISABLE_GPC" + g];
+    if (dis == null) dis = word(0x820c38 + 4 * g);
     if (def == null && dis == null) { gpcs.push({ gpc: g, available: false }); continue; }
     def = ((def ?? 0) >>> 0) & 0xFF;
     dis = (((dis == null ? def : dis)) >>> 0) & 0xFF;
-    const eff = def | dis;   // defective TPCs never run, disable or not
-    const ndef = pop(def), ndis = pop(eff);
-    const recov = Math.max(ndis - ndef, 0);
     const gdead = (gpcDef >> g) & 1, gdis = (gpcDis >> g) & 1;
+    // Floorswept GPC: show fully masked (every healthy TPC in it is the
+    // unlock prize). Powered GPC: live mask = runtime ∪ defective.
+    const eff = gdis ? 0xFF : (def | dis);
+    const ndef = pop(def), ndis = pop(eff);
+    const recov = gdead ? 0 : ndis - ndef;
+    const tpc_now = gdis ? 0 : 8 - pop(def | dis);
     const tpc_max = gdead ? 0 : 8 - ndef;
-    const sm_now = gdis ? 0 : (8 - ndis) * 2;
-    const row = { gpc: g, available: true, def, dis,
+    const row = { gpc: g, available: true, def, dis, eff,
                   tpc_defective: ndef, tpc_recoverable: recov,
-                  tpc_now: 8 - ndis, tpc_max,
-                  sm_now, sm_max: tpc_max * 2,
+                  tpc_now, tpc_max,
+                  sm_now: tpc_now * 2, sm_max: tpc_max * 2,
                   gpc_defective: gdead, gpc_disabled: gdis };
     gpcs.push(row);
     totals.have_data = true;
-    totals.sm_now += sm_now;
+    totals.sm_now += row.sm_now;
     totals.sm_max += tpc_max * 2;
     totals.sm_defective += ndef * 2;
-    totals.sm_recoverable += gdead ? 0 : recov * 2;
+    totals.sm_recoverable += recov * 2;
     totals.tpc_defective += ndef;
-    totals.tpc_recoverable += gdead ? 0 : recov;
+    totals.tpc_recoverable += recov;
   }
   return { gpcs, totals };
 }
@@ -711,7 +731,8 @@ function renderTpc() {
     const def = (r.def ?? 0) & 0xFF;   // silicon truth — same in every state
     let dis, gdis;
     if (curState === "pre") {
-      dis = STOCK_TPC_DIS[g]; gdis = (STOCK_GPC_DIS >> g) & 1;
+      const ffD = (D.shadow || {})["TPC_FFDISABLE_GPC" + g];
+      dis = ffD != null ? ffD : STOCK_TPC_DIS[g]; gdis = (STOCK_GPC_DIS >> g) & 1;
     } else if (curState === "intended") {
       dis = def; gdis = gdead;        // goal: everything not dead runs
     } else {
@@ -772,9 +793,11 @@ function renderTpc() {
       : curState === "intended"
         ? `Intended = disable mask equals the card's defective mask: every unit that is not dead ` +
           `silicon runs. No yellow cells by definition.`
-        : `Now reads the live registers: TPC defective 0x820760+gpc·4, effective disable ` +
-          `0x820C38+gpc·4 (effective = disable ∪ defective). Yellow cells remaining = ` +
-          `still-disabled-but-healthy = outstanding unlock headroom.`) +
+        : `Now reads: TPC defective from the FF words 0x8205C8/508/50C/514/564/5AC ` +
+          `and 0x820B84/B80 (correct even for gated GPCs), live mask 0x820C38+gpc·4 ` +
+          `(defective-union; a floorswept GPC's runtime word reads 0xFF — power ` +
+          `artifact, shown fully masked). Yellow cells = still-disabled-but-healthy ` +
+          `headroom; floorswept GPCs count their whole healthy half.`) +
     ` Post-unlock ceiling = (8 − defective TPC) × 2 SM per non-defective GPC. Cells in a ` +
     `floorswept/dead GPC are dimmed: their health is shown, but they only run once the GPC ` +
     `itself is enabled.</div>`;
@@ -804,19 +827,19 @@ function auditWord(off, key) {
 }
 function tpcWord(g, which) {   // which: "def" | "dis"
   const sh = D.shadow || {};
+  const hw = D.hexnonzero || [];
   if (which === "def") {
+    // FF-region defect word is ground truth (valid for gated GPCs too)
+    const fv = hw.find(([o]) => o === TPC_FFDEF[g]);
+    if (fv) return { v: fv[1] >>> 0, src: "hex window @ " + hx(TPC_FFDEF[g]) + " — FF defective word" };
     const k = "TPC_DEFECTIVE_GPC" + g;
     if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
-    const lk = "TPC_DISABLE_" + g;   // legacy key held the 0x820760 word
-    if (sh[lk] != null)
-      return { v: sh[lk] >>> 0, src: "shadow." + lk + " (legacy = 0x820760 word)" };
   } else {
     const k = "TPC_DISABLE_GPC" + g;
     if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
+    const dv = hw.find(([o]) => o === AOFF.TPC_DIS + 4 * g);
+    if (dv) return { v: dv[1] >>> 0, src: "hex window @ " + hx(AOFF.TPC_DIS + 4 * g) };
   }
-  const off = (which === "def" ? AOFF.TPC_DEF : AOFF.TPC_DIS) + 4 * g;
-  const hv = (D.hexnonzero || []).find(([o]) => o === off);
-  if (hv) return { v: hv[1] >>> 0, src: "hex window @ " + hx(off) };
   return { v: null, src: "not captured in this dump" };
 }
 function ffBlockRecords(blk) {
@@ -916,7 +939,7 @@ function auditFor(kind, g, t) {
       `bit ${g} SET → fuse replay confirms GPC${g} disabled at boot (the latch to watch after a burn).`));
     const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
     const defM = td.v ?? 0, effM = (tz.v ?? defM) | defM;
-    if (defM !== 0) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, AOFF.TPC_DEF + 4 * g, td, null,
+    if (defM !== 0) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, TPC_FFDEF[g], td, null,
       `HARDWARE GATE per TPC — each set bit permanently removes 2 SM (${pop(defM) * 2} SM lost) from this GPC. Irreversible.`,
       `defective TPCs {${bitsOf(defM).join(",")}} → ${pop(defM) * 2} SM permanently lost in this GPC`));
     const headroom = effM & ~defM;
@@ -951,7 +974,7 @@ function auditFor(kind, g, t) {
     const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
     const dead = td.v != null && ((td.v >>> t) & 1);
     const dis  = tz.v != null && ((tz.v >>> t) & 1);
-    if (dead) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, AOFF.TPC_DEF + 4 * g, td, t,
+    if (dead) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, TPC_FFDEF[g], td, t,
       "HARDWARE GATE — these 2 SM cannot ever run. Enforced in silicon; no burn or write changes it.",
       `bit ${t} SET → TPC${t} in GPC${g} is dead silicon. Its 2 SM can never run.`));
     if (dis && !dead) rows.push(arow(1, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, t,

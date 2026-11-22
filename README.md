@@ -62,6 +62,9 @@ username and home paths are masked.*
   (v_dip/delay/pw),
   and can burn the checked payload in-process on the first Goldilocks
 - Campaigns refuse to start while a driver is bound to the card
+- One-click **Support bundle** download: console logs + newest dumps + a
+  deterministic interpretation trace as one `tar.gz`, ready to attach to a
+  bug report
 - **User guide** — plain-language operating manual: mental model, every
   control, the complete safeguard table, success-reading features,
   failure recovery, glossary:
