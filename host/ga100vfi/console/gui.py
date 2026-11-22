@@ -100,6 +100,15 @@ HTML = r"""<!DOCTYPE html>
   .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace; font-size: 12px; }
 
+  /* Frozen header: topbar + tab bar stay selectable at every scroll
+     position. ONE sticky element (not topbar and tabs separately) so no
+     magic pixel offsets are needed when the topbar wraps taller on narrow
+     screens. --sticktop (default 0px) is maintained by a ResizeObserver in
+     the boot section so the sticky #livebar parks below it, never over it.
+     No overflow here: it must not clip the .tab.on underline or the
+     :focus-visible ring. */
+  .sticktop { position: sticky; top: 0; z-index: 30; background: var(--bg); }
+
   /* top bar */
   .topbar { display: flex; justify-content: space-between; align-items: flex-end;
             gap: 16px; padding-bottom: 14px; margin-bottom: 16px;
@@ -305,7 +314,7 @@ HTML = r"""<!DOCTYPE html>
   @keyframes flashbg { 0% { background: rgba(210,153,34,.4); }
                        100% { background: var(--card); } }
 
-  #livebar { margin-bottom: 14px; position: sticky; top: 0; z-index: 20;
+  #livebar { margin-bottom: 14px; position: sticky; top: var(--sticktop, 0px); z-index: 20;
              background: rgba(13,17,23,.92); backdrop-filter: blur(6px);
              border-color: var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.35); }
   #feed { font-size: 11px; color: var(--muted-foreground); margin-top: 9px;
@@ -416,6 +425,7 @@ HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <div class="app">
+  <div class="sticktop">
   <header class="topbar">
     <div>
       <h1>GA100 Fuse Console</h1>
@@ -437,6 +447,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab" role="tab" id="tabbtn-gpu" aria-controls="tab-gpu"
             aria-selected="false" tabindex="-1" data-tab="gpu">GPU Info</button>
   </nav>
+  </div>
 __LIVEBAR__
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <h2>Status</h2>
@@ -1368,6 +1379,17 @@ wireRowBtns();
 renderAll();
 const initialTab = (location.hash || "").replace("#", "");
 if (["glitch", "drivers", "gpu"].includes(initialTab)) switchTab(initialTab);
+
+// Frozen tab bar: publish the sticky container's height as --sticktop so the
+// sticky #livebar parks below it instead of overlapping. Feature-checked —
+// without ResizeObserver the livebar just sticks at 0 (previous behaviour).
+const sticktopEl = document.querySelector(".sticktop");
+if (sticktopEl && window.ResizeObserver) {
+  const setSticktop = () => document.documentElement.style.setProperty(
+      "--sticktop", sticktopEl.getBoundingClientRect().height + "px");
+  new ResizeObserver(setSticktop).observe(sticktopEl);
+  setSticktop();
+}
 __LIVEBOOT__
 </script>
 </body>
