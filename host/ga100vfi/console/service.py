@@ -75,6 +75,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .. import fusedump as fd
 from ..bar0 import Bar0, brd_serial
+from ..version import version_info
 from .gui import STUB, build_html, load_dump
 
 # DNS-rebinding / CSRF guards: the Host must be localhost or an IP literal
@@ -2057,26 +2058,6 @@ def _bundle_dump_dirs():
     return sorted(dirs, key=os.path.getmtime)
 
 
-def _git_sha_and_source():
-    """(sha, source) for the bundle manifest. Resolved from the package
-    location, not CWD: production runs the service from /opt/ga100-fuse-view,
-    which is not a git repo. Order: git in the repo containing the package
-    (<pkg>/../..), then a .git_sha file shipped next to the package by the
-    deploy step, then ("unknown", "unknown")."""
-    pkg = Path(__file__).resolve().parents[1]        # .../ga100vfi
-    out = sh(["git", "-C", str(pkg.parent.parent), "rev-parse", "HEAD"],
-             timeout=5)
-    if re.fullmatch(r"[0-9a-f]{40}", out or ""):
-        return out, "git"
-    try:
-        sha = (pkg / ".git_sha").read_text().strip()
-    except OSError:
-        sha = ""
-    if re.fullmatch(r"[0-9a-f]{40}", sha):
-        return sha, "file"
-    return "unknown", "unknown"
-
-
 def interpretation_txt(dumps):
     """Re-run fusedump.tpc_summary(shadow, hexnonzero) on every bundled dump
     so a developer can replay the interpretation offline against the very
@@ -2262,10 +2243,15 @@ def support_bundle():
     members["interpretation.txt"] = interpretation_txt(
         [(sorted(g[1])[0], g[2]) for g in groups])
 
-    git_sha, git_sha_source = _git_sha_and_source()
+    vinfo = version_info()
+    if vinfo["git_sha"] is None and vinfo["fingerprint"] != "partial":
+        warnings.append("git sha unavailable; match build by fingerprint "
+                        "against repo")
     manifest = {
-        "tool_git_sha": git_sha,
-        "git_sha_source": git_sha_source,
+        "tool_git_sha": vinfo["git_sha"],
+        "git_sha_source": vinfo["git_sha_source"],
+        "tool_version": vinfo["version"],
+        "tool_fingerprint": vinfo["fingerprint"],
         "built_at": datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"),
         "host": {"hostname": socket.gethostname(),
@@ -2379,8 +2365,9 @@ class Handler(BaseHTTPRequestHandler):
                     finally:
                         card_lock.release()
                     return self._send(200, json.dumps(snap), "application/json")
-                self._send(200, json.dumps(live_snapshot()),
-                           "application/json")
+                snap = live_snapshot()
+                snap["version"] = version_info()
+                self._send(200, json.dumps(snap), "application/json")
             elif path == "/api/full":
                 self._send(200, json.dumps(full_dump(qs.get("bdf")),
                                            default=str), "application/json")

@@ -518,9 +518,17 @@ downloads one `tar.gz` built on the fly — everything a developer needs to
 reproduce an interpretation bug on *your* card without logging into your
 machine. It contains, under `support/`:
 
-- `manifest.json` — tool git SHA, build time (UTC), host
-  hostname/kernel/python, the BDFs involved, the member list with sizes,
-  and any truncation/warning notes.
+- `manifest.json` — tool version, git SHA and source (may be `null`
+  outside a git checkout), 12-hex tool fingerprint, build time (UTC),
+  host hostname/kernel/python, the BDFs involved, the member list with
+  sizes, and any truncation/warning notes. The bundle is
+  **self-describing**: `tool_version` + `tool_fingerprint` (sha256 over
+  the shipped bytes of `version.py`, `fusedump.py`, `console/service.py`
+  and `console/gui.py`) pin the exact build even when the files were
+  copied out of git and no SHA is resolvable — match the fingerprint
+  against the repo. A `.git_sha` file next to the package adds exact-SHA
+  precision but is optional, not required. The same version block is
+  served at `/api/live` under `"version"`.
 - `console.log` and `goldilocks.jsonl` (tail 2 MiB each) and
   `last-preview.json` — the console's own working logs.
 - `dumps/<bdf>/<ts>/dump.json` + `hex_window_0x820000.txt` for the newest
