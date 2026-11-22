@@ -21,6 +21,9 @@ Endpoints:
   GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
   GET  /api/gpus/all     every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF
   GET  /api/gpu            nvidia-smi + lspci link state (?bdf= any GPU on the host)
+  GET  /api/support_bundle tar.gz: console logs + newest dumps + live snapshot
+                           + lspci/dmesg + interpretation trace (pure reads;
+                           built fully in memory, never a partial download)
 
 Safety model:
   * /api/live never writes to the card.
@@ -49,19 +52,22 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import json
 import mmap
 import os
 import re
 import signal
+import socket
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -2010,6 +2016,216 @@ def dmesg_tail(n=80):
     return [l for l in out.splitlines() if pat.search(l)][-n:]
 
 
+def live_snapshot():
+    """The /api/live default-card answer as a dict — shared by the route and
+    the support bundle so both carry the identical live view (a paused or
+    error snapshot is a valid answer, not a bundle failure)."""
+    with state_lock:
+        snap = dict(STATE)
+    if snap.get("paused"):
+        return snap
+    if "error" in snap or snap.get("status") is None:
+        err = {"error": snap.get("error", "no probe yet")}
+        if snap.get("default_note"):
+            err["default_note"] = snap["default_note"]
+        return err
+    return snap
+
+
+# ----------------------------------------------------------- support bundle
+BUNDLE_TAIL = 2 << 20        # per-log tail cap (console.log, goldilocks.jsonl)
+BUNDLE_DUMP_KEEP = 5         # newest dump dirs bundled
+BUNDLE_CAP = 25 << 20        # total uncompressed cap; overflow drops oldest
+GA100_DEVS = ("10de:20c2", "10de:20b5", "10de:2082")
+
+
+def _tail_bytes(path, cap):
+    """Last cap bytes of a file — state-dir logs grow unbounded."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - cap))
+        return f.read()
+
+
+def _bundle_dump_dirs():
+    """Dump dirs under dumps_dir() that hold a dump.json, oldest mtime first.
+    os.walk covers both layouts full_dump writes: dumps/<ts> for the default
+    BDF and dumps/<bdf>/<ts> for the others."""
+    dirs = [dp for dp, _, files in os.walk(dumps_dir())
+            if "dump.json" in files]
+    return sorted(dirs, key=os.path.getmtime)
+
+
+def _repo_git_sha():
+    out = sh(["git", "-C", str(Path(__file__).resolve().parents[3]),
+              "rev-parse", "HEAD"])
+    return out if re.fullmatch(r"[0-9a-f]{40}", out or "") else "unknown"
+
+
+def interpretation_txt(dumps):
+    """Re-run fusedump.tpc_summary(shadow, hexnonzero) on every bundled dump
+    so a developer can replay the interpretation offline against the very
+    bytes shipped in the archive. dumps: [(member_path, dump_dict)]."""
+    L = ["INTERPRETATION TRACE — fusedump.tpc_summary(shadow, hexnonzero)",
+         "re-run at bundle build time on each dump bundled under support/.",
+         "To replay: json.load the dump.json, pass its 'shadow' and",
+         "'hexnonzero' keys to ga100vfi.fusedump.tpc_summary — the totals",
+         "and per-GPC lines below must match. The defect-source line names",
+         "which input actually fed the ceilings: the FF per-GPC words read",
+         "out of the hex window (ground truth, TPC_DEFECT_FF) or, for old",
+         "dumps with no FF addresses in the window, the shadow keys",
+         "(legacy — captured from the runtime word).", ""]
+    for member, d in dumps:
+        shadow = d.get("shadow") or {}
+        hexwin = d.get("hexnonzero") or []
+        haddrs = {a & 0xFFFFFFFF for a, _ in hexwin}
+        ff_seen = sorted(haddrs & set(fd.TPC_DEFECT_FF.values()))
+        src = ("FF words from hex window ("
+               + " ".join(f"0x{a:06x}" for a in ff_seen) + ")"
+               if ff_seen else "shadow keys (legacy)")
+        t = fd.tpc_summary(shadow, hexwin)
+        tot = t["totals"]
+        L.append(f"=== {member} ===")
+        L.append(f"bdf: {d.get('bdf')}  started: {d.get('started')}")
+        L.append(f"defect source: {src}")
+        L.append(f"totals: sm_now={tot['sm_now']} sm_max={tot['sm_max']} "
+                 f"sm_defective={tot['sm_defective']} "
+                 f"sm_recoverable={tot['sm_recoverable']} "
+                 f"tpc_defective={tot['tpc_defective']} "
+                 f"tpc_recoverable={tot['tpc_recoverable']}")
+        for g in t["gpcs"]:
+            if not g.get("available"):
+                L.append(f"gpc{g['gpc']}: no data")
+                continue
+            L.append(f"gpc{g['gpc']}: sm_now={g['sm_now']} "
+                     f"sm_max={g['sm_max']} "
+                     f"tpc_defective={g['tpc_defective']} "
+                     f"tpc_recoverable={g['tpc_recoverable']} "
+                     f"def=0x{g['def']:02x} eff=0x{g['eff']:02x} "
+                     f"gpc_defective={1 if g['gpc_defective'] else 0} "
+                     f"gpc_disabled={1 if g['gpc_disabled'] else 0}")
+        L.append(f"ceilings: {json.dumps(d.get('ceilings'), sort_keys=True)}")
+        L.append(f"crc_ok: {d.get('crc_ok')}  "
+                 f"fingerprint: {d.get('fingerprint')}")
+        L.append("")
+    return ("\n".join(L) + "\n").encode()
+
+
+def system_txt():
+    """lspci -vv stanzas for GA100 device IDs + GPU-relevant dmesg tail.
+    sh() tolerates missing binaries or permissions (returns '<<...>>' text)."""
+    out = ["$ lspci -vv  (stanzas matching " + " ".join(GA100_DEVS) + ")"]
+    stanzas, cur = [], []
+    for ln in (sh(["lspci", "-vv"]) or "").splitlines():
+        if ln and not ln[0].isspace():
+            if cur:
+                stanzas.append(cur)
+            cur = [ln]
+        elif cur:
+            cur.append(ln)
+    if cur:
+        stanzas.append(cur)
+    stanzas_found = 0
+    for st in stanzas:
+        if any(dev in st[0] for dev in GA100_DEVS):
+            out.extend(st)
+            stanzas_found += 1
+    if not stanzas_found:
+        out.append("(no GA100 device stanzas on this host)")
+    out.append("")
+    out.append("$ dmesg -T  (lines matching nvrm|nvidia|20c2|20b5, tail 200)")
+    pat = re.compile(r"nvrm|nvidia|20c2|20b5", re.I)
+    raw = (sh(["dmesg", "-T"]) or "").splitlines()
+    hits = [l for l in raw if pat.search(l)][-200:]
+    out.extend(hits or ["(no matching lines — dmesg unavailable or clean)"])
+    return ("\n".join(out) + "\n").encode()
+
+
+def support_bundle():
+    """Build the whole support tar.gz in memory and return (bytes, filename).
+    Everything is read-only; a failure anywhere raises and the caller sends
+    500 + JSON — the client never sees a partial archive."""
+    warnings, truncated = [], []
+    members = {}                       # path under support/ -> bytes
+
+    for name in ("console.log", "goldilocks.jsonl", "last-preview.json"):
+        p = _state_file(name)
+        if not os.path.exists(p):
+            warnings.append(f"{name} not present in state dir")
+            continue
+        try:
+            members[name] = _tail_bytes(p, BUNDLE_TAIL)
+        except OSError as e:
+            warnings.append(f"{name} unreadable: {e}")
+
+    # newest BUNDLE_DUMP_KEEP dump dirs, emitted oldest first
+    dump_dirs = _bundle_dump_dirs()
+    for old in dump_dirs[:-BUNDLE_DUMP_KEEP]:
+        truncated.append(os.path.relpath(old, dumps_dir()))
+    groups = []                        # (rel, {path: bytes}, dump_dict)
+    for dd in dump_dirs[-BUNDLE_DUMP_KEEP:]:
+        rel = os.path.relpath(dd, dumps_dir())
+        try:
+            raw = open(os.path.join(dd, "dump.json"), "rb").read()
+            d = json.loads(raw)
+        except (OSError, ValueError) as e:
+            warnings.append(f"dumps/{rel}/dump.json unreadable: {e}")
+            continue
+        group = {f"dumps/{rel}/dump.json": raw}
+        hw = os.path.join(dd, "hex_window_0x820000.txt")
+        if os.path.exists(hw):
+            group[f"dumps/{rel}/hex_window_0x820000.txt"] = _tail_bytes(
+                hw, BUNDLE_TAIL)
+        groups.append((rel, group, d))
+
+    # size cap: drop oldest dump groups until the total fits
+    size = sum(len(b) for b in members.values())
+    size += sum(sum(len(b) for b in g[1].values()) for g in groups)
+    while groups and size > BUNDLE_CAP:
+        rel, group, _ = groups.pop(0)
+        size -= sum(len(b) for b in group.values())
+        truncated.insert(0, rel)
+
+    bdfs = {CFG["bdf"]} if CFG["bdf"] else set()
+    for rel, group, d in groups:
+        members.update(group)
+        if d.get("bdf"):
+            bdfs.add(d["bdf"])
+
+    members["live_snapshot.json"] = json.dumps(live_snapshot(),
+                                               default=str).encode()
+    members["system.txt"] = system_txt()
+    members["interpretation.txt"] = interpretation_txt(
+        [(sorted(g[1])[0], g[2]) for g in groups])
+
+    manifest = {
+        "tool_git_sha": _repo_git_sha(),
+        "built_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
+        "host": {"hostname": socket.gethostname(),
+                 "kernel": os.uname().release,
+                 "python": sys.version.split()[0]},
+        "bdfs": sorted(bdfs),
+        "members": [{"path": p, "bytes": len(b)}
+                    for p, b in sorted(members.items())],
+        "truncated": truncated,
+        "warnings": warnings,
+        "note": "contains board serials and PCI info; no credentials",
+    }
+    members["manifest.json"] = json.dumps(manifest, indent=1).encode()
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name in sorted(members):
+            data = members[name]
+            ti = tarfile.TarInfo(f"support/{name}")
+            ti.size = len(data)
+            ti.mtime = int(time.time())
+            tf.addfile(ti, io.BytesIO(data))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return buf.getvalue(), f"ga100-fuse-support-{stamp}.tar.gz"
+
+
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
     server_version = "ga100vfi-console/1.0"
@@ -2090,17 +2306,8 @@ class Handler(BaseHTTPRequestHandler):
                     finally:
                         card_lock.release()
                     return self._send(200, json.dumps(snap), "application/json")
-                with state_lock:
-                    snap = dict(STATE)
-                if snap.get("paused"):
-                    self._send(200, json.dumps(snap), "application/json")
-                elif "error" in snap or snap.get("status") is None:
-                    err = {"error": snap.get("error", "no probe yet")}
-                    if snap.get("default_note"):
-                        err["default_note"] = snap["default_note"]
-                    self._send(200, json.dumps(err), "application/json")
-                else:
-                    self._send(200, json.dumps(snap), "application/json")
+                self._send(200, json.dumps(live_snapshot()),
+                           "application/json")
             elif path == "/api/full":
                 self._send(200, json.dumps(full_dump(qs.get("bdf")),
                                            default=str), "application/json")
@@ -2147,6 +2354,18 @@ class Handler(BaseHTTPRequestHandler):
                     {"tail": dmesg_tail(),
                      "ts": datetime.now().isoformat(timespec="seconds")},
                     default=str), "application/json")
+            elif path == "/api/support_bundle":
+                # built fully in memory first — a failure raises and the
+                # generic handler below sends 500 + JSON, never a partial file
+                data, fname = support_bundle()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/gzip")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
             else:
                 self._send(404, '{"error": "not found"}', "application/json")
         except BrokenPipeError:

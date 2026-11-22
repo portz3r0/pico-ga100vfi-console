@@ -421,7 +421,11 @@ HTML = r"""<!DOCTYPE html>
       <h1>GA100 Fuse Console</h1>
       <div class="sub mono" id="meta"></div>
     </div>
-    <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
+    <div style="display:flex; align-items:center; gap:10px">
+      <a class="topbadge" href="/api/support_bundle" style="text-decoration:none"
+         title="Download console logs + dumps + interpretation trace as one tar.gz — attach it when reporting an issue">Support bundle</a>
+      <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
+    </div>
   </header>
   <nav class="tabs" role="tablist" aria-label="console views">
     <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"

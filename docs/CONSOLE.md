@@ -309,6 +309,7 @@ bricked.
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link state |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
+| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + interpretation trace |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the selected GPU is currently in
@@ -333,6 +334,35 @@ refused regardless of the bind:
 
 Non-browser clients (curl, scripts) send no `Origin` and are allowed. Run
 on a trusted network or front it with your own auth proxy.
+
+## Submitting a support bundle
+
+The header **Support bundle** button (or `GET /api/support_bundle`)
+downloads one `tar.gz` built on the fly — everything a developer needs to
+reproduce an interpretation bug on *your* card without logging into your
+machine. It contains, under `support/`:
+
+- `manifest.json` — tool git SHA, build time (UTC), host
+  hostname/kernel/python, the BDFs involved, the member list with sizes,
+  and any truncation/warning notes.
+- `console.log` and `goldilocks.jsonl` (tail 2 MiB each) and
+  `last-preview.json` — the console's own working logs.
+- `dumps/<bdf>/<ts>/dump.json` + `hex_window_0x820000.txt` for the newest
+  5 dump dirs (oldest first). If the total would exceed 25 MiB the oldest
+  dumps are dropped and listed in `manifest.truncated`.
+- `live_snapshot.json` — the same snapshot `/api/live` serves right now
+  (a `{"paused": ...}` body while the driver is bound is normal).
+- `system.txt` — `lspci -vv` stanzas for the GA100 device IDs
+  (10de:20c2/20b5/2082) and the GPU-relevant `dmesg` tail.
+- `interpretation.txt` — the **interpretation trace**: for every bundled
+  dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
+  totals, per-GPC lines, ceilings, `crc_ok` and fingerprint are printed,
+  together with which defect-word source actually fed the ceilings (FF
+  words from the hex window vs legacy shadow keys). A developer can
+  replay the exact numbers offline from the shipped `dump.json` alone.
+
+The bundle contains board serials and PCI info but **no credentials**.
+Attach it when reporting an issue — send it to the developers.
 
 ## Standalone tools (reference)
 

@@ -47,6 +47,9 @@ sudo python3 -m ga100vfi console --port 8790
 - Campaigns use a fixed `v_dip` or the Thompson-sampling adaptive planner,
   and can burn the checked payload in-process on the first Goldilocks
 - Campaigns refuse to start while a driver is bound to the card
+- One-click **Support bundle** download: console logs + newest dumps + a
+  deterministic interpretation trace as one `tar.gz`, ready to attach to a
+  bug report
 - Full user guide — requirements, step-by-step workflows
   (explore → prep drivers → glitch → burn → verify), indicator reference,
   HTTP API, systemd unit, troubleshooting:
