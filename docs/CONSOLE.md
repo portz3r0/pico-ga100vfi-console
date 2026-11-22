@@ -356,8 +356,10 @@ machine. It contains, under `support/`:
   (`[10de:20c2]`/`[10de:20b5]`/`[10de:2082]`) and the GPU-relevant
   `dmesg` tail.
 - `nvidia_smi.txt` — `nvidia-smi` snapshot (index, name, serial, VBIOS,
-  driver, compute cap, SM count, clocks, power limit, PCIe link) for the
-  console's BDF; states `driver unbound` when the nvidia module is absent
+  driver, compute cap, clocks, power limit, PCIe link) for the
+  console's BDF; SM count is not an nvidia-smi query field — read it from
+  `live_snapshot.json` / `interpretation.txt` instead. States `driver unbound`
+  when the nvidia module is absent
   (calling nvidia-smi then would auto-load the driver).
 - `interpretation.txt` — the **interpretation trace**: for every bundled
   dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
