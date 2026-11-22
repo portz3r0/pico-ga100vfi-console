@@ -22,7 +22,8 @@ Endpoints:
   GET  /api/gpus/all     every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF
   GET  /api/gpu            nvidia-smi + lspci link state (?bdf= any GPU on the host)
   GET  /api/support_bundle tar.gz: console logs + newest dumps + live snapshot
-                           + lspci/dmesg + interpretation trace (pure reads;
+                           + lspci/dmesg + nvidia-smi snapshot +
+                           interpretation trace (pure reads;
                            built fully in memory, never a partial download)
 
 Safety model:
@@ -2125,12 +2126,13 @@ def interpretation_txt(dumps):
     return ("\n".join(L) + "\n").encode()
 
 
-def system_txt():
-    """lspci -vv stanzas for GA100 device IDs + GPU-relevant dmesg tail.
-    sh() tolerates missing binaries or permissions (returns '<<...>>' text)."""
-    out = ["$ lspci -vv  (stanzas matching " + " ".join(GA100_DEVS) + ")"]
+def lspci_ga100_stanzas(text):
+    """GA100 stanzas from `lspci -nn -vv` output: split on first-column
+    lines, keep those whose first line carries a GA100 hex ID. Plain
+    `lspci -vv` prints no hex IDs (AI2 bundle, 2026-11-22) — -nn puts
+    '[10de:20b5]' on the stanza's first line, which is what we match."""
     stanzas, cur = [], []
-    for ln in (sh(["lspci", "-vv"]) or "").splitlines():
+    for ln in text.splitlines():
         if ln and not ln[0].isspace():
             if cur:
                 stanzas.append(cur)
@@ -2139,12 +2141,19 @@ def system_txt():
             cur.append(ln)
     if cur:
         stanzas.append(cur)
-    stanzas_found = 0
-    for st in stanzas:
-        if any(dev in st[0] for dev in GA100_DEVS):
-            out.extend(st)
-            stanzas_found += 1
-    if not stanzas_found:
+    return [st for st in stanzas
+            if any(f"[{dev}]" in st[0] for dev in GA100_DEVS)]
+
+
+def system_txt():
+    """lspci -nn -vv stanzas for GA100 device IDs + GPU-relevant dmesg tail.
+    sh() tolerates missing binaries or permissions (returns '<<...>>' text)."""
+    out = ["$ lspci -nn -vv  (stanzas matching "
+           + " ".join(f"[{d}]" for d in GA100_DEVS) + ")"]
+    found = lspci_ga100_stanzas(sh(["lspci", "-nn", "-vv"]) or "")
+    for st in found:
+        out.extend(st)
+    if not found:
         out.append("(no GA100 device stanzas on this host)")
     out.append("")
     out.append("$ dmesg -T  (lines matching nvrm|nvidia|20c2|20b5, tail 200)")
@@ -2152,6 +2161,35 @@ def system_txt():
     raw = (sh(["dmesg", "-T"]) or "").splitlines()
     hits = [l for l in raw if pat.search(l)][-200:]
     out.extend(hits or ["(no matching lines — dmesg unavailable or clean)"])
+    return ("\n".join(out) + "\n").encode()
+
+
+SMI_FIELDS = ("index,name,serial,vbios_version,driver_version,compute_cap,"
+              "multiprocessor_count,clocks.sm,clocks.mem,power.limit,"
+              "pcie.link.gen.current,pcie.link.width.current")
+
+
+def nvidia_smi_txt(bdfs):
+    """nvidia-smi snapshot for the bundle's BDFs. Never call nvidia-smi
+    with the module absent: NVML auto-loads nvidia via udev, undoing a
+    deliberate unload (see gpu_info)."""
+    if not os.path.exists("/sys/module/nvidia"):
+        return "driver unbound \u2014 nvidia-smi not applicable\n".encode()
+    out = ["$ nvidia-smi --id=<bdf> --query-gpu=" + SMI_FIELDS
+           + " --format=csv"]
+    for bdf in sorted(bdfs):
+        # NVML wants the 8-hex-digit domain form for --id (see gpu_info)
+        nvml_id = ("00000000:" + bdf.split(":", 1)[1]
+                   if bdf.count(":") == 2 else bdf)
+        res = sh(["nvidia-smi", "--id=" + nvml_id,
+                  "--query-gpu=" + SMI_FIELDS, "--format=csv"], timeout=15)
+        first = res.splitlines()[0] if res else ""
+        if res.startswith("<<") or "," not in first \
+                or first.lower().startswith(("no devices", "nvidia-smi")):
+            out.append(f"{bdf}: nvidia-smi unavailable: {res or 'no output'}")
+        else:
+            out.append(f"# {bdf}")
+            out.append(res)
     return ("\n".join(out) + "\n").encode()
 
 
@@ -2212,6 +2250,8 @@ def support_bundle():
     members["live_snapshot.json"] = json.dumps(live_snapshot(),
                                                default=str).encode()
     members["system.txt"] = system_txt()
+    members["nvidia_smi.txt"] = nvidia_smi_txt(
+        {CFG["bdf"]} if CFG["bdf"] else set())
     members["interpretation.txt"] = interpretation_txt(
         [(sorted(g[1])[0], g[2]) for g in groups])
 
@@ -2246,6 +2286,13 @@ def support_bundle():
 
 
 # ---------------------------------------------------------------- http
+# The GUI's 1 s poll trio floods the log tail; count them and emit one
+# summary line per POLL_SUMMARY_S so the silence is provable.
+POLL_PATHS = {"/api/live", "/api/glitch/status", "/api/gpus"}
+POLL_SUMMARY_S = 300
+_poll = {"n": 0, "since": time.monotonic()}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ga100vfi-console/1.0"
 
@@ -2433,6 +2480,20 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def log_message(self, format, *args):   # noqa: A002 — stdlib signature
+        # The poll trio is judged from self.command/self.path: the format
+        # string quotes the request line, so parsing it is brittle.
+        if self.command == "GET" and self.path.split("?", 1)[0] in POLL_PATHS:
+            _poll["n"] += 1
+            now = time.monotonic()
+            if now - _poll["since"] >= POLL_SUMMARY_S:
+                sys.stdout.write("%s polling: %d requests (/api/live, "
+                                 "/api/glitch/status, /api/gpus) in %ds\n"
+                                 % (datetime.now().strftime("%H:%M:%S"),
+                                    _poll["n"], POLL_SUMMARY_S))
+                sys.stdout.flush()
+                _poll["n"] = 0
+                _poll["since"] = now
+            return
         sys.stdout.write("%s %s\n" % (datetime.now().strftime("%H:%M:%S"),
                                       format % args))
         sys.stdout.flush()

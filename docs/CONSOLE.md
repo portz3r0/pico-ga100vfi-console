@@ -309,7 +309,7 @@ bricked.
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link state |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
-| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + interpretation trace |
+| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the selected GPU is currently in
@@ -352,8 +352,13 @@ machine. It contains, under `support/`:
   dumps are dropped and listed in `manifest.truncated`.
 - `live_snapshot.json` — the same snapshot `/api/live` serves right now
   (a `{"paused": ...}` body while the driver is bound is normal).
-- `system.txt` — `lspci -vv` stanzas for the GA100 device IDs
-  (10de:20c2/20b5/2082) and the GPU-relevant `dmesg` tail.
+- `system.txt` — `lspci -nn -vv` stanzas for the GA100 device IDs
+  (`[10de:20c2]`/`[10de:20b5]`/`[10de:2082]`) and the GPU-relevant
+  `dmesg` tail.
+- `nvidia_smi.txt` — `nvidia-smi` snapshot (index, name, serial, VBIOS,
+  driver, compute cap, SM count, clocks, power limit, PCIe link) for the
+  console's BDF; states `driver unbound` when the nvidia module is absent
+  (calling nvidia-smi then would auto-load the driver).
 - `interpretation.txt` — the **interpretation trace**: for every bundled
   dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
   totals, per-GPC lines, ceilings, `crc_ok` and fingerprint are printed,
