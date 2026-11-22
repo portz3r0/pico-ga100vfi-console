@@ -39,6 +39,10 @@ class Report:
     nvvdd: float | None
     writes_failed: int
     raw: str
+    # Firmware echo of the glitch parameters actually applied (pw/gap may be
+    # auto-sized in firmware, so this is ground truth, not the request):
+    # {"vd","td","vr","tr","tv","fast","hold","pw","gap","delay","revert"}
+    echo: dict | None = None
 
 
 class Card:
@@ -105,9 +109,18 @@ class Card:
             r"(?: nvvdd=(-?[\d.]+))? writes_failed=(\d+)", r)
         if not m:
             raise IOError(r)
+        echo = None
+        me = re.search(
+            r"glitch vd=(-?\d+) td=(-?\d+) vr=(-?\d+) tr=(-?\d+) tv=(-?\d+) "
+            r"fast=(-?\d+) hold=(-?\d+) pw=(-?\d+) gap=(-?\d+) "
+            r"delay=(-?\d+) revert=(-?\d+)", r)
+        if me:
+            echo = dict(zip(("vd", "td", "vr", "tr", "tv", "fast", "hold",
+                             "pw", "gap", "delay", "revert"),
+                            (int(x) for x in me.groups())))
         return Report(bool(int(m.group(1))), int(m.group(2), 16),
                       float(m.group(3)) if m.group(3) else None,
-                      int(m.group(4)), r)
+                      int(m.group(4)), r, echo)
 
     def revert(self) -> str:
         return self.cmd("w", wait=0.8, total=2.0, until="revert")

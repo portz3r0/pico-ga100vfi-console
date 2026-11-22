@@ -161,6 +161,10 @@ rebuild and reflash:
 
 ## Build
 
+Prebuilt `.uf2` binaries (RP2350B `pico2_w` and RP2350A `pico2`, normal and debug)
+are attached to [GitHub Releases](https://github.com/dalzyu/pico-ga100vfi/releases).
+To build from source:
+
 ```sh
 export PICO_SDK_PATH=/path/to-pico-sdk
 
@@ -213,11 +217,11 @@ can inspect BAR0).
 # Install once (or prefix commands with PYTHONPATH=host)
 pip install -e host/
 
-# Recommended: pick v_dip automatically per shot (see docs/ADAPTIVE.md).
+# Recommended: pick (v_dip, delay, pw) automatically per shot (see docs/ADAPTIVE.md).
 sudo python3 -m ga100vfi campaign --bdf 0000:1a:00.0 --adaptive
 
-# If you already know your card's v_dip (e.g. from a previous adaptive run):
-sudo python3 -m ga100vfi campaign --bdf 0000:1a:00.0 --v-dip 358
+# If you already know your card's working profile (e.g. from a previous adaptive run):
+sudo python3 -m ga100vfi campaign --bdf 0000:1a:00.0 --v-dip 358 --delay 117 --pw 198
 
 # Single-shot & diagnostic commands
 sudo python3 -m ga100vfi baseline --bdf 0000:1a:00.0   # shadow fuse snapshot
@@ -228,17 +232,17 @@ sudo python3 -m ga100vfi revert                         # hand VRM back to PWM-V
 
 `campaign` fires at most `--budget` attempts (default 500). It exits `0` in the
 Goldilocks state with a JSON verdict on stdout and the VRM already handed back to
-stock PWM-VID control, or `1` when the budget runs out. `--adaptive` picks `v_dip`
-per shot from the outcomes so far; how, and its results, are in
-[`docs/ADAPTIVE.md`](docs/ADAPTIVE.md).
+stock PWM-VID control, or `1` when the budget runs out. `--adaptive` picks
+`(v_dip, delay, pw)` per shot from the CRC-classified outcomes so far; how, and its
+results, are in [`docs/ADAPTIVE.md`](docs/ADAPTIVE.md).
 
 Each Goldilocks run, adaptive or not, appends one JSON line to `--log` (default
 `goldilocks.jsonl` in the working directory): local time with UTC offset, the board
 serial from the card's InfoROM (`null` if the card has none), the BDF, the attempt
 count, and the winning glitch profile (every `g` parameter, as in
 `host/ga100vfi/glitch.py` `Attempt`). Replay a profile with `attempt`, or reuse its
-`v_dip_mv` with `campaign --v-dip`. The file holds your card's serial; keep it out of
-anything you publish.
+`v_dip_mv` / `delay` / `pw` with `campaign`. The file holds your card's serial; keep
+it out of anything you publish.
 
 ## The glitch
 
@@ -262,7 +266,7 @@ u                                        # unlock + config-id 0x1229 (stops devi
 g 354 -60 750 -20 0 1 0 3 198 150 117 0   # shallow triple pulse (revert=0 for fast campaign)
 ```
 
-**Note:** This glitch has only been tested on a single card. Silicon, VRM, and
+**Note:** This glitch has only been tested on two CMP 170HX cards so far. Silicon, VRM, and
 board-to-board variation means other cards may need fine-tuning (`--v-dip`,
 `--t-dip`, `--delay`, `--pw`, `--gap`; use `attempt --trace` to inspect the rail).
 Full command set: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -300,15 +304,16 @@ host/
     bar0.py        BAR0 mapping, post-reset sysfs restore, and register access
     classify.py    the five Goldilocks per-attempt checks
     glitch.py      serial client and attempt issuance
-    adaptive.py    `campaign --adaptive` v_dip planner (Thompson sampling)
+    adaptive.py    `campaign --adaptive` 3D (v_dip, delay, pw) CRC-guided planner
     sim.py         simulated cards for tuning the planner (`python -m ga100vfi.sim`)
-    cli.py         `ga100vfi` CLI (`campaign`, `attempt`, `classify`, `baseline`, `revert`)
+    telemetry.py   per-run JSONL telemetry writer and opt-in anonymized upload
+    cli.py         `ga100vfi` CLI (`campaign`, `attempt`, `classify`, `baseline`, `revert`, `share`)
     fusedump.py    full read-only fuse dump (rows 0–487 via CMD_READ)
     console/       web console: `python -m ga100vfi console`
       service.py   HTTP service + glitch/burn/driver/gpu endpoints
       gui.py       the tabbed dark GUI (static + live HTML generator)
 docs/
-  ADAPTIVE.md      `campaign --adaptive`: how it picks v_dip, flags, hardware and sim results
+  ADAPTIVE.md      `campaign --adaptive`: 3D CRC-guided search, flags, hardware and sim results
   BUILD.md         prerequisites, per-family build, flashing, verification
   PROTOCOL.md      serial command set and firmware safety invariants
   CONSOLE.md       the Fuse Console: tabs, API, burn safety model, systemd unit

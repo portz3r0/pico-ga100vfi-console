@@ -28,7 +28,7 @@ The firmware drives a live GPU. These are hard rules:
 
 | Without asking | Only with the owner's explicit OK |
 |---|---|
-| `v`, `z`, `y`, `@s`, `@r` (read-only) | `g`, `r`, `j`/`J`, `u`, `w`, `k`/`K`, `@w`, `@F`, `@L`/`@U`, `@q`, `b` (reflash), any `ga100vfi` subcommand except `--help` |
+| `v`, `z`, `y`, `@s`, `@r` (read-only) | `g`, `r`, `j`/`J`, `u`, `w`, `k`/`K`, `@w`, `@F`, `@L`/`@U`, `@q`, `b` (reflash), `ga100vfi share` (uploads telemetry), any `ga100vfi` subcommand except `--help` |
 
 Never run a glitch campaign to test a code change.
 

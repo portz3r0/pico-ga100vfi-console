@@ -15,3 +15,6 @@ dist/
 # campaign success log (holds the card's serial)
 goldilocks.jsonl
 *.html
+
+# per-run campaign telemetry (holds the card serial, as goldilocks.jsonl)
+telemetry/
