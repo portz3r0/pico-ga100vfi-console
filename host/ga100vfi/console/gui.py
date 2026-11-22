@@ -44,6 +44,34 @@ def load_dump(dump_path):
             if m and int(m.group(2), 16):
                 hexnon.append([int(m.group(1), 16), int(m.group(2), 16)])
     d["hexnonzero"] = hexnon
+    # Backfill per-GPC TPC shadow keys from the hex window for dumps made
+    # before the TPC keys existed. DEFECTIVE = FF-region words
+    # (fd.TPC_DEFECT_FF, correct even for floorswept GPCs);
+    # FFDISABLE = 0x820760 (SKU mask); DISABLE = 0x820C38 (runtime mask).
+    # The window stores only non-zero words, so a covered-but-absent offset
+    # means zero — treat the arrays as fully present once the window
+    # reaches the last GPC word. Old dumps whose TPC_DEFECTIVE_GPC keys
+    # were captured from 0x820760 are REPAIRED here from the FF words.
+    sh = d.get("shadow")
+    if isinstance(sh, dict) and hexnon:
+        by_off = {off: val for off, val in hexnon}
+        covered = max(o for o, _ in hexnon) >= 0x820C54
+        try:
+            from .. import fusedump as _fd
+            ff = _fd.TPC_DEFECT_FF
+            for g in range(8):
+                sh[f"TPC_DEFECTIVE_GPC{g}"] = by_off.get(ff[g], 0 if covered else None)
+                sh.setdefault(f"TPC_FFDISABLE_GPC{g}",
+                              by_off.get(0x820760 + 4 * g, 0 if covered else None))
+                sh.setdefault(f"TPC_DISABLE_GPC{g}",
+                              by_off.get(0x820C38 + 4 * g, 0 if covered else None))
+        except Exception:
+            pass
+        if "tpc" not in d:
+            try:
+                d["tpc"] = _fd.tpc_summary(sh, hexnon)
+            except Exception:
+                pass
     return d
 
 
@@ -103,6 +131,8 @@ HTML = r"""<!DOCTYPE html>
              background: linear-gradient(90deg, rgba(248,81,73,.09), rgba(248,81,73,0) 55%); }
   .verdict.good { border-left-color: var(--ok);
              background: linear-gradient(90deg, rgba(63,185,80,.09), rgba(63,185,80,0) 55%); }
+  .verdict.warnv { border-left-color: var(--warn);
+             background: linear-gradient(90deg, rgba(210,153,34,.09), rgba(210,153,34,0) 55%); }
 
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border-soft); }
@@ -134,6 +164,11 @@ HTML = r"""<!DOCTYPE html>
   input[type=text] { background: var(--bg-deep); border: 1px solid var(--border);
                      color: var(--foreground); border-radius: 7px; padding: 5px 10px;
                      font-size: 12px; width: 200px; transition: border-color .15s, box-shadow .15s; }
+  /* number inputs: hide the UA spinner — in Firefox/WebKit it renders as a
+     solid white square against the dark theme (looked like a broken glyph) */
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   input[type=text]:focus { border-color: var(--accent); outline: none;
                            box-shadow: 0 0 0 3px rgba(76,194,255,.12); }
   select { background: var(--card-hi); border: 1px solid var(--border); color: var(--foreground);
@@ -156,11 +191,80 @@ HTML = r"""<!DOCTYPE html>
           flex-direction: column; background: var(--bg-deep); }
   .unit b { font-size: 12.5px; }
   .unit span { opacity: .85; font-size: 9.5px; }
-  .on    { background: rgba(63,185,80,.13); color: var(--ok); border-color: rgba(63,185,80,.4); }
+  .u-on  { background: rgba(63,185,80,.13); color: var(--ok); border-color: rgba(63,185,80,.4); }
   .off   { background: rgba(210,153,34,.12); color: var(--warn); border-color: rgba(210,153,34,.4); }
   .dead  { background: rgba(248,81,73,.07); color: #b0706b; border-color: rgba(248,81,73,.22); }
   .deadon{ background: repeating-linear-gradient(45deg, rgba(248,81,73,.3) 0 7px, rgba(248,81,73,.08) 7px 14px);
            color: var(--bad); border-color: var(--bad); font-weight: 700; }
+
+  /* TPC map — per-GPC rows of 8 TPC cells (2 SM per TPC) */
+  .tpcrow { display: flex; align-items: center; gap: 10px; padding: 4px 0;
+            border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+  .tpcrow:last-child { border-bottom: none; }
+  .tpcglab { width: 92px; flex: none; font-weight: 600; font-size: 12px; }
+  .tpcglab .gstate { display: block; font-weight: 400; font-size: 10px;
+                     color: var(--muted-foreground); }
+  .tpccells { display: flex; gap: 4px; flex: none; }
+  .tpccell { width: 46px; height: 34px; border-radius: 6px; border: 1px solid var(--border);
+             display: inline-flex; flex-direction: column; align-items: center;
+             justify-content: center; font-size: 9px; background: var(--bg-deep);
+             font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .tpccell b { font-size: 10.5px; }
+  .tpccell.on   { background: rgba(63,185,80,.13); color: var(--ok);
+                  border-color: rgba(63,185,80,.4); }
+  .tpccell.recov { background: rgba(210,153,34,.12); color: var(--warn);
+                   border-color: rgba(210,153,34,.45); }
+  .tpccell.dead { background: rgba(248,81,73,.07); color: #b0706b;
+                  border-color: rgba(248,81,73,.25); }
+  .tpccell.goff { opacity: .45; }
+  .unit, .tpccell, .tpcglab { cursor: pointer; }
+  .unit:hover, .tpccell:hover, .tpcglab:hover { outline: 1px solid var(--accent); }
+
+  /* unit audit modal */
+  #auditbg { display: none; position: fixed; inset: 0; z-index: 50;
+             background: rgba(4,8,14,.72); overflow: auto; padding: 36px 16px; }
+  #auditbg.open { display: block; }
+  #audit { max-width: 920px; margin: 0 auto; background: var(--card);
+           border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  #audit h3 { margin: 0 0 2px; font-size: 15px; }
+  #audit .verdictline { font-size: 12.5px; margin: 6px 0 12px; }
+  #audit table { margin-top: 4px; }
+  #audit td { vertical-align: top; }
+  .sev0 { border-left: 3px solid var(--bad); }
+  .sev1 { border-left: 3px solid var(--warn); }
+  .sev2 { border-left: 3px solid #58a6ff; }
+  .sev3 { border-left: 3px solid var(--border); }
+  .auditclose { float: right; }
+  /* suggested burns + burn queue */
+  .planrow, .qrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    padding: 6px 8px; border: 1px solid var(--border-soft);
+                    border-radius: 8px; margin: 4px 0; font-size: 12px; }
+  .planword { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 10px;
+              flex-wrap: wrap; width: 100%; }
+  .qrow.qexists { background: rgba(63,185,80,.07); border-color: rgba(63,185,80,.35); }
+  .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
+            border-color: rgba(63,185,80,.4); }
+  /* record timeline */
+  .tl { margin: 6px 0 2px; padding-left: 4px; }
+  .tlstep { position: relative; padding: 5px 0 5px 24px; }
+  .tlstep::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0;
+                    width: 2px; background: var(--border-soft); }
+  .tlstep:first-child::before { top: 13px; }
+  .tlstep:last-child::before { bottom: auto; height: 13px; }
+  .tlstep .tlnode { position: absolute; left: 2px; top: 4px; font-size: 12px;
+                    color: var(--fg-subtle); }
+  .s-dis .tlnode, .s-dis2 .tlnode { color: var(--bad); }
+  .s-en .tlnode { color: var(--ok); }
+  .s-iff .tlnode { color: var(--warn); }
+  .tlst { font-weight: 600; }
+  .tlst.d { color: var(--bad); } .tlst.e { color: var(--ok); }
+  .tlst.n { color: var(--fg-subtle); font-weight: 400; }
+  .tlive { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; }
+  .tlive::before { display: none; }
+  .tpcstat { font-size: 11px; color: var(--muted-foreground); margin-left: auto; }
+  .tpcstat b { color: var(--foreground); }
+  .tpcstat .ok { color: var(--ok); } .tpcstat .warn { color: var(--warn); }
+  .tpcstat .bad { color: var(--bad); }
 
   .bits { display: flex; flex-wrap: wrap; gap: 3px; margin: 8px 0; }
   .bitcell { width: 25px; height: 21px; display: inline-flex; align-items: center;
@@ -169,6 +273,8 @@ HTML = r"""<!DOCTYPE html>
              font-family: ui-monospace, Menlo, Consolas, monospace; }
   .bitset { background: rgba(76,194,255,.22); color: var(--foreground);
             border-color: rgba(76,194,255,.45); }
+  .bitcell.dbit { background: rgba(210,153,34,.30); color: var(--foreground);
+            border-color: rgba(210,153,34,.6); }
 
   details { border: 1px solid var(--border-soft); border-radius: 10px; padding: 10px 14px;
             margin: 10px 0; background: var(--card); }
@@ -245,14 +351,24 @@ HTML = r"""<!DOCTYPE html>
   .tabpane { display: none; }
   .tabpane.on { display: block; }
 
+  /* B14: one visible keyboard-focus ring on the dark theme (UA default is
+     rgb(16,16,16) on #0d1117 — invisible). B16: active row of the roving
+     row table while the table container holds keyboard focus. */
+  .btn:focus-visible, .tab:focus-visible, .tpccell:focus-visible,
+  .unit:focus-visible, #rowtable:focus-visible,
+  #rowtable:focus-visible tr.rowact {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+
   h3 { font-size: 12.5px; font-weight: 650; margin: 0 0 10px; color: var(--foreground);
        display: flex; align-items: center; gap: 8px; }
   h3::before { content: ""; width: 3px; height: 11px; border-radius: 2px;
                background: var(--muted-foreground); }
   .frow { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin: 8px 0; }
   .field { display: flex; flex-direction: column; gap: 4px; }
-  .field label { font-size: 10.5px; color: var(--fg-subtle); text-transform: uppercase;
+  .field label { font-size: 10.5px; color: var(--fg-subtle);
                  letter-spacing: .07em; }
+  /* NOTE: no text-transform here — uppercase mangles µ (U+00B5) into Greek
+     capital Mu (Μ), so 'pw µs' rendered as 'PW ΜS' (looked like 'PW MS'). */
   input[type=number] { background: var(--bg-deep); border: 1px solid var(--border);
                        color: var(--foreground); border-radius: 7px; padding: 5px 8px;
                        font-size: 12px; width: 92px;
@@ -307,14 +423,18 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
   </header>
-  <nav class="tabs">
-    <button class="tab on" data-tab="explorer">Fuse Explorer</button>
-    <button class="tab" data-tab="glitch">Glitch &amp; Burn</button>
-    <button class="tab" data-tab="drivers">Drivers</button>
-    <button class="tab" data-tab="gpu">GPU Info</button>
+  <nav class="tabs" role="tablist" aria-label="console views">
+    <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"
+            aria-selected="true" tabindex="0" data-tab="explorer">Fuse Explorer</button>
+    <button class="tab" role="tab" id="tabbtn-glitch" aria-controls="tab-glitch"
+            aria-selected="false" tabindex="-1" data-tab="glitch">Glitch &amp; Burn</button>
+    <button class="tab" role="tab" id="tabbtn-drivers" aria-controls="tab-drivers"
+            aria-selected="false" tabindex="-1" data-tab="drivers">Drivers</button>
+    <button class="tab" role="tab" id="tabbtn-gpu" aria-controls="tab-gpu"
+            aria-selected="false" tabindex="-1" data-tab="gpu">GPU Info</button>
   </nav>
 __LIVEBAR__
-  <section id="tab-explorer" class="tabpane on">
+  <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <h2>Status</h2>
   <div class="grid" id="status"></div>
 
@@ -331,6 +451,14 @@ __LIVEBAR__
   </div>
   <div class="card" id="topo"></div>
 
+  <h2>TPC map — SM availability per GPC <span class="note">(8 TPC per GPC · 2 SM per TPC)</span></h2>
+  <div class="legend">
+    <span><i class="sw on"></i>enabled now</span>
+    <span><i class="sw off"></i>disabled · healthy (unlock headroom)</span>
+    <span><i class="sw dead"></i>defective silicon (never usable)</span>
+  </div>
+  <div class="card" id="tpcmap"></div>
+
   <h2>Shadow registers</h2>
   <div class="scroll" id="shadow"></div>
 
@@ -340,7 +468,8 @@ __LIVEBAR__
     <input type="text" id="search" placeholder="search row # or hex value…">
     <span class="note" id="rowcount"></span>
   </div>
-  <div class="scroll" id="rowtable"></div>
+  <div class="scroll" id="rowtable" tabindex="0" role="region"
+       aria-label="fuse rows — arrow keys move the active row, Enter selects"></div>
   <div class="card" id="detail"></div>
 
   <h2>Interpretation log</h2>
@@ -353,21 +482,23 @@ __LIVEBAR__
 
   </section>
 
-  <section id="tab-glitch" class="tabpane">
+  <section id="tab-glitch" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-glitch">
     <div class="card"><div class="note">Glitch &amp; Burn controls are available when this
     page is served by the live console (<span class="mono">ga100vfi.console</span>).</div></div>
   </section>
-  <section id="tab-drivers" class="tabpane">
+  <section id="tab-drivers" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-drivers">
     <div class="card"><div class="note">Driver management is available in live mode.</div></div>
   </section>
-  <section id="tab-gpu" class="tabpane">
+  <section id="tab-gpu" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-gpu">
     <div class="card"><div class="note">GPU info is available in live mode.</div></div>
   </section>
+
+  <div id="auditbg" role="dialog" aria-modal="true" aria-label="unit audit"><div id="audit"></div></div>
 
   <footer>
     <span>data: ga100vfi.fusedump + ga100vfi.console</span>
     <span>FF decode: chain=bits[4:0] iff=bit5 block=bits[15:6] data=bits[31:16]</span>
-    <span>burns require arm token + pure 0→1 payload + live Goldilocks guards · FUSEWDATA untouched otherwise</span>
+    <span>burns require arm token + pure 0→1 payload + open burn window (EFP/WDATA_PLM auto-arm via SENSE_CTRL) · FUSEWDATA untouched otherwise</span>
   </footer>
 </div>
 
@@ -392,7 +523,8 @@ const REGIONS = [
   { min: 96, max: 221, name: "FPF",  desc: "FPF region — production-writable config rows (96–221)" },
   { min: 222, max: 487, name: "FF",  desc: "fuseless-fuse region — boot-replayed records (222–487), last record per block wins" },
 ];
-const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max);
+const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max) ||
+  { min: r, max: r, name: "TAIL", desc: "rows beyond 487 — outside the documented row map" };
 
 // ---------------------------------------------------------------- renderers
 function renderMeta() {
@@ -408,29 +540,39 @@ function renderStatus() {
   const add = (k, v, cls, note) => cards.push(
     `<div class="card stat" data-key="status.${k}"><div class="k">${k}</div>` +
     `<div class="v mono ${cls}">${v}</div><div class="k">${note || ""}</div></div>`);
+  // Unknown (null) registers must never render as a definitive state (B3).
+  const NODATA = "no data — probe failed/paused";
   add("CRC_STATUS", status.CRC_STATUS == null ? "—" : fmt(status.CRC_STATUS),
-    status.CRC_STATUS === 0x55 ? "ok" : (status.CRC_STATUS == null ? "" : "bad"),
-    status.CRC_STATUS === 0x55 ? "fuse block parses cleanly" : "hash regions invalid");
+    status.CRC_STATUS == null ? "" : (status.CRC_STATUS === 0x55 ? "ok" : "bad"),
+    status.CRC_STATUS == null ? NODATA
+      : status.CRC_STATUS === 0x55 ? "fuse block parses cleanly" : "hash regions invalid");
   add("DSOV", status.DSOV == null ? "—" : String(status.DSOV & 1),
-    (status.DSOV & 1) ? "" : "warn",
-    (status.DSOV & 1) ? "factory-locked (normal)" : "glitch/burn gate OPEN");
+    status.DSOV == null ? "" : (status.DSOV & 1) ? "" : "warn",
+    status.DSOV == null ? NODATA
+      : (status.DSOV & 1) ? "factory-locked (normal)" : "glitch/burn gate OPEN");
   add("SBFE", status.SBFE == null ? "—" : String(status.SBFE & 1), "",
-    (status.SBFE & 1) ? "writes confined to FPF 96–221" : "arbitrary FF writes allowed");
-  add("EFP", status.EFP == null ? "—" : String(status.EFP & 1), "", "");
+    status.SBFE == null ? NODATA
+      : (status.SBFE & 1) ? "writes confined to FPF 96–221" : "arbitrary FF writes allowed");
+  add("EFP", status.EFP == null ? "—" : String(status.EFP & 1), "",
+    status.EFP == null ? NODATA : "");
   add("EN_SW_OVERRIDE", status.EN_SW_OVERRIDE == null ? "—" : fmt(status.EN_SW_OVERRIDE),
-    "", "row-read override state");
+    "", status.EN_SW_OVERRIDE == null ? NODATA : "row-read override state");
   add("PRIV_MASK", status.PRIV_MASK == null ? "—" : fmt(status.PRIV_MASK),
-    status.PRIV_MASK === 0xFFFFFFFF ? "ok" : "warn", "PLM state");
-  add("nvidia-smi", esc((D.nvidia_smi || "—").split("\n")[0] || "n/a"),
-    /No devices|error|ERR|failed/i.test(D.nvidia_smi || "") ? "bad" : "ok", "device init");
+    status.PRIV_MASK == null ? "" : (status.PRIV_MASK === 0xFFFFFFFF ? "ok" : "warn"),
+    status.PRIV_MASK == null ? NODATA : "PLM state");
+  const smi = (D.nvidia_smi || "").trim();
+  add("nvidia-smi", smi ? esc(smi.split("\n")[0] || "n/a") : "not queried",
+    smi ? (/No devices|error|ERR|failed/i.test(smi) ? "bad" : "ok") : "", "device init");
   document.getElementById("status").innerHTML = cards.join("");
 }
 
 function renderVerdict() {
+  const el = document.getElementById("verdict");
   const gpc = D.shadow ? D.shadow.GPC_DISABLE : undefined;
   const fbp = D.shadow ? D.shadow.FBP_DISABLE : undefined;
   if (gpc == null || fbp == null) {
-    document.getElementById("verdict").innerHTML = "waiting for data…";
+    el.classList.toggle("good", false);
+    el.innerHTML = "waiting for data…";
     return;
   }
   const zeroed = gpc === 0 && fbp === 0;
@@ -442,12 +584,15 @@ function renderVerdict() {
        boots trying to use dead units (GFW stalls at progress 0x1) and needs a
        corrective burn or is parked.`
     : `<b class="ok">Floorsweep masks not zeroed — masks-cleared brick signature absent.</b>`;
-  document.getElementById("verdict").innerHTML = html;
+  el.classList.toggle("good", !zeroed);
+  el.innerHTML = html;
 }
 
 // topology ---------------------------------------------------------------
 let curState = "now";
-const STATES = { pre: "Pre-glitch reference", intended: "Intended", now: "NOW (live)" };
+const STATES = { pre: "Pre-glitch reference",
+                intended: "Intended (this card's defects)",
+                now: "NOW (live)" };
 function renderStateBtns() {
   const sb = document.getElementById("statebtns");
   sb.innerHTML = Object.entries(STATES).map(([k, l]) =>
@@ -456,30 +601,37 @@ function renderStateBtns() {
     curState = b.dataset.st;
     sb.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
     renderTopo();
+    renderTpc();
   });
 }
-function unit(cls, name, sub) {
-  return `<div class="unit ${cls}"><b>${name}</b><span>${sub}</span></div>`;
+function unit(cls, name, sub, audit) {
+  return `<div class="unit ${cls}" data-audit="${audit}" ` +
+    `title="click for full register audit">${name ? `<b>${name}</b>` : ""}<span>${sub}</span></div>`;
 }
 function renderTopo() {
   const sh = D.shadow || {};
   const gpcDef = sh.GPC_DEFECTIVE ?? 0, fbpDef = sh.FBP_DEFECTIVE ?? 0;
   let gpcDis, fbpDis;
-  if (curState === "pre")      { gpcDis = 0x86; fbpDis = 0x852; }   // stock 170HX reference
-  else if (curState === "intended") { gpcDis = 0x02; fbpDis = 0x840; }
-  else { gpcDis = sh.GPC_DISABLE ?? 0; fbpDis = sh.FBP_DISABLE ?? 0; }
+  if (curState === "pre") {
+    gpcDis = 0x86; fbpDis = 0x852;   // stock CMP 170HX SKU floorsweep (factory, same per SKU)
+  } else if (curState === "intended") {
+    // Per-card, derived from THIS card's dump: the unlock goal is to
+    // re-enable every unit that is not defective, so the intended
+    // disable mask equals the card's own defective mask.
+    gpcDis = gpcDef; fbpDis = fbpDef;
+  } else { gpcDis = sh.GPC_DISABLE ?? 0; fbpDis = sh.FBP_DISABLE ?? 0; }
   let gpcHtml = "", fbpHtml = "";
   for (let i = 0; i < 8; i++) {
     const dead = (gpcDef >> i) & 1, dis = (gpcDis >> i) & 1;
-    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
+    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "u-on");
     const sub = dead ? (dis ? "dead · off" : "DEAD · ON!") : (dis ? "floorswept" : "active");
-    gpcHtml += unit(cls, "GPC" + i, sub);
+    gpcHtml += unit(cls, "GPC" + i, sub, "gpc:" + i);
   }
   for (let i = 0; i < 12; i++) {
     const dead = (fbpDef >> i) & 1, dis = (fbpDis >> i) & 1;
-    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "on");
+    const cls = dead ? (dis ? "dead" : "deadon") : (dis ? "off" : "u-on");
     const sub = dead ? (dis ? "dead · off" : "DUMMY · ON!") : (dis ? "floorswept" : "active");
-    fbpHtml += unit(cls, "FBP" + i, sub);
+    fbpHtml += unit(cls, "FBP" + i, sub, "fbp:" + i);
   }
   const liveG = 8 - pop(gpcDis), liveF = 12 - pop(fbpDis);
   document.getElementById("topo").innerHTML =
@@ -494,6 +646,479 @@ function renderTopo() {
       ? `<div class="note" style="margin-top:8px">Boxes with <b>ON!</b> on dead/dummy units ` +
         `mean the card boots dead silicon (GFW hang at progress 0x1).</div>` : "");
 }
+
+// TPC map -----------------------------------------------------------------
+const TPC_FFDEF = [0x8205c8,0x820508,0x82050c,0x820514,0x820564,0x8205ac,0x820b84,0x820b80];
+function computeTpc() {
+  // Mirror of fusedump.tpc_summary(). DEFECTIVE = FF-region words
+  // (TPC_FFDEF, kate-land ga100-options offsets) — readable and correct
+  // even for floorswept GPCs; the hex window, when present, is ground
+  // truth and repairs old dumps whose shadow keys came from the runtime
+  // word. 0x820760 (SKU) and 0x820C38 (runtime) both read 0xFF on a
+  // power-gated GPC — power artifact, never a defect count.
+  const sh = D.shadow || {};
+  const hw = D.hexnonzero || [];
+  const word = off => { const e = hw.find(([o]) => o === off); return e ? e[1] >>> 0 : null; };
+  const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
+  const gpcs = [], totals = { sm_now: 0, sm_max: 0, sm_defective: 0,
+                              sm_recoverable: 0, tpc_defective: 0,
+                              tpc_recoverable: 0, have_data: false };
+  const pop = v => { let n = 0; while (v) { n += v & 1; v >>>= 1; } return n; };
+  for (let g = 0; g < 8; g++) {
+    // FF word: authoritative; window present means a covered offset that
+    // is absent reads ZERO (do not fall through to the poisoned shadow key)
+    let def = hw.length ? (word(TPC_FFDEF[g]) ?? 0)
+                        : (sh["TPC_DEFECTIVE_GPC" + g] ?? sh["TPC_DISABLE_" + g]);
+    let dis = sh["TPC_DISABLE_GPC" + g];
+    if (dis == null) dis = word(0x820c38 + 4 * g);
+    if (def == null && dis == null) { gpcs.push({ gpc: g, available: false }); continue; }
+    def = ((def ?? 0) >>> 0) & 0xFF;
+    dis = (((dis == null ? def : dis)) >>> 0) & 0xFF;
+    const gdead = (gpcDef >> g) & 1, gdis = (gpcDis >> g) & 1;
+    // Floorswept GPC: show fully masked (every healthy TPC in it is the
+    // unlock prize). Powered GPC: live mask = runtime ∪ defective.
+    const eff = gdis ? 0xFF : (def | dis);
+    const ndef = pop(def), ndis = pop(eff);
+    const recov = gdead ? 0 : ndis - ndef;
+    const tpc_now = gdis ? 0 : 8 - pop(def | dis);
+    const tpc_max = gdead ? 0 : 8 - ndef;
+    const row = { gpc: g, available: true, def, dis, eff,
+                  tpc_defective: ndef, tpc_recoverable: recov,
+                  tpc_now, tpc_max,
+                  sm_now: tpc_now * 2, sm_max: tpc_max * 2,
+                  gpc_defective: gdead, gpc_disabled: gdis };
+    gpcs.push(row);
+    totals.have_data = true;
+    totals.sm_now += row.sm_now;
+    totals.sm_max += tpc_max * 2;
+    totals.sm_defective += ndef * 2;
+    totals.sm_recoverable += recov * 2;
+    totals.tpc_defective += ndef;
+    totals.tpc_recoverable += recov;
+  }
+  return { gpcs, totals };
+}
+// CMP 170HX stock SKU factory TPC floorsweep (per-GPC disable words,
+// bit t = TPC t masked). From the reference card's pre-glitch array:
+// GPC1/2/7 fully masked, one TPC masked in each of the others.
+const STOCK_TPC_DIS = [0x01, 0xFF, 0xFF, 0x01, 0x01, 0x01, 0x01, 0xFF];
+const STOCK_GPC_DIS = 0x86;   // stock SKU GPC floorsweep: GPC 1, 2, 7
+function renderTpc() {
+  const el = document.getElementById("tpcmap");
+  const sh = D.shadow || {};
+  if (sh.TPC_DEFECTIVE_GPC0 == null && sh.TPC_DISABLE_GPC0 == null &&
+      sh.TPC_DISABLE_0 == null && !(D.tpc && D.tpc.totals.have_data)) {
+    el.innerHTML = `<span class="note">waiting for TPC register data…</span>`;
+    return;
+  }
+  const T = (D.tpc && D.tpc.totals && D.tpc.totals.have_data) ? D.tpc : computeTpc();
+  const gpcDef = sh.GPC_DEFECTIVE ?? 0;
+  const tot = { sm_now: 0, sm_max: 0, tpc_def: 0, sm_def: 0,
+                tpc_recov: 0, sm_recov: 0 };
+  let html = "";
+  for (const r of T.gpcs) {
+    if (!r || !r.available) {
+      html += `<div class="tpcrow"><div class="tpcglab">GPC${r ? r.gpc : "?"}` +
+        `<span class="gstate">no data</span></div></div>`;
+      continue;
+    }
+    const g = r.gpc;
+    const gdead = (gpcDef >> g) & 1;
+    const def = (r.def ?? 0) & 0xFF;   // silicon truth — same in every state
+    let dis, gdis;
+    if (curState === "pre") {
+      const ffD = (D.shadow || {})["TPC_FFDISABLE_GPC" + g];
+      dis = ffD != null ? ffD : STOCK_TPC_DIS[g]; gdis = (STOCK_GPC_DIS >> g) & 1;
+    } else if (curState === "intended") {
+      dis = def; gdis = gdead;        // goal: everything not dead runs
+    } else {
+      dis = (r.eff ?? ((r.def ?? 0) | (r.dis ?? 0))) & 0xFF;
+      gdis = r.gpc_disabled ? 1 : 0;
+    }
+    const eff = def | dis;
+    const ndef = pop(def), ndis = pop(eff);
+    const recov = Math.max(ndis - ndef, 0);
+    const tpcMax = gdead ? 0 : 8 - ndef;
+    const smNow = gdis ? 0 : (8 - ndis) * 2;
+    const recovSm = gdead ? 0 : recov * 2;
+    const gstate = gdead ? `<span class="gstate bad">GPC defective</span>`
+                 : gdis  ? `<span class="gstate warn">floorswept</span>`
+                         : `<span class="gstate ok">active</span>`;
+    let cells = "";
+    for (let t = 0; t < 8; t++) {
+      const d = (def >> t) & 1, z = (eff >> t) & 1;
+      const cls = d ? "dead" : (z ? "recov" : "on");
+      const zLbl = curState === "pre"
+        ? "factory-disabled, healthy — the unlock prize"
+        : "disabled, healthy — unlock headroom";
+      cells += `<div class="tpccell ${cls}${(gdead || gdis) && !d ? " goff" : ""}" ` +
+        `data-audit="tpc:${g}:${t}" ` +
+        `title="GPC${g} TPC${t}: ${d ? "defective" : z ? zLbl : "enabled"}` +
+        `${gdead ? " (GPC dead)" : gdis ? " (GPC floorswept)" : ""} — click for full audit">` +
+        `<b>T${t}</b><span>${d ? "defect" : "2 SM"}</span></div>`;
+    }
+    html += `<div class="tpcrow">` +
+      `<div class="tpcglab" data-audit="gpc:${g}" title="click for full GPC audit">GPC${g}${gstate}</div>` +
+      `<div class="tpccells">${cells}</div>` +
+      `<div class="tpcstat">` +
+        `SM now <b>${smNow}</b> · ` +
+        `after unlock <b class="${tpcMax ? "ok" : "bad"}">${tpcMax * 2}</b> · ` +
+        `defective <b class="bad">${ndef * 2} SM</b>` +
+        (recovSm ? ` · <span class="warn">+${recovSm} recoverable</span>` : "") +
+      `</div></div>`;
+    tot.sm_now += smNow; tot.sm_max += tpcMax * 2;
+    tot.tpc_def += ndef; tot.sm_def += ndef * 2;
+    tot.tpc_recov += gdead ? 0 : recov; tot.sm_recov += recovSm;
+  }
+  const stateTag = { pre: "PRE-GLITCH (stock 170HX SKU floorsweep)",
+                     intended: "INTENDED (this card's defects — everything not dead runs)",
+                     now: "NOW (live registers)" }[curState];
+  html += `<div class="statline">` +
+    `<span class="pill">state: <b>${stateTag}</b></span>` +
+    `<span class="pill">SM now: <b>${tot.sm_now}</b></span>` +
+    `<span class="pill okl">SM after unlock (fuse ceiling): <b>${tot.sm_max}</b></span>` +
+    `<span class="pill badl">defective: <b>${tot.tpc_def} TPC / ${tot.sm_def} SM</b></span>` +
+    `<span class="pill warnl">unlock headroom: <b>${tot.tpc_recov} TPC / ${tot.sm_recov} SM</b></span>` +
+    `</div>` +
+    `<div class="note" style="margin-top:8px">Defective bits are this card's own silicon and are ` +
+    `identical in all three states. ` +
+    (curState === "pre"
+      ? `Pre-glitch uses the stock CMP 170HX SKU floorsweep: GPC_DISABLE 0x86 (GPC 1/2/7) plus the ` +
+        `factory TPC mask 0x01/0xFF pattern (29 TPC masked → 70 SM). The yellow cells are what the ` +
+        `unlock recovers.`
+      : curState === "intended"
+        ? `Intended = disable mask equals the card's defective mask: every unit that is not dead ` +
+          `silicon runs. No yellow cells by definition.`
+        : `Now reads: TPC defective from the FF words 0x8205C8/508/50C/514/564/5AC ` +
+          `and 0x820B84/B80 (correct even for gated GPCs), live mask 0x820C38+gpc·4 ` +
+          `(defective-union; a floorswept GPC's runtime word reads 0xFF — power ` +
+          `artifact, shown fully masked). Yellow cells = still-disabled-but-healthy ` +
+          `headroom; floorswept GPCs count their whole healthy half.`) +
+    ` Post-unlock ceiling = (8 − defective TPC) × 2 SM per non-defective GPC. Cells in a ` +
+    `floorswept/dead GPC are dimmed: their health is shown, but they only run once the GPC ` +
+    `itself is enabled.</div>`;
+  el.innerHTML = html;
+}
+
+// unit audit ---------------------------------------------------------------
+// Click any GPC / FBP / TPC tile: every dump record that holds a bit against
+// that unit, sorted by impact. Rows are ONLY added when the register actually
+// has a bit set for this unit — zero/no-impact registers are not listed.
+// Effective FBPA/FBIO disable mirrors (0x820C18/0x820C14) are shown only
+// when the unit is defective, as corroboration that the mask covers it.
+const AOFF = {
+  GPC_DISABLE: 0x820350, FBP_DISABLE: 0x820364, FBPA_DISABLE: 0x820368,
+  GPC_DEFECTIVE: 0x8205C4, FBP_DEFECTIVE: 0x8205CC, FBPA_DEFECTIVE: 0x8205D0,
+  STATUS_OPT_GPC: 0x820C1C, STATUS_OPT_FBP: 0x820D38,
+  TPC_DEF: 0x820760, TPC_DIS: 0x820C38, CTRL_TPC: 0x820A40,
+  FBPA_DIS_EFF: 0x820C18, FBIO_DIS_EFF: 0x820C14,
+};
+const hx = o => "0x" + o.toString(16).toUpperCase().padStart(6, "0");
+function auditWord(off, key) {
+  const sh = D.shadow || {};
+  if (sh[key] != null) return { v: sh[key] >>> 0, src: "shadow." + key };
+  const hv = (D.hexnonzero || []).find(([o]) => o === off);
+  if (hv) return { v: hv[1] >>> 0, src: "hex window @ " + hx(off) };
+  return { v: null, src: "not captured in this dump" };
+}
+function tpcWord(g, which) {   // which: "def" | "dis"
+  const sh = D.shadow || {};
+  const hw = D.hexnonzero || [];
+  if (which === "def") {
+    // FF-region defect word is ground truth (valid for gated GPCs too)
+    const fv = hw.find(([o]) => o === TPC_FFDEF[g]);
+    if (fv) return { v: fv[1] >>> 0, src: "hex window @ " + hx(TPC_FFDEF[g]) + " — FF defective word" };
+    const k = "TPC_DEFECTIVE_GPC" + g;
+    if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
+  } else {
+    const k = "TPC_DISABLE_GPC" + g;
+    if (sh[k] != null) return { v: sh[k] >>> 0, src: "shadow." + k };
+    const dv = hw.find(([o]) => o === AOFF.TPC_DIS + 4 * g);
+    if (dv) return { v: dv[1] >>> 0, src: "hex window @ " + hx(AOFF.TPC_DIS + 4 * g) };
+  }
+  return { v: null, src: "not captured in this dump" };
+}
+function ffBlockRecords(blk) {
+  // All chain-1 records for a fuse block, row-ordered. OPT_* record data is
+  // NOT a raw disable mask: decoded mask = (data >> 3) & width.
+  const out = [];
+  for (const k of Object.keys(D.rows || {})) {
+    const r = +k, v = D.rows[k];
+    if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
+    const f = ffDecode(v);
+    if (f.ch === 1 && f.blk === blk) out.push({ r, iff: f.iff, data: f.data });
+  }
+  out.sort((a, b) => a.r - b.r);
+  return out;
+}
+function maskBits(m) { const b = []; for (let i = 0; i < 12; i++) if ((m >> i) & 1) b.push(i); return b; }
+function timelineHtml(kind, unit) {
+  const isGpc = kind === "gpc";
+  const blk = isGpc ? 8 : 19;
+  const width = isGpc ? 0xFF : 0xFFF;
+  const nm = (isGpc ? "GPC" : "FBP") + unit;
+  const recs = ffBlockRecords(blk);
+  if (!recs.length) return "";
+  let prev = null;
+  let html = `<div class="note" style="margin-top:12px"><b>Record timeline — ${nm}</b> · ` +
+    `chain 1 · block ${blk} · decoded mask = data &gt;&gt; 3 · last record wins</div><div class="tl">`;
+  for (const rec of recs) {
+    const mask = (rec.data >>> 3) & width;
+    const bit = (mask >>> unit) & 1;
+    let cls, st, sc;
+    if (rec.iff) { cls = "s-iff"; sc = "n"; st = "IFF — invalidation record (refused by newer fuse logic)"; }
+    else if (bit && prev !== 1) { cls = "s-dis"; sc = "d"; st = nm + " DISABLED here"; }
+    else if (bit) { cls = "s-dis2"; sc = "d"; st = nm + " still disabled (no change)"; }
+    else if (prev === 1) { cls = "s-en"; sc = "e"; st = nm + " RE-ENABLED here — this is the unlock record"; }
+    else { cls = "s-none"; sc = "n"; st = nm + " not touched by this record"; }
+    const last = rec === recs[recs.length - 1] && !rec.iff;
+    html += `<div class="tlstep ${cls}"><span class="tlnode">${rec.iff ? "⚡" : "●"}</span>` +
+      `<div class="tlbody">row <b>${rec.r}</b> · ${rec.iff ? "IFF" : "FF"} · ` +
+      `data <span class="mono">0x${rec.data.toString(16).toUpperCase().padStart(4, "0")}</span> → ` +
+      `mask <span class="mono">0x${mask.toString(16).toUpperCase()}</span> {${maskBits(mask).join(",")}}` +
+      ` <span class="tlst ${sc}">${st}</span>` +
+      (last ? ` <span class="tag">LAST — EFFECTIVE</span>` : "") + `</div></div>`;
+    if (!rec.iff) prev = bit;
+  }
+  // reconcile with the live gate register
+  const lw = auditWord(isGpc ? AOFF.GPC_DISABLE : AOFF.FBP_DISABLE,
+                      isGpc ? "GPC_DISABLE" : "FBP_DISABLE");
+  if (lw.v != null) {
+    const lb = (lw.v >>> unit) & 1;
+    const defW = auditWord(isGpc ? AOFF.GPC_DEFECTIVE : AOFF.FBP_DEFECTIVE,
+                          isGpc ? "GPC_DEFECTIVE" : "FBP_DEFECTIVE");
+    const unitDead = defW.v != null && ((defW.v >>> unit) & 1);
+    const lastRec = recs.filter(r => !r.iff).pop();
+    const fuseBit = lastRec ? (((lastRec.data >>> 3) & width) >>> unit) & 1 : null;
+    const agree = fuseBit == null || fuseBit === lb;
+    const gateNote = unitDead
+      ? `— but ${nm} is DEFECTIVE silicon: the hardware gate dominates, the register value is moot.`
+      : agree ? "— consistent with the last fuse record"
+              : "DIFFERS from the fuse-replayed mask: the live register was changed after boot (unlock/clear). " +
+                "The live register is what actually gates the unit right now.";
+    html += `<div class="tlstep tlive"><span class="tlnode">▼</span><div class="tlbody">` +
+      `live <span class="mono">${isGpc ? "GPC_DISABLE" : "FBP_DISABLE"}</span> = ` +
+      `<span class="mono">${fmt(lw.v)}</span> → ${nm} register-level ` +
+      `<b class="${lb ? "warn" : unitDead ? "bad" : "ok"}">${lb ? "DISABLED" : "ENABLED"}</b> ` +
+      `<span class="tlst ${unitDead ? "d" : agree ? "e" : "d"}">${gateNote}</span></div></div>`;
+  }
+  return html + `</div>`;
+}
+function arow(sev, reg, off, w, bit, impact, interp, bv) {
+  return { sev, reg, off, val: w.v, src: w.src,
+           bit: bit == null ? null : bit,
+           bitval: bv !== undefined ? bv
+             : (bit == null || w.v == null) ? null : (w.v >>> bit) & 1,
+           impact, interp };
+}
+function auditFor(kind, g, t) {
+  const rows = [];
+  let title, verdict;
+  if (kind === "gpc") {
+    title = "GPC" + g + " — full register audit";
+    const d = auditWord(AOFF.GPC_DEFECTIVE, "GPC_DEFECTIVE");
+    const z = auditWord(AOFF.GPC_DISABLE, "GPC_DISABLE");
+    const dead = d.v != null && ((d.v >>> g) & 1);
+    const dis  = z.v != null && ((z.v >>> g) & 1);
+    if (dead) rows.push(arow(0, "GPC_DEFECTIVE", AOFF.GPC_DEFECTIVE, d, g,
+      "HARDWARE GATE — unit cannot run, enforced in silicon. No burn, write or driver action can re-enable it.",
+      `bit ${g} SET → GPC${g} is dead silicon (fuse-derived). No burn can re-enable it.`));
+    if (dis) rows.push(arow(1, "GPC_DISABLE", AOFF.GPC_DISABLE, z, g,
+      dead ? "GATES (already dead) — clearing this mask changes nothing; the silicon behind it is dead."
+           : "BOOT GATE — holds the unit off at boot. This is THE unlock lever: clearing it (fuse append) re-enables the GPC.",
+      dead ? `bit ${g} SET → floorsweep mask, consistent with the defect.`
+           : `bit ${g} SET → floorswept at boot but silicon is healthy — re-enableable.`));
+    const st = auditWord(AOFF.STATUS_OPT_GPC, "STATUS_OPT_GPC");
+    if (st.v != null && ((st.v >>> g) & 1)) rows.push(arow(2, "STATUS_OPT_GPC",
+      AOFF.STATUS_OPT_GPC, st, g,
+      "OBSERVES ONLY — read-only boot latch. Proves what the fuse logic actually applied; gating itself comes from the mask registers, not this one.",
+      `bit ${g} SET → fuse replay confirms GPC${g} disabled at boot (the latch to watch after a burn).`));
+    const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
+    const defM = td.v ?? 0, effM = (tz.v ?? defM) | defM;
+    if (defM !== 0) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, TPC_FFDEF[g], td, null,
+      `HARDWARE GATE per TPC — each set bit permanently removes 2 SM (${pop(defM) * 2} SM lost) from this GPC. Irreversible.`,
+      `defective TPCs {${bitsOf(defM).join(",")}} → ${pop(defM) * 2} SM permanently lost in this GPC`));
+    const headroom = effM & ~defM;
+    if (headroom !== 0) rows.push(arow(1, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, null,
+      `BOOT GATE per TPC — each set bit holds 2 SM off (${pop(headroom) * 2} SM). Recoverable: this is the unlock headroom.`,
+      `disabled-but-healthy TPCs {${bitsOf(headroom).join(",")}} → ${pop(headroom) * 2} SM unlock headroom`));
+    const ct = auditWord(AOFF.CTRL_TPC + 4 * g, "CTRL_TPC_GPC" + g);
+    if (ct.v != null && ct.v !== 0) rows.push(arow(2, "CTRL_TPC_GPC" + g, AOFF.CTRL_TPC + 4 * g, ct, null,
+      "NO GATING on current state — control word loaded by fuse logic/driver at boot (0xFF = all 8 TPCs under control). " +
+      "The effective TPC gate is the disable array at 0x820C38, not this register. Write-tested: rejected at DSOV=1, " +
+      "cannot be changed now. Caution: on stock 170HX the driver writes 0xFF here as part of the floorsweep — but on a " +
+      "running card all healthy TPCs still execute with 0xFF here, confirming it is a control bitmap, not the effective mask.",
+      `non-zero control word ${fmt(ct.v)} captured (register is closed at DSOV=1 — informational)`));
+    for (const rec of ffBlockRecords(8)) {
+      const m = (rec.data >>> 3) & 0xFF;
+      if (!((m >>> g) & 1)) continue;   // decoded mask must act on this GPC
+      rows.push(arow(2, "FF record · OPT_GPC_DISABLE",
+        null, { v: rec.data, src: "fuse row " + rec.r }, g,
+        "DISABLES this unit at boot — the decoded mask (data>>3) holds bit " + g +
+        ". To change behavior you must append a newer record (burn); editing registers won't override fuse history.",
+        `${rec.iff ? "IFF (invalidation) " : "FF "}chain1·block8 data=0x${rec.data.toString(16).toUpperCase()} ` +
+        `→ mask 0x${m.toString(16).toUpperCase()} bit ${g} SET → this record floorswept GPC${g} (last record per block wins)`, 1));
+    }
+    verdict = dead ? `<b class="bad">DEAD</b> — GPC${g} is dead silicon; every bit above is consistent with that.`
+      : dis ? `<b class="warn">FLOORSWEPT</b> — GPC${g} is disabled by mask but silicon is healthy.`
+      : (defM !== 0 || headroom !== 0)
+        ? `<b class="ok">ACTIVE</b> — GPC${g} itself is enabled; ` +
+          `defects live at TPC granularity inside it (see DEAD rows above).`
+        : `<b class="ok">ACTIVE</b> — no register in this dump holds a bit against GPC${g}.`;
+  } else if (kind === "tpc") {
+    title = `GPC${g} · TPC${t} — full register audit (2 SM)`;
+    const td = tpcWord(g, "def"), tz = tpcWord(g, "dis");
+    const dead = td.v != null && ((td.v >>> t) & 1);
+    const dis  = tz.v != null && ((tz.v >>> t) & 1);
+    if (dead) rows.push(arow(0, "TPC_DEFECTIVE_GPC" + g, TPC_FFDEF[g], td, t,
+      "HARDWARE GATE — these 2 SM cannot ever run. Enforced in silicon; no burn or write changes it.",
+      `bit ${t} SET → TPC${t} in GPC${g} is dead silicon. Its 2 SM can never run.`));
+    if (dis && !dead) rows.push(arow(1, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, t,
+      "BOOT GATE — 2 SM held off at boot but silicon is healthy. Clearing this bit (fuse append) is the unlock action that gains 2 SM.",
+      `bit ${t} SET but NOT defective → disabled-but-healthy: 2 SM recoverable headroom.`));
+    if (dis && dead) rows.push(arow(2, "TPC_DISABLE_GPC" + g, AOFF.TPC_DIS + 4 * g, tz, t,
+      "REDUNDANT GATE — the defect already blocks these 2 SM; this bit adds no further restriction and clearing it gains nothing.",
+      `bit ${t} also set in the disable array — consistent with the defect.`));
+    const gd = auditWord(AOFF.GPC_DEFECTIVE, "GPC_DEFECTIVE");
+    const gz = auditWord(AOFF.GPC_DISABLE, "GPC_DISABLE");
+    if (gd.v != null && ((gd.v >>> g) & 1)) rows.push(arow(3, "GPC_DEFECTIVE",
+      AOFF.GPC_DEFECTIVE, gd, g,
+      "GATES UPSTREAM (dead) — parent GPC is dead silicon; this TPC cannot run regardless of its own health.",
+      `parent GPC${g} is defective — this TPC cannot run regardless of its own health.`));
+    else if (gz.v != null && ((gz.v >>> g) & 1)) rows.push(arow(3, "GPC_DISABLE",
+      AOFF.GPC_DISABLE, gz, g,
+      "GATES UPSTREAM (re-enableable) — parent GPC is floorswept; this TPC's 2 SM are counted in the GPC-level unlock prize, not separately.",
+      `parent GPC${g} is floorswept — this TPC only runs once the GPC itself is enabled.`));
+    verdict = dead ? `<b class="bad">DEAD</b> — TPC${t} is defective silicon.`
+      : dis ? `<b class="warn">HEADROOM</b> — healthy silicon, disabled; 2 SM recoverable.`
+            : `<b class="ok">ENABLED</b> — no register holds a bit against this TPC.`;
+  } else {   // fbp
+    const f = g;
+    title = "FBP" + f + " — full register audit";
+    const fd = auditWord(AOFF.FBP_DEFECTIVE, "FBP_DEFECTIVE");
+    const fz = auditWord(AOFF.FBP_DISABLE, "FBP_DISABLE");
+    const dead = fd.v != null && ((fd.v >>> f) & 1);
+    const dis = fz.v != null && ((fz.v >>> f) & 1);
+    if (dead) rows.push(arow(0, "FBP_DEFECTIVE", AOFF.FBP_DEFECTIVE, fd, f,
+      "HARDWARE GATE — the HBM stack behind this FBP is absent. −8 GB permanently; no burn can create silicon.",
+      `bit ${f} SET → FBP${f} is dummy/missing silicon (no HBM stack). Never usable, −8 GB.`));
+    if (dis) rows.push(arow(1, "FBP_DISABLE", AOFF.FBP_DISABLE, fz, f,
+      dead ? "GATES (already dead) — clearing this mask gains nothing; there is no memory behind it."
+           : "BOOT GATE — 8 GB held off at boot but silicon is healthy. Clearing it (fuse append) is the unlock action that gains 8 GB.",
+      dead ? `bit ${f} SET → floorsweep consistent with the defect.`
+           : `bit ${f} SET → floorswept but healthy — re-enableable (+8 GB).`));
+    const st = auditWord(AOFF.STATUS_OPT_FBP, "STATUS_OPT_FBP");
+    if (st.v != null && ((st.v >>> f) & 1)) rows.push(arow(2, "STATUS_OPT_FBP",
+      AOFF.STATUS_OPT_FBP, st, f,
+      "OBSERVES ONLY — read-only boot latch. Proves what the fuse logic applied; the gate itself is FBP_DISABLE.",
+      `bit ${f} SET → fuse replay confirms FBP${f} disabled at boot.`));
+    const ad = auditWord(AOFF.FBPA_DEFECTIVE, "FBPA_DEFECTIVE");
+    const az = auditWord(AOFF.FBPA_DISABLE, "FBPA_DISABLE");
+    const fbpaDead = [];
+    for (const b of [2 * f, 2 * f + 1])
+      if (ad.v != null && ((ad.v >>> b) & 1)) {
+        fbpaDead.push(b);
+        rows.push(arow(0, "FBPA_DEFECTIVE", AOFF.FBPA_DEFECTIVE, ad, b,
+          `HARDWARE GATE — FBPA${b} (one 4 GB channel inside FBP${f}) is dead. Half of this FBP's capacity is permanently gone.`,
+          `bit ${b} SET → FBPA${b} (inside FBP${f}) is defective.`));
+      }
+    for (const b of [2 * f, 2 * f + 1])
+      if (az.v != null && ((az.v >>> b) & 1) && !fbpaDead.includes(b))
+        rows.push(arow(1, "FBPA_DISABLE", AOFF.FBPA_DISABLE, az, b,
+          `BOOT GATE — FBPA${b} channel held off but healthy; re-enableable together with its parent FBP (FBP+FBPA must be burned together).`,
+          `bit ${b} SET → FBPA${b} floorswept but healthy.`));
+    // effective disable mirrors: shown ONLY when the unit is defective (policy)
+    if (fbpaDead.length || dead) {
+      const ae = auditWord(AOFF.FBPA_DIS_EFF, "FBPA_DISABLE_EFF");
+      const ie = auditWord(AOFF.FBIO_DIS_EFF, "FBIO_DIS_EFF");
+      if (ae.v != null) rows.push(arow(2, "FBPA_DISABLE_EFF", AOFF.FBPA_DIS_EFF, ae, null,
+        "HARDWARE-APPLIED MIRROR — the mask the memory controller actually enforces. Read-only consequence, not a burn target; confirms the defect is covered.",
+        `hardware-applied FBPA disable ${fmt(ae.v)} — corroborates the defective FBPA bits.`));
+      if (ie.v != null) rows.push(arow(2, "FBIO_DISABLE_EFF", AOFF.FBIO_DIS_EFF, ie, null,
+        "HARDWARE-APPLIED MIRROR — FBIO is the complete mask (FBPA alone can miss bits). Read-only consequence; confirms full coverage of the defect.",
+        `hardware-applied FBIO disable ${fmt(ie.v)} — FBIO is the complete mask (FBPA alone can miss bits).`));
+    }
+    for (const rec of ffBlockRecords(19)) {
+      const m = (rec.data >>> 3) & 0xFFF;
+      if (!((m >>> f) & 1)) continue;   // decoded mask must act on this FBP
+      rows.push(arow(2, "FF record · OPT_FBP_DISABLE",
+        null, { v: rec.data, src: "fuse row " + rec.r }, f,
+        "DISABLES this unit at boot — the decoded mask (data>>3) holds bit " + f +
+        ". To change behavior you must append a newer record (burn); register edits won't override fuse history.",
+        `${rec.iff ? "IFF (invalidation) " : "FF "}chain1·block19 data=0x${rec.data.toString(16).toUpperCase()} ` +
+        `→ mask 0x${m.toString(16).toUpperCase()} bit ${f} SET → this record floorswept FBP${f} (last record per block wins)`, 1));
+    }
+    verdict = dead ? `<b class="bad">DEAD</b> — FBP${f} is missing silicon.`
+      : dis ? `<b class="warn">FLOORSWEPT</b> — FBP${f} disabled by mask but healthy.`
+            : `<b class="ok">ACTIVE</b> — no register in this dump holds a bit against FBP${f}.`;
+  }
+  rows.sort((x, y) => (x.sev - y.sev) || ((x.off ?? 0) - (y.off ?? 0)));
+  return { title, verdict, rows };
+}
+const SEV_TAG = ["DEAD", "DISABLED", "CORROBORATION", "CONTEXT"];
+let auditOpener = null;  // B12: element to hand focus back to on close
+function openAudit(kind, g, t) {
+  const a = auditFor(kind, g, t);
+  let html = `<button class="btn auditclose" id="auditclose">close ✕</button>` +
+    `<h3>${esc(a.title)}</h3><div class="verdictline">${a.verdict}</div>`;
+  if (!a.rows.length) {
+    html += `<div class="note">No register in this dump holds a bit against this unit — ` +
+      `nothing is disabling or killing it.</div>`;
+  } else {
+    html += `<table><tr><th>class</th><th>register</th><th>offset</th><th>value</th>` +
+      `<th>bit</th><th>source</th><th>impact of this value</th><th>interpretation</th></tr>`;
+    for (const r of a.rows) {
+      html += `<tr class="sev${r.sev}"><td><span class="tag ${r.sev === 0 ? "b-tag" : ""}">` +
+        `${SEV_TAG[r.sev]}</span></td><td class="mono">${esc(r.reg)}</td>` +
+        `<td class="mono note">${r.off == null ? "—" : hx(r.off)}</td>` +
+        `<td class="mono">${r.val == null ? "—" : fmt(r.val)}</td>` +
+        `<td class="mono">${r.bit == null ? "word" : r.bit + " = " + r.bitval}</td>` +
+        `<td class="note">${esc(r.src)}</td><td>${r.impact}</td><td>${r.interp}</td></tr>`;
+    }
+    html += `</table>`;
+  }
+  if (kind === "gpc" || kind === "fbp") html += timelineHtml(kind, g);
+  document.getElementById("audit").innerHTML = html;
+  auditOpener = document.activeElement;
+  document.getElementById("auditbg").classList.add("open");
+  document.getElementById("auditclose").onclick = closeAudit;
+  document.getElementById("auditclose").focus();  // B12: focus into the dialog
+}
+function closeAudit() {
+  document.getElementById("auditbg").classList.remove("open");
+  const el = auditOpener && document.contains(auditOpener) ? auditOpener : null;
+  // Chromium keeps focus on the just-hidden close button and body.focus() is a
+  // no-op over it — blur first, then restore to the opener.
+  const cur = document.activeElement;
+  if (cur && cur !== el && cur.blur) cur.blur();
+  if (el) el.focus();
+  auditOpener = null;
+}
+document.addEventListener("click", e => {
+  if (e.target.closest("#auditclose")) return;
+  if (e.target.id === "auditbg") { closeAudit(); return; }
+  const el = e.target.closest("[data-audit]");
+  if (el) {
+    const p = el.dataset.audit.split(":");
+    openAudit(p[0], +p[1], p[2] == null ? null : +p[2]);
+  }
+});
+document.addEventListener("keydown", e => {
+  const bg = document.getElementById("auditbg");
+  if (e.key === "Escape") { closeAudit(); return; }
+  if (e.key !== "Tab" || !bg.classList.contains("open")) return;
+  // B12: keep Tab cycling inside the open dialog (background stays untabbable).
+  const f = [...bg.querySelectorAll("button, [href], input, select, textarea, " +
+    "[tabindex]:not([tabindex='-1'])")].filter(el => el.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  const inside = bg.contains(document.activeElement);
+  if (e.shiftKey && (!inside || document.activeElement === first)) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+    e.preventDefault(); first.focus();
+  }
+});
 
 // shadow registers -------------------------------------------------------
 function renderShadow() {
@@ -519,11 +1144,20 @@ function renderShadow() {
       `<td class="mono">{${bitsOf(v).join(",")}}</td><td class="note">${note}</td></tr>`;
   }
   for (let i = 0; i < 8; i++) {
-    const v = sh["TPC_DISABLE_" + i];
-    if (v) html += `<tr><td class="mono">TPC word ${i}</td>` +
+    const d = sh["TPC_DEFECTIVE_GPC" + i];
+    const z = sh["TPC_DISABLE_GPC" + i];
+    const legacy = sh["TPC_DISABLE_" + i];   // pre-2026-11-19: held 0x820760
+    if (d == null && z == null && legacy == null) continue;
+    const dv = d != null ? d : legacy;
+    html += `<tr><td class="mono">TPC_DEFECTIVE_GPC${i}</td>` +
       `<td class="mono note">0x${(0x820760 + i * 4).toString(16).toUpperCase()}</td>` +
-      `<td class="mono">${fmt(v)}</td><td class="mono">{${bitsOf(v).join(",")}}</td>` +
-      `<td class="note">TPC-level mask (mapping approximate)</td></tr>`;
+      `<td class="mono">${dv == null ? "—" : fmt(dv)}</td>` +
+      `<td class="mono">{${bitsOf(dv).join(",")}}</td>` +
+      `<td class="note">dead TPCs in GPC${i} (bit = TPC, 2 SM each)</td></tr>`;
+    if (z != null) html += `<tr><td class="mono">TPC_DISABLE_GPC${i}</td>` +
+      `<td class="mono note">0x${(0x820C38 + i * 4).toString(16).toUpperCase()}</td>` +
+      `<td class="mono">${fmt(z)}</td><td class="mono">{${bitsOf(z).join(",")}}</td>` +
+      `<td class="note">effective TPC disable — extra bits over defective = unlock headroom</td></tr>`;
   }
   document.getElementById("shadow").innerHTML = html + "</table>";
 }
@@ -596,7 +1230,43 @@ function renderRows() {
   document.getElementById("rowcount").textContent = `${vis.length} rows shown`;
   document.getElementById("rowtable").querySelectorAll("tr.rowline").forEach(tr =>
     tr.onclick = () => { selRow = +tr.dataset.r; renderRows(); renderDetail(selRow); });
+  syncActiveRow();
 }
+
+// B16: keyboard access to the row table. The scroll container is a single tab
+// stop (roving active row) instead of 488 tab stops — see design note in
+// evidence/05-fix4.md. Enter/Space selects the active row exactly like a click.
+let activeRow = null;
+function syncActiveRow() {
+  const rows = [...document.getElementById("rowtable").querySelectorAll("tr.rowline")];
+  const has = r => rows.some(tr => +tr.dataset.r === r);
+  if (has(selRow)) activeRow = selRow;
+  else if (!has(activeRow)) activeRow = rows.length ? +rows[0].dataset.r : null;
+  rows.forEach(tr => tr.classList.toggle("rowact", +tr.dataset.r === activeRow));
+}
+(function () {
+  const box = document.getElementById("rowtable");
+  box.addEventListener("keydown", e => {
+    const rows = [...box.querySelectorAll("tr.rowline")];
+    if (!rows.length) return;
+    let i = rows.findIndex(tr => +tr.dataset.r === activeRow);
+    if (i < 0) i = 0;
+    let j = null;
+    if (e.key === "ArrowDown") j = Math.min(i + 1, rows.length - 1);
+    else if (e.key === "ArrowUp") j = Math.max(i - 1, 0);
+    else if (e.key === "Home") j = 0;
+    else if (e.key === "End") j = rows.length - 1;
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      selRow = +rows[i].dataset.r; renderRows(); renderDetail(selRow);
+      return;
+    } else return;
+    e.preventDefault();
+    activeRow = +rows[j].dataset.r;
+    rows.forEach(tr => tr.classList.toggle("rowact", +tr.dataset.r === activeRow));
+    rows[j].scrollIntoView({ block: "nearest" });
+  });
+})();
 function renderDetail(r) {
   const v = D.rows[r], el = document.getElementById("detail");
   el.style.display = "block";
@@ -650,7 +1320,8 @@ function renderHex() {
 }
 
 function renderLive() {  // cheap: everything except rows/dmesg/hex/interp
-  renderMeta(); renderStatus(); renderVerdict(); renderTopo(); renderShadow();
+  renderMeta(); renderStatus(); renderVerdict(); renderTopo(); renderTpc();
+  renderShadow();
 }
 function renderAll() {
   renderLive(); renderRows(); renderInterp(); renderDmesg(); renderHex();
@@ -658,8 +1329,12 @@ function renderAll() {
 
 // ---------------------------------------------------------------- tabs
 function switchTab(name) {
-  document.querySelectorAll(".tab").forEach(b =>
-    b.classList.toggle("on", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");  // B13
+    b.tabIndex = on ? 0 : -1;                                // B13: roving tab stop
+  });
   document.querySelectorAll(".tabpane").forEach(p =>
     p.classList.toggle("on", p.id === "tab-" + name));
   try { history.replaceState(null, "", "#" + name); } catch (e) {}
@@ -667,6 +1342,21 @@ function switchTab(name) {
 }
 document.querySelectorAll(".tab").forEach(b =>
   b.onclick = () => switchTab(b.dataset.tab));
+// B13: ArrowLeft/Right (plus Home/End) move focus and activation on the tablist.
+document.querySelector(".tabs").addEventListener("keydown", e => {
+  const tabs = [...document.querySelectorAll(".tab")];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === "ArrowRight") j = (i + 1) % tabs.length;
+  else if (e.key === "ArrowLeft") j = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = tabs.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  tabs[j].focus();
+  switchTab(tabs[j].dataset.tab);
+});
 
 // ---------------------------------------------------------------- boot
 renderStateBtns();
@@ -683,7 +1373,11 @@ __LIVEBOOT__
 LIVEBAR = """
   <div class="card" id="livebar">
     <div class="flexline" style="margin:0">
-      <span id="liveind" class="pill warnl">connecting…</span>
+      <span id="liveind" class="pill warnl" aria-live="polite">connecting…</span>
+      <span class="pill">GPU:
+        <select id="gpusel" title="select which GA100 the Fuse Explorer targets">
+          <option value="">default</option>
+        </select></span>
       <span class="pill">page poll:
         <select id="pollsel">
           <option value="0" selected>off</option>
@@ -697,7 +1391,8 @@ LIVEBAR = """
         by default; the interpretation feed, dmesg tail, campaign log and GPU
         monitor keep refreshing on their own.</span>
     </div>
-    <div id="feed" class="mono"></div>
+    <div class="card verdict warnv" id="live-follow" style="display:none;margin-top:8px"></div>
+    <div id="feed" class="mono" aria-live="polite"></div>
   </div>
 """
 
@@ -710,6 +1405,13 @@ LIVEBOOT = r"""
   let prev = null, timer = null;
 
   function note(msg, cls) { ind.textContent = msg; ind.className = "pill " + (cls || ""); }
+  function followNote(id, n) {
+    // amber honesty banner: console follows a card other than the configured BDF
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (n) { el.textContent = "⚠ " + n; el.style.display = ""; }
+    else el.style.display = "none";
+  }
   function feed(line) {
     const ts = new Date().toTimeString().slice(0, 8);
     feedLines.unshift(ts + "  " + line);
@@ -734,18 +1436,48 @@ LIVEBOOT = r"""
     }
     prev = j;
   }
+  // ---- GPU selection (Fuse Explorer target) ----
+  const selBdf = () => localStorage.getItem("ga100.bdf") || "";
+  const bdfQs = () => { const b = selBdf(); return b ? "?bdf=" + encodeURIComponent(b) : ""; };
+  async function populateGpuSel() {
+    try {
+      const j = await jget("/api/gpus");
+      const sel = document.getElementById("gpusel");
+      const gpus = j.gpus || [];
+      // detected cards only — a configured-but-absent BDF is never an
+      // option; the effective default carries the (default) suffix
+      sel.innerHTML = gpus.map(g => `<option value="${esc(g.bdf)}">${esc(g.bdf)}` +
+        ` · ${esc(g.driver || "no driver")}` +
+        (g.goldilocks ? " · GOLDILOCKS" : "") +
+        (g.bdf === j.default ? " (default)" : "") +
+        (g.error ? " · " + esc(g.error.slice(0, 40)) : "") + `</option>`).join("");
+      const saved = selBdf();
+      sel.value = (saved && gpus.some(g => g.bdf === saved)) ? saved : (j.default || "");
+      followNote("live-follow", j.default_note);
+      sel.onchange = () => {
+        if (sel.value) localStorage.setItem("ga100.bdf", sel.value);
+        else localStorage.removeItem("ga100.bdf");
+        note("GPU target switched to " + (sel.value || "default") +
+             " — reloading…", "warnl");
+        fetchLive(true); fullDump();
+      };
+    } catch (e) { /* static mode or service error: keep default only */ }
+  }
   async function fetchLive(heavy) {
     try {
-      const r = await fetch("/api/live", { cache: "no-store" });
+      const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
+      followNote("live-follow", j.default_note);
       if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       D.status = j.status; D.shadow = j.shadow;
+      if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
       D.started = j.ts;
       diff(j);
-      if (heavy) renderLive();
+      renderLive();  // cheap cards refresh on the light poll too; rows/hex stay heavy-only
+      renderPlan(); renderQueue();
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
   }
@@ -753,12 +1485,13 @@ LIVEBOOT = r"""
     const b = document.getElementById("fulldump");
     b.disabled = true; note("running full dump… (rows 0–487 + hex window)", "warnl");
     try {
-      const r = await fetch("/api/full", { cache: "no-store" });
+      const r = await fetch("/api/full" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       const hex = j.hexnonzero; delete j.hexnonzero;
       Object.assign(D, j); D.hexnonzero = hex || [];
       renderAll();
+      renderPlan(); renderQueue();
       note("full dump loaded — " + j.started, "okl");
     } catch (e) { note("⚠ full dump failed (" + e + ")", "badl"); }
     finally { b.disabled = false; }
@@ -800,6 +1533,11 @@ LIVEBOOT = r"""
 
   // ---------- Glitch & Burn pane ----------
   $("tab-glitch").innerHTML = `
+    <div class="card verdict" id="gb-brickwarn" style="margin-bottom:12px">
+      <b class="bad">⚠ Burns are permanent OTP writes — a wrong burn can BRICK
+      your GPU permanently. Verify with Preview first. No responsibility is
+      accepted by the developer.</b>
+    </div>
     <div class="card" id="gb-target">
       <h3>Target</h3>
       <div class="frow">
@@ -807,6 +1545,7 @@ LIVEBOOT = r"""
         <span class="pill" id="gb-gpustate">checking…</span>
         <span class="pill" id="gb-gpuserial">—</span>
       </div>
+      <div class="verdict warnv" id="gb-follow" style="display:none;margin-top:8px"></div>
       <div class="note" style="margin-top:6px">Standalone burns are only allowed on a
       GPU currently in the <b>Goldilocks</b> state (DSOV=0, CRC=0x55, PLMs open) —
       the campaign's burn-on-goldilocks mode creates that state on the selected GPU.</div>
@@ -850,15 +1589,52 @@ LIVEBOOT = r"""
         <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" value="304" min="0" max="487"></div>
         <label class="checkline"><input type="checkbox" id="gb-mirror" checked> burn mirror row too</label>
         <button class="btn" id="gb-check">Check row &amp; guards</button>
+        <button class="btn" id="gb-preview" title="read-only burn preview: FF decode, last-wins collision scan, partial-landing hazards — works any time (no window/arm/token; CMD_READ is gated by FUSECTRL_PLM, not EFP)">Preview burn (read-only)</button>
       </div>
       <div id="gb-srcdecode" class="note"></div>
+      <div id="gb-previewresult" class="note" style="margin-top:6px"></div>
       <div id="gb-checkresult" class="note"></div>
       <div class="frow" style="margin-top:10px">
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
         <button class="btn danger" id="gb-arm">Arm (120 s)</button>
         <span class="pill" id="gb-armstate">not armed</span>
-        <button class="btn danger" id="gb-burnnow" disabled>Burn now (Goldilocks GPU only)</button>
+        <button class="btn danger" id="gb-burnnow" disabled>Burn now (burn window only)</button>
+        <span class="pill" id="gb-windowstate" title="read-only burn-window verdict from the live poller (window checks; EFP/WDATA_PLM auto-arm at burn)">window: …</span>
+        <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
+    </div>
+    <div class="card" id="gb-plan" style="margin-top:12px">
+      <h3>Suggested burns — minimum common unlock</h3>
+      <div class="note" style="margin-bottom:8px">Derived from <b>this card's own defect
+      masks</b> (loaded dump): every disabled-but-healthy unit is re-enabled in one pass.
+      Minimum common set: <b>GPC 1 word + FBP 1 word + FBPA 2 words = 4 words</b>
+      (optional DEVID identity change adds 2). Queued records burn together inside
+      <b>one</b> Goldilocks window.</div>
+      <div id="plan-rows"></div>
+      <div class="frow" style="margin-top:8px">
+        <button class="btn go" id="plan-queue-all">⤓ Queue all needed records</button>
+        <span class="pill" id="plan-summary">…</span>
+      </div>
+      <div class="frow" style="margin-top:10px; align-items:end">
+        <div class="field"><label>optional: DEVID change (hex, e.g. 0x20B5)</label>
+          <input type="text" id="plan-devid" value="0x20B5" class="mono" style="width:100px"></div>
+        <button class="btn" id="plan-devid-add">+ Queue DEVID A/B pair</button>
+        <span class="note" id="plan-devid-note"></span>
+      </div>
+    </div>
+    <div class="card" id="gb-queue" style="margin-top:12px">
+      <h3>Burn queue <span class="note">(all of these burn in one Goldilocks window)</span></h3>
+      <div id="queue-rows" class="queue-rows"></div>
+      <div class="frow" style="margin-top:8px; align-items:end">
+        <div class="field"><label>custom record — row</label>
+          <input type="number" id="cq-row" value="306" min="222" max="487"></div>
+        <div class="field"><label>value (hex FF record)</label>
+          <input type="text" id="cq-value" value="0x420004C1" class="mono" style="width:120px"></div>
+        <button class="btn" id="cq-add">+ Add custom record</button>
+        <label class="checkline"><input type="checkbox" id="cq-mirror"> mirror each</label>
+        <button class="btn" id="queue-clear">clear queue</button>
+      </div>
+      <div id="cq-decode" class="note"></div>
     </div>
     <div class="card" id="gb-campaign" style="margin-top:12px">
       <h3>Glitch campaign</h3>
@@ -872,7 +1648,7 @@ LIVEBOOT = r"""
         <div class="field"><label>v_dip strategy</label>
           <select id="gc-strategy">
             <option value="fixed">fixed v_dip</option>
-            <option value="adaptive">adaptive (Thompson)</option>
+            <option value="adaptive" selected>adaptive 3D (v_dip · delay · pw)</option>
           </select></div>
         <div class="field"><label>adaptive v min mV</label><input type="number" id="gc-vmin" value="300"></div>
         <div class="field"><label>adaptive v max mV</label><input type="number" id="gc-vmax" value="380"></div>
@@ -880,6 +1656,7 @@ LIVEBOOT = r"""
       <div class="frow">
         <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
         <button class="btn" id="gc-ports-refresh" title="rescan serial ports">⟳ rescan</button>
+        <span class="note" id="gc-portnote"></span>
         <div class="field"><label>mode</label>
           <select id="gc-mode">
             <option value="classify">classify only — observe glitch states</option>
@@ -901,8 +1678,9 @@ LIVEBOOT = r"""
     <div class="dangerstrip">
       Glitching dips NVVDD via the pico; burns are <b>irreversible OTP writes</b>.
       Burn mode requires an armed token, a pure 0→1 payload, matching row state and a
-      live Goldilocks window on the target GPU — all verified again server-side
-      before CMD_WRITE.
+      live burn window on the target GPU — all verified again server-side
+      before CMD_WRITE; EFP/WDATA_PLM are opened at burn time by the SENSE_CTRL
+      arm sequence, never by the poller or the check.
       FF records belong at rows 222–487 (chain=bits[4:0], iff=bit5, block=bits[15:6],
       data=bits[31:16]); a bit-exact readback does NOT prove the shadow latch followed —
       after any burn, watch STATUS_OPT_* on the Fuse Explorer tab.
@@ -911,13 +1689,212 @@ LIVEBOOT = r"""
     </div>`;
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
-  let targetBdf = null, targetGoldilocks = false;
+  let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
+  let gpuGoldilocks = false;      // arm gate: current poll of the SELECTED GPU only
+  let targetBdf = null;
+  let windowOk = false;           // live burn-window verdict (poller / fresh check)
+
+  // B6: the Check verdict binds to the exact payload — any edit to the burn
+  // inputs invalidates it (the check IS the safety contract).
+  function invalidateChecked() {
+    if (!payloadChecked) return;
+    payloadChecked = null;
+    $("gb-burnnow").disabled = true;
+    $("gb-editwarn").style.display = "";
+  }
+
+  // ---- burn queue (suggested + custom records) ----
+  // All queued records burn in ONE campaign pass (service supports records[]).
+  let burnQueue = [];
+  const encFF = (ch, off, data) => ((ch & 0x3F) | ((off & 0x3FF) << 6) |
+    ((data & 0xFFFF) << 16)) >>> 0;
+  // Decode a record's effect for humans: which units it acts on, disable→what.
+  const FF_FIELD = [{ blk: 8, w: 0xFF, name: "GPC" }, { blk: 19, w: 0xFFF, name: "FBP" }];
+  function ffEffect(word) {
+    const ch = word & 0x1F, off = (word >> 6) & 0x3FF, data = (word >>> 16) & 0xFFFF;
+    const mask = (data >> 3) & 0xFFFFFF;
+    for (const f of FF_FIELD) {
+      if (ch === 1 && off === f.blk) {
+        const bits = [];
+        for (let i = 0; i < 16; i++) if ((mask >> i) & 1) bits.push(f.name + i);
+        return { key: `chain1·off${f.blk}`, field: f.name, mask, bits, width: f.w };
+      }
+    }
+    if (ch === 1 && (off === 5 || off === 6)) {
+      return { key: `chain1·off5+6 (FBPA split)`, field: "FBPA", mask, bits: [], two: off };
+    }
+    if (ch === 2 && (off === 37 || off === 38)) {
+      return { key: `chain2·off${off} DEVID`, field: "DEVID", devid: (data >> 1) >>> 0, bits: [] };
+    }
+    return { key: `chain${ch}·off${off}`, field: null, mask, bits: [] };
+  }
+  function existingRecordFor(word) {
+    // Does the loaded dump already contain this exact record word? (user asked:
+    // "if a burn already exists that is also represented")
+    for (const k of Object.keys(D.rows || {})) {
+      if (D.rows[k] === word) return +k;
+    }
+    return null;
+  }
+  function suggestPlan() {
+    const sh = D.shadow || {};
+    const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
+    const fbpDef = sh.FBP_DEFECTIVE ?? 0, fbpDis = sh.FBP_DISABLE ?? 0;
+    const fbpaDef = sh.FBPA_DEFECTIVE ?? 0;
+    const fbpaDisEff = auditWord(AOFF.FBPA_DIS_EFF, "FBPA_DISABLE_EFF").v ??
+                       (sh.FBPA_DISABLE ?? 0);
+    const out = [];
+    if (((gpcDis & 0xFF) !== (gpcDef & 0xFF)) && (gpcDef & 0xFF) !== 0 || (gpcDis & 0xFF) !== (gpcDef & 0xFF)) {
+      const bits = [];
+      for (let i = 0; i < 8; i++) if (((gpcDis & ~gpcDef) >> i) & 1) bits.push("GPC" + i);
+      out.push({ label: "GPC unlock", word: encFF(1, 8, (gpcDef & 0xFF) << 3),
+        effect: `GPC_DISABLE ${fmt(gpcDis & 0xFF)} → ${fmt(gpcDef & 0xFF)}` +
+          (bits.length ? ` — re-enables ${bits.join(", ")}` : " — masks already equal"),
+        recs: gpcDef ? "re-enables every non-defective GPC" : "no defective GPCs — record would disable all (skip)" });
+    }
+    if ((fbpDis & 0xFFF) !== (fbpDef & 0xFFF)) {
+      const bits = [];
+      for (let i = 0; i < 12; i++) if (((fbpDis & ~fbpDef) >> i) & 1) bits.push("FBP" + i);
+      const gb = bits.length * 8;
+      out.push({ label: "FBP unlock", word: encFF(1, 19, (fbpDef & 0xFFF) << 3),
+        effect: `FBP_DISABLE ${fmt(fbpDis & 0xFFF)} → ${fmt(fbpDef & 0xFFF)}` +
+          (bits.length ? ` — re-enables ${bits.join(", ")} (+${gb} GB)` : " — masks already equal"),
+        recs: gb ? `+${gb} GB VRAM from healthy-but-floorswept stacks` : "no healthy FBP held off — nothing to gain" });
+    }
+    if ((fbpaDisEff & 0xFFFFFF) !== (fbpaDef & 0xFFFFFF)) {
+      const w = ((fbpaDef & 0xFFFFFF) << 3) >>> 0;
+      const lo = w & 0xFFFF, hi = (w >>> 16) & 0xFFFF;
+      const bits = [];
+      for (let i = 0; i < 24; i++) if (((fbpaDisEff & ~fbpaDef) >> i) & 1) bits.push("FBPA" + i);
+      out.push({ label: "FBPA unlock (2 words)", pair: true,
+        words: [encFF(1, 5, lo), encFF(1, 6, hi)],
+        effect: `FBPA_DISABLE ${fmt(fbpaDisEff & 0xFFFFFF)} → ${fmt(fbpaDef & 0xFFFFFF)}` +
+          (bits.length ? ` — re-enables channels ${bits.join(", ")} (belong to the FBP unlock — burn together)` : " — masks already equal"),
+        recs: "24-bit split field: off5 = low word, off6 = high word" });
+    }
+    return out;
+  }
+  function renderPlan() {
+    const el = document.getElementById("plan-rows");
+    if (!D.shadow) { el.innerHTML = `<span class="note">load a dump first</span>`; return; }
+    const plan = suggestPlan();
+    const needed = plan.length;
+    document.getElementById("plan-summary").innerHTML = needed
+      ? `<b>${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s)</b> in ${needed} record group(s)`
+      : `<b class="ok">masks already equal to defective — this card needs no unlock burns</b>`;
+    el.innerHTML = plan.map(p => {
+      const words = p.pair ? p.words : [p.word];
+      const rows = words.map(w => ({ w, ex: existingRecordFor(w) }));
+      return `<div class="planrow">` +
+        `<div><b>${p.label}</b> <span class="note">${esc(p.recs)}</span></div>` +
+        rows.map(r => {
+          const f = ffEffect(r.w);
+          return `<div class="planword">` +
+            `<span class="mono">0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</span>` +
+            `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+            (r.ex !== null
+              ? ` <span class="tag ok-tag">ALREADY IN DUMP — row ${r.ex}</span>`
+              : ` <button class="btn" data-plan-add="${r.w}">+ queue</button>`) +
+            `</div>`;
+        }).join("") + `</div>`;
+    }).join("") || `<span class="note">no records needed — disable masks already match the card's defects</span>`;
+    el.querySelectorAll("[data-plan-add]").forEach(b => b.onclick = () => {
+      queueAdd(+b.dataset.planAdd, "suggested");
+    });
+  }
+  function queueAdd(word, src, customRow, mirror) {
+    burnQueue.push({ word, src, customRow, mirror: !!mirror });
+    renderQueue();
+  }
+  function renderQueue() {
+    const el = document.getElementById("queue-rows");
+    if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
+    el.innerHTML = burnQueue.map((q, i) => {
+      const f = ffEffect(q.word);
+      const ex = existingRecordFor(q.word);
+      return `<div class="qrow${ex !== null ? " qexists" : ""}">` +
+        `<span class="mono">#${i + 1}</span>` +
+        `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
+        `<span class="note">${esc(f.key)}</span>` +
+        (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
+        (ex !== null ? ` <span class="tag ok-tag">⚠ already in dump — row ${ex} (duplicate)</span>` : "") +
+        `<span class="note">via ${esc(q.src)}</span>` +
+        `<button class="btn" data-q-del="${i}">✕</button></div>`;
+    }).join("");
+    el.querySelectorAll("[data-q-del]").forEach(b => b.onclick = () => {
+      burnQueue.splice(+b.dataset.qDel, 1); renderQueue(); });
+  }
+  function queueRecords() {
+    // assign free safe-zone rows to queue entries that lack one (ascending,
+    // skipping occupied rows; mirror entries consume an even/odd pair).
+    // The server re-validates every row against ff_policy — this only picks
+    // plausible candidates so the common case needs no manual row typing.
+    if (!ffLayout || !ffLayout.burn_zone) {
+      alert("FF layout not loaded — reload the page before burning the queue");
+      return null;
+    }
+    const L = ffLayout;
+    const used = new Set(Object.keys(D.rows || {}).map(Number));
+    let cur = Math.max(L.burn_zone[0], L.last_occupied + 1);
+    const alloc = (mirror) => {
+      if (mirror && (cur & 1)) { if (used.has(cur)) return null; used.add(cur); cur++; }
+      while (used.has(cur) && cur <= L.burn_zone[1]) cur++;
+      if (cur > L.burn_zone[1]) return null;
+      used.add(cur);
+      if (mirror) used.add(cur + 1);
+      return cur++;
+    };
+    const recs = [];
+    for (const q of burnQueue) {
+      const row = q.customRow || alloc(!!q.mirror);
+      if (row === null || row === undefined) {
+        alert("no free rows left in the safe burn zone — shrink the queue");
+        return null;
+      }
+      recs.push({ row, value: q.word, old: (D.rows || {})[row] || 0,
+                  mirror: !!q.mirror });
+    }
+    return recs;
+  }
+  document.getElementById("plan-queue-all").onclick = () => {
+    for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
+      queueAdd(w, p.label);
+    note("all suggested records queued — review the queue, then start the campaign in burn mode", "okl");
+  };
+  document.getElementById("queue-clear").onclick = () => { burnQueue = []; renderQueue(); };
+  document.getElementById("cq-row").oninput = document.getElementById("cq-value").oninput = () => {
+    const v = parseInt($("cq-value").value, 16);
+    const el = document.getElementById("cq-decode");
+    if (isNaN(v)) { el.innerHTML = ""; return; }
+    const f = ffDecode(v);
+    const ef = ffEffect(v);
+    el.innerHTML = `decode: chain ${f.ch} · ${f.iff ? '<b class="warn">IFF — REFUSED (bit 5 set)</b>' : `block ${f.blk} · data 0x${f.data.toString(16)}`} · ${esc(ef.key)}`;
+  };
+  document.getElementById("cq-add").onclick = () => {
+    const row = +document.getElementById("cq-row").value;
+    const v = parseInt(document.getElementById("cq-value").value, 16);
+    if (isNaN(v)) { alert("bad hex value"); return; }
+    const mirror = document.getElementById("cq-mirror").checked;
+    queueAdd(v, `custom row ${row}${mirror ? " + mirror" : ""}`, row, mirror);
+  };
+  document.getElementById("plan-devid-add").onclick = () => {
+    let dv = parseInt(document.getElementById("plan-devid").value, 16);
+    const noteEl = document.getElementById("plan-devid-note");
+    if (isNaN(dv) || dv < 0x100 || dv > 0xFFFF) {
+      noteEl.innerHTML = `<span class="warn">invalid devid (use 0x100–0xFFFF, e.g. 0x20B5)</span>`; return; }
+    // data = devid << 1: the DATA word's low bit is always 0 by construction
+    // (the skill's reference encodes 0x20B5 -> data 0x416A directly).
+    queueAdd(encFF(2, 37, dv << 1), `DEVIDA → 0x${dv.toString(16).toUpperCase()}`);
+    queueAdd(encFF(2, 38, dv << 1), `DEVIDB → 0x${dv.toString(16).toUpperCase()}`);
+    note("DEVID pair queued — identity change takes effect at next cold boot", "okl");
+  };
 
   // ---- target GPU selector (live Goldilocks state) ----
-  function gpuOption(g) {
+  function gpuOption(g, defBdf) {
     const badge = g.goldilocks ? "● Goldilocks" :
                   g.error ? "⚠ unreadable" : "locked";
-    return `<option value="${esc(g.bdf)}">${esc(g.bdf)} — ${badge}</option>`;
+    return `<option value="${esc(g.bdf)}">${esc(g.bdf)} — ${badge}` +
+      (g.bdf === defBdf ? " (default)" : "") + `</option>`;
   }
   async function loadGpus() {
     try {
@@ -928,11 +1905,12 @@ LIVEBOOT = r"""
         return;
       }
       const sel = $("gb-gpu");
+      followNote("gb-follow", j.default_note);
       const prev = targetBdf || j.default;
       const sig = (j.gpus || []).map(g => g.bdf + (g.goldilocks ? "+" : "-")).join();
       if (sel.dataset.sig !== sig) {           // rebuild only when the set changes
         sel.dataset.sig = sig;
-        sel.innerHTML = (j.gpus || []).map(gpuOption).join("");
+        sel.innerHTML = (j.gpus || []).map(g => gpuOption(g, j.default)).join("");
         const match = (j.gpus || []).find(g => g.bdf === prev) || (j.gpus || [])[0];
         if (match) { sel.value = match.bdf; targetBdf = match.bdf; }
       }
@@ -942,18 +1920,21 @@ LIVEBOOT = r"""
   function updateGpuState(j) {
     const g = (j.gpus || []).find(x => x.bdf === targetBdf);
     const pill = $("gb-gpustate");
+    // arm gate follows the SELECTED GPU's current poll only — no stale
+    // enable from a previous card (dropdown change resets this first).
+    gpuGoldilocks = !!(g && g.goldilocks);
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
-      targetGoldilocks = false;
     } else if (g.goldilocks) {
-      pill.textContent = "● Goldilocks — burn window open";
-      pill.className = "pill okl"; targetGoldilocks = true;
+      // glitch-state approximation (4 read-only checks); the authoritative
+      // burn-window verdict is the separate gb-windowstate pill (/api/live).
+      pill.textContent = "● Goldilocks — glitch window";
+      pill.className = "pill okl";
     } else if (g.error) {
       pill.textContent = "⚠ " + g.error; pill.className = "pill badl";
-      targetGoldilocks = false;
     } else {
       pill.textContent = "locked (DSOV=" + g.dsov + ") — glitch first";
-      pill.className = "pill"; targetGoldilocks = false;
+      pill.className = "pill";
     }
     $("gb-gpuserial").innerHTML =
       (g.serial ? "SN " + esc(g.serial) : "no serial") +
@@ -962,7 +1943,9 @@ LIVEBOOT = r"""
   }
   $("gb-gpu").onchange = () => {
     targetBdf = $("gb-gpu").value; payloadChecked = null;
+    gpuGoldilocks = false; updateArmState();   // sticky: no stale enable pre-poll
     $("gb-checkresult").innerHTML = "";
+    $("gb-editwarn").style.display = "none";
     loadGpus();
     loadLayout();
   };
@@ -987,9 +1970,9 @@ LIVEBOOT = r"""
       seg(L.revert_zone[0], L.revert_zone[1], "rev", `revert ${L.tail_reserve}`);
     $("gb-budget").innerHTML =
       `safe zone rows <b>${L.burn_zone[0]}–${L.burn_zone[1]}</b> · <b>${L.free_in_zone}</b> free · last boot FF: row ${L.last_occupied}`;
-    const rv = +$("gb-row").value;               // pull the row into the zone
-    if (!(rv >= L.burn_zone[0] && rv <= L.burn_zone[1]))
-      $("gb-row").value = L.burn_zone[0];
+    // B25: never rewrite the user's typed row — updateRowHint shows the zone
+    // verdict for whatever row is in the field (a deliberate probe of the SM
+    // reserve must survive tab switches and layout refreshes).
     updateRowHint();
   }
   function updateRowHint() {
@@ -1008,7 +1991,7 @@ LIVEBOOT = r"""
     hint.className = "pill";
     hint.innerHTML = `<b class="${cls}">${txt}</b>`;
   }
-  $("gb-row").oninput = updateRowHint;
+  $("gb-row").oninput = () => { invalidateChecked(); updateRowHint(); };
   async function loadLayout() {
     try {
       const q = targetBdf ? "?bdf=" + encodeURIComponent(targetBdf) : "";
@@ -1021,17 +2004,26 @@ LIVEBOOT = r"""
   loadLayout();
 
   // ---- pico port selector ----
+  let portOk = true;   // false = nothing startable; gates campaign start
   async function loadPorts() {
     try {
       const j = await jget("/api/ports");
+      portOk = j.default != null;   // server returns null when nothing is present
       const sel = $("gc-port");
       const cur = (sel.value && sel.value.indexOf("scanning") < 0) ?
-                  sel.value : (j.default || "/dev/ttyACM0");
-      const opts = (j.ports || []).map(p =>
+                  sel.value : (j.default || "");
+      const ports = (j.ports || []).slice().
+        sort((a, b) => (a.pico ? 0 : 1) - (b.pico ? 0 : 1));
+      const label = p =>
+        (p.byid ? `${esc(p.byid)} (${esc(p.path)})` : esc(p.path)) +
+        (p.pico ? " (pico)" : p.vendor ? ` — ${esc(p.vendor)}` : "");
+      sel.innerHTML = ports.map(p =>
         `<option value="${esc(p.path)}" ${p.path === cur ? "selected" : ""}>` +
-        (p.byid ? `${esc(p.byid)} (${esc(p.path)})` : esc(p.path)) + `</option>`).join("");
-      sel.innerHTML = opts ||
-        `<option value="/dev/ttyACM0">/dev/ttyACM0 (not detected)</option>`;
+        label(p) + `</option>`).join("") ||
+        `<option value="" disabled selected>no pico detected</option>`;
+      $("gc-portnote").textContent = j.note || "";
+      $("gc-start").disabled = !portOk;
+      $("gc-start").title = portOk ? "" : "no pico detected — ⟳ rescan";
     } catch (e) {}
   }
   $("gc-ports-refresh").onclick = loadPorts;
@@ -1041,23 +2033,64 @@ LIVEBOOT = r"""
     const el = $("gb-armstate");
     const armed = armToken && Date.now() < armExpiry;
     if (armed) {
+      armRefusal = null;
       el.textContent = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
       el.className = "pill okl";
     } else {
       armToken = null;
-      el.textContent = "not armed"; el.className = "pill";
+      if (armRefusal) {
+        // B5: keep the refusal visible until the phrase is edited or an arm
+        // succeeds — the 1 s tick must not erase the only failure explanation.
+        el.textContent = armRefusal; el.className = "pill badl";
+      } else {
+        el.textContent = "not armed"; el.className = "pill";
+      }
     }
-    $("gb-burnnow").disabled = !armed || !targetGoldilocks;
+    // Burn gating keys off the burn WINDOW verdict (window checks only) —
+    // EFP/WDATA_PLM read 0 outside a burn by design; SENSE_CTRL opens them.
+    $("gb-burnnow").disabled = !payloadChecked || !armed || !windowOk;
+    // Arm is gated on the selected GPU's Goldilocks state (same 4-check
+    // pure-read the server re-runs at arm time — state can change between
+    // poll and arm, so the server refusal text still surfaces below).
+    const ab = $("gb-arm");
+    ab.disabled = !gpuGoldilocks;
+    ab.title = gpuGoldilocks ? "" : "selected GPU not Goldilocks — glitch first";
   }
   setInterval(updateArmState, 1000);
 
+  // Truthful burn-window indicator: /api/live carries the read-only window
+  // verdict computed by the server poller (window_ok + window_checks).
+  async function pollWindow() {
+    try {
+      const j = await jget("/api/live");
+      if (j.window_ok !== undefined) windowOk = !!j.window_ok;
+      const el = $("gb-windowstate");
+      if (j.window_ok === undefined) {
+        el.textContent = "window: n/a"; el.className = "pill warnl";
+      } else if (windowOk) {
+        el.textContent = "● burn window open"; el.className = "pill okl";
+      } else {
+        const bad = (j.window_checks || []).filter(c => !c.ok)
+          .map(c => c.name).join(", ");
+        el.textContent = "burn window closed" + (bad ? " (" + bad + ")" : "");
+        el.className = "pill";
+      }
+    } catch (e) {}
+    updateArmState();
+  }
+  setInterval(pollWindow, 2000);
+  pollWindow();
+
   $("gb-arm").onclick = async () => {
-    const j = await jpost("/api/arm", {phrase: $("gb-armphrase").value});
+    const j = await jpost("/api/arm",
+                          {phrase: $("gb-armphrase").value, bdf: targetBdf});
     if (j.error) { const el = $("gb-armstate");
-      el.textContent = "⚠ " + j.error; el.className = "pill badl"; return; }
+      armRefusal = "⚠ " + j.error;
+      el.textContent = armRefusal; el.className = "pill badl"; return; }
     armToken = j.token; armExpiry = Date.now() + j.expires_in * 1000;
     updateArmState();
   };
+  $("gb-armphrase").oninput = () => { armRefusal = null; updateArmState(); };
 
   // ---- burn value source: typed hex, or grabbed from a dump row ----
   let payloadValue = null;        // set by the dump-row grab (verify target)
@@ -1089,12 +2122,133 @@ LIVEBOOT = r"""
     }
   }
   $("gb-srcmode").onchange = () => {
+    invalidateChecked();
     const dump = $("gb-srcmode").value === "dump";
     $("gb-dumpwrap").style.display = dump ? "" : "none";
     $("gb-typedwrap").style.display = dump ? "none" : "";
     renderSrcDecode();
   };
-  $("gb-srcrow").oninput = renderSrcDecode;
+  $("gb-srcrow").oninput = () => { invalidateChecked(); renderSrcDecode(); };
+  $("gb-value").oninput = invalidateChecked;
+  $("gb-mirror").onchange = invalidateChecked;
+
+  // ---- read-only burn preview: ga100_burn's default preview mode inside
+  // the UI. Works ANY time — CMD_READ is gated by FUSECTRL_PLM, not EFP —
+  // no window, no arm, no token, and the server path cannot write fuses.
+  let lastPreview = null;
+  function currentPayload() {
+    const fromDump = $("gb-srcmode").value === "dump";
+    return {row: +$("gb-row").value,
+            value: fromDump ? (payloadValue === null ? "" : "0x" + payloadValue.toString(16))
+                            : $("gb-value").value.trim(),
+            mirror: $("gb-mirror").checked};
+  }
+  function updatePreviewBtn() {   // enabled on row+value alone — no window/arm gate
+    const p = currentPayload();
+    let v = NaN;
+    try { v = parseInt(p.value, 0); } catch (e) {}
+    $("gb-preview").disabled = !(p.row >= 0 && p.row <= 487 &&
+                                 Number.isInteger(v) && v >= 0 && v <= 0xFFFFFFFF);
+  }
+  ["gb-row", "gb-value", "gb-srcrow"].forEach(id =>
+    $(id).addEventListener("input", updatePreviewBtn));
+  ["gb-srcmode", "gb-mirror"].forEach(id =>
+    $(id).addEventListener("change", updatePreviewBtn));
+  updatePreviewBtn();
+
+  function decodeSpan(d) {
+    if (!d) return `<span class="note">— not a live FF record</span>`;
+    return `<span class="mono">chain=${d.chain}${d.iff ? "·IFF" : ""} ` +
+      `block=${d.block} data=0x${d.data.toString(16).toUpperCase().padStart(4, "0")}</span>` +
+      (d.name ? ` <b class="ok">→ ${esc(d.name)}</b>` : "");
+  }
+  function bitStrip(v, delta) {   // delta bits highlighted amber
+    let h = "";
+    for (let i = 31; i >= 0; i--) {
+      const set = (v >>> i) & 1, d = (delta >>> i) & 1;
+      h += `<span class="bitcell${set ? " bitset" : ""}${d ? " dbit" : ""}" ` +
+           `title="bit ${i}${d ? " · delta (0→1)" : ""}">${i}</span>`;
+    }
+    return `<div class="bits">${h}</div>`;
+  }
+  function collisionBadge(c) {
+    return c.last_wins === "WILL WIN"
+      ? `<span class="pill okl">LAST-WINS: will win</span>`
+      : `<span class="pill badl">LAST-WINS: will ${esc(c.last_wins)}</span>`;
+  }
+  function previewHtml(j) {
+    const vcls = j.verdict === "SAFE TO BURN" ? "good"
+               : j.verdict === "ALREADY BURNED" ? "warnv" : "";
+    const rowsHtml = (j.rows || []).map(r =>
+      `<div style="margin-top:8px"><b class="mono">row ${r.row}</b> ` +
+      `<span class="pill${r.row_verdict === "SAFE TO BURN" ? " okl" : r.row_verdict === "ALREADY BURNED" ? " warnl" : " badl"}">${esc(r.row_verdict)}</span></div>` +
+      `<div class="mono">${fmt(r.before)} <b class="warn">Δ ${fmt(r.delta)}</b> → ${fmt(r.after)}</div>` +
+      bitStrip(r.after, r.delta) +
+      `<table><tr><th></th><th>word</th><th>FF decode</th></tr>` +
+      `<tr><td>before</td><td class="mono">${fmt(r.before)}</td><td>${decodeSpan(r.decode_before)}</td></tr>` +
+      `<tr><td>after</td><td class="mono">${fmt(r.after)}</td><td>${decodeSpan(r.decode_after)}</td></tr></table>`).join("");
+    const c = j.collisions || {};
+    const colHtml = `<div style="margin-top:10px"><b>collision scan · key ` +
+      `chain${c.key ? c.key.chain : "?"}·block${c.key ? c.key.block : "?"}` +
+      `${c.name ? " → " + esc(c.name) : ""}</b> ${collisionBadge(c)}` +
+      ((c.records || []).length
+        ? `<table><tr><th>row</th><th>word</th><th>decode</th></tr>` +
+          c.records.map(x => `<tr><td class="mono">${x.row}</td><td class="mono">${fmt(x.word)}</td><td>${decodeSpan(x.decode)}</td></tr>`).join("") + `</table>`
+        : c.own_row !== null && c.own_row !== undefined
+        ? `<div class="note">record already present at this row (row ${c.own_row}) — re-burn is a no-op/ALREADY path</div>`
+        : `<div class="note">no existing record with this key — the burn defines it</div>`) + `</div>`;
+    const hz = j.hazards || {};
+    const hzHtml = hz.skipped
+      ? `<div class="note" style="margin-top:8px">partial-landing hazards: skipped — ${esc(hz.skipped)}</div>`
+      : `<div style="margin-top:8px"><b>partial-landing hazards</b> ` +
+        `<span class="note">${(hz.hazards || []).length} hazard · ${hz.benign || 0} benign · ${hz.inert || 0} inert subset(s)</span>` +
+        (hz.hazards || []).map(x =>
+          `<div class="warn" style="margin-top:3px">⚠ ${x.row !== undefined && (j.rows || []).length > 1 ? `row ${x.row} ` : ""}partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
+          `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") + `</div>`;
+    const strip = `<div class="frow" style="margin-top:10px">` +
+      `<span class="pill ${j.window_ok ? "okl" : ""}">burn window ${j.window_ok ? "open" : "closed"} — not required for preview</span>` +
+      `<span class="pill warnl">arm pending — auto-armed at burn (SENSE_CTRL)</span>` +
+      `<span class="pill ${j.journal_uncertain ? "badl" : "okl"}">journal ${j.journal_uncertain ? "UNCERTAIN" : "clear"}</span></div>`;
+    return `<div class="verdict ${vcls}" style="padding:8px 12px;margin-top:8px">` +
+      `<b>${esc(j.verdict)} (preview)</b> — read-only, zero latching writes (row reads use the read command) · ` +
+      `${esc(j.bdf || "")} · ${esc(j.ts || "")}</div>` +
+      rowsHtml + colHtml + hzHtml +
+      (j.predicted ? `<div style="margin-top:8px"><b>predicted effect:</b> ${esc(j.predicted)}</div>` : "") +
+      strip;
+  }
+  $("gb-preview").onclick = async () => {
+    const p = currentPayload();
+    const res = $("gb-previewresult");
+    res.innerHTML = "previewing… (read-only — CMD_READ only, no window/arm needed)";
+    let j;
+    try { j = await jpost("/api/burn/preview", {...p, bdf: targetBdf || ""}); }
+    catch (e) { res.innerHTML = `<span class="bad">⚠ ${esc(String(e))}</span>`; return; }
+    if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; return; }
+    lastPreview = j;
+    res.innerHTML = previewHtml(j);
+  };
+
+  // predicted-vs-actual: preview after-word + collision verdict against
+  // the post-burn readback + post-burn last-wins scan; mismatch red.
+  function pvaRowHtml(name, predAfter, predWin, as) {
+    if (!as) return "";
+    const okRb = as.readback === predAfter, okWin = predWin === as.last_wins;
+    return `<tr><td>${esc(name)}</td>` +
+      `<td class="mono">${fmt(predAfter)}</td><td>${esc(predWin || "—")}</td>` +
+      `<td class="mono ${okRb ? "ok" : "bad"}">${fmt(as.readback)} ${okRb ? "✓" : "✗ MISMATCH"}</td>` +
+      `<td class="${okWin ? "ok" : "bad"}">${esc(as.last_wins)}${okWin ? " ✓" : " ✗ MISMATCH"}</td></tr>`;
+  }
+  function predictedVsActualHtml(j) {
+    if (!lastPreview || !j || !j.after_state) return "";
+    if (lastPreview.row !== j.row || lastPreview.value !== j.value) return "";
+    const pv = lastPreview.value >>> 0, pw = (lastPreview.collisions || {}).last_wins;
+    return `<div style="margin-top:8px"><b>Predicted vs Actual</b>` +
+      `<table><tr><th></th><th>predicted after</th><th>predicted last-wins</th>` +
+      `<th>actual readback</th><th>actual last-wins</th></tr>` +
+      pvaRowHtml("row " + j.row, pv, pw, j.after_state) +
+      (j.mirror ? pvaRowHtml("mirror row " + j.mirror.row, pv, pw, j.mirror.after_state) : "") +
+      `</table></div>`;
+  }
 
   $("gb-check").onclick = async () => {
     const row = +$("gb-row").value;
@@ -1103,45 +2257,89 @@ LIVEBOOT = r"""
     const mirror = $("gb-mirror").checked;
     const res = $("gb-checkresult");
     res.innerHTML = "checking…";
+    $("gb-editwarn").style.display = "none";
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
     payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
+    windowOk = !!j.window_ok;
+    updateArmState();   // re-evaluate Burn gating against the fresh check
+    // window checks are hard pass/fail; arm_pending bits open at burn time
+    // (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM) — amber.
     const guards = (j.guards || []).map(g =>
       `<div class="guardrow"><span class="gs ${g.ok ? "ok" : "bad"}">${g.ok ? "✓" : "✗"}</span>` +
       `<span>${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
       (g.want !== undefined ? ` (want ${typeof g.want === "number" ? fmt(g.want) : esc(String(g.want))})` : "") +
       `</span></div>`).join("");
+    const pending = (j.arm_pending || []).map(g =>
+      `<div class="guardrow"><span class="gs warn">•</span>` +
+      `<span class="warn">${esc(g.name)} = ${typeof g.value === "number" ? fmt(g.value) : esc(String(g.value))}` +
+      (g.want !== undefined ? ` (want ${typeof g.want === "number" ? fmt(g.want) : esc(String(g.want))})` : "") +
+      ` — ${esc(g.note || "auto-armed at burn (SENSE_CTRL)")}</span></div>`).join("");
     const pol = j.policy;
     const polBlock = pol ? `<div class="${pol.ok ? "ok" : "bad"}" style="margin-top:6px">` +
       `<b>placement policy: ${pol.ok ? "OK — row is in the safe burn zone" : "VIOLATION"}</b>` +
       (pol.issues || []).map(i => `<div>• ${esc(i)}</div>`).join("") + `</div>` : "";
     res.innerHTML =
+      `<div><b class="${j.window_ok ? "ok" : "bad"}">${j.window_ok ? "SAFE TO BURN" : "REFUSED"}</b> — ` +
+      `burn window ${j.window_ok ? "open" : "not open"} (verdict keys off the window checks, not EFP/WDATA_PLM)</div>` +
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
       polBlock +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
+      (pending ? `<div class="guardlist">${pending}</div>` : "") +
       (pol && !pol.ok ? "" : `<div class="note" style="margin-top:6px">${esc(j.note || "")}</div>`);
     loadLayout();   // budget may have changed
   };
 
+  // burn report: result line colored by outcome — VERIFY OK green,
+  // ALREADY BURNED amber (partial-run recovery, zero latching writes),
+  // ABORT /
+  // VERIFY FAIL / IMAGE VERIFY FAILED red. All server strings through esc().
+  function burnResultSpan(r) {
+    if (!r) return "";
+    const cls = r === "VERIFY OK" ? "ok"
+      : r === "ALREADY BURNED" ? "warn" : "bad";
+    return `<b class="${cls}">${esc(r)}</b>`;
+  }
+  function burnReportHtml(j) {
+    const m = j.mirror;
+    return `<div>burn result: ${burnResultSpan(j.result) || "—"}</div>` +
+      (m ? `<div>mirror result: ${burnResultSpan(m.result) || "—"}</div>` : "") +
+      `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
+  }
+
   $("gb-burnnow").onclick = async () => {
     if (!payloadChecked) { alert("Check the payload first"); return; }
-    if (!targetGoldilocks) { alert("Selected GPU is not in the Goldilocks state — " +
-      "run a glitch campaign first"); return; }
+    if (!windowOk) { alert("Burn window is not open — run a glitch campaign " +
+      "first (EFP/WDATA_PLM auto-arm at burn; the window itself must be open)"); return; }
     if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
-                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) + "?")) return;
-    const j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
-    $("gb-checkresult").innerHTML =
-      `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
+                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) +
+                 "?\nBurns are permanent OTP writes — a wrong burn can BRICK your " +
+                 "GPU permanently. Verify with Preview first. No responsibility " +
+                 "is accepted by the developer.")) return;
+    let j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
+    // journal uncertainty: an unresolved command_may_be_issued means a
+    // previous CMD_WRITE may have latched without readback — explicit
+    // user confirm required before proceeding (ack_uncertain).
+    if (j.journal_uncertain || (j.mirror && j.mirror.journal_uncertain)) {
+      if (confirm("UNCERTAIN BURN STATE — the burn journal has an unresolved " +
+                  "command_may_be_issued: a previous CMD_WRITE may have " +
+                  "latched without a readback. Inspect burn_journal.jsonl in " +
+                  "the state dir. Proceed anyway (ack_uncertain)?")) {
+        j = await jpost("/api/burn", {...payloadChecked, confirm: true,
+                                      token: armToken, ack_uncertain: true});
+      }
+    }
+    $("gb-checkresult").innerHTML = burnReportHtml(j) + predictedVsActualHtml(j);
     loadLayout();   // a burn changes the zone — refresh the map
   };
 
   // campaign
   function setCampaignUI(j) {
     $("gc-stop").disabled = !j.running;
-    $("gc-start").disabled = !!j.running;
+    $("gc-start").disabled = !!j.running || !portOk;
     $("gc-revert").disabled = !!j.running || !j.window_held;
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));
@@ -1155,6 +2353,8 @@ LIVEBOOT = r"""
       `<span class="pill">nack <b>${s.nack || 0}</b></span>` +
       `<span class="pill">dsov=0 <b>${s.dsov_zero || 0}</b></span>` +
       `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
+      (s.burn_aborts ? `<span class="pill warnl">burn aborts <b>${s.burn_aborts}</b> (not final — attempts keep firing)</span>` : "") +
+      (s.image_verify ? `<span class="pill badl">${esc(s.image_verify)} — window NOT held</span>` : "") +
       (j.window_held ? `<span class="pill okl">window HELD open — verify/burn now, then Revert VRM or cold-boot</span>` : "");
     if ((j.log || []).length) {
       const logEl = $("gc-log");
@@ -1177,21 +2377,41 @@ LIVEBOOT = r"""
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
       no_revert: $("gc-hold").value === "hold"};
     if (mode === "burn") {
-      if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
       if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
-      if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
-        alert("Burn payload was checked on " + payloadChecked.bdf +
-              " but the target is " + targetBdf + " — re-check first"); return;
+      let recs;
+      if (burnQueue.length) {
+        // queue mode: every queued record burns in ONE window (the service
+        // replays records[] in row order on the first Goldilocks hit)
+        recs = queueRecords();
+        if (!recs) return;
+      } else {
+        if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
+        if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
+          alert("Burn payload was checked on " + payloadChecked.bdf +
+                " but the target is " + targetBdf + " — re-check first"); return;
+        }
+        recs = [{row: payloadChecked.row, value: payloadChecked.value,
+                 old: payloadChecked.old, mirror: payloadChecked.mirror,
+                 bdf: targetBdf}];
       }
-      body.records = [{row: payloadChecked.row, value: payloadChecked.value,
-                       old: payloadChecked.old, mirror: payloadChecked.mirror,
-                       bdf: targetBdf}];
+      body.records = recs;
       body.token = armToken;
-      if (!confirm("Start glitching and BURN the payload on first Goldilocks?\n" +
-        "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
-        payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
-        "OTP burns are IRREVERSIBLE.")) return;
-    }
+      if (!confirm((burnQueue.length
+        ? `Start glitching and BURN ${recs.length} queued record(s) on first Goldilocks?\n` +
+          "target " + targetBdf + " — rows " + recs.map(r => r.row).join(", ") +
+          " (rows auto-assigned in the safe zone)\n"
+        : "Start glitching and BURN the payload on first Goldilocks?\n" +
+          "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
+          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n") +
+        "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
+        "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
+        "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
+        "permanently. Verify with Preview first. No responsibility is " +
+        "accepted by the developer.")) return;
+    } else if (!confirm("Start glitch campaign?\n" +
+        "the pico on port " + $("gc-port").value + " dips NVVDD on " +
+        (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
+        "each attempt reboots the GPU.")) return;
     const j = await jpost("/api/glitch/start", body);
     if (j.error) alert(j.error);
     pollGlitch();
@@ -1295,7 +2515,6 @@ LIVEBOOT = r"""
       </div>
       <div id="gmon" class="gmon-grid"></div>
     </div>
-    <div class="grid" id="gpu-cards" style="margin-top:12px"></div>
     <div class="card" style="margin-top:12px"><h3>PCIe link (lspci)</h3>
       <div id="gpu-link" class="mono note"></div></div>`;
   const GPU_LABELS = {"name": "GPU", "driver_version": "driver", "memory.total": "VRAM total",
@@ -1305,22 +2524,46 @@ LIVEBOOT = r"""
     "pcie.link.gen.current": "PCIe gen", "pcie.link.gen.max": "PCIe max gen",
     "clocks.sm": "SM MHz", "clocks.mem": "mem MHz", "pstate": "P-state"};
   async function renderGpu(pre) {
-    let j = pre;
-    if (!j) { try { j = await jget("/api/gpu"); } catch (e) { return; } }
-    const n = j.nvidia || {};
-    if (n.error) {
-      $("gpu-banner").innerHTML = `<b class="warn">nvidia-smi:</b> ` +
-        `<span class="mono">${esc(n.error)}</span>`;
-      $("gpu-cards").innerHTML = "";
-    } else {
-      $("gpu-banner").innerHTML = `<b class="ok">nvidia-smi online</b> — ` +
-        `updated <span class="mono">${esc(j.ts)}</span>`;
-      $("gpu-cards").innerHTML = Object.entries(GPU_LABELS)
-        .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
-        .map(([k, l]) => `<div class="card stat"><div class="k">${l}</div>` +
-          `<div class="v mono">${esc(n[k])}</div></div>`).join("");
+    // one section per GPU on the host; `pre` (from gmonTick) renders the
+    // selected card only, initial paint lists them all via /api/gpus/all
+    let list = null;
+    if (!pre) {
+      try { list = await jget("/api/gpus/all"); } catch (e) { return; }
     }
-    $("gpu-link").textContent = (j.link || []).join("\n") || "no link info";
+    const info = {};
+    if (list) for (const g of (list.gpus || [])) info[g.bdf] = g;
+    const bdfs = list ? Object.keys(info) : [pre.bdf || ""];
+    const results = await Promise.all(bdfs.map(async bdf => {
+      try { return await jget("/api/gpu" + (bdf ? "?bdf=" + encodeURIComponent(bdf) : "")); }
+      catch (e) { return { bdf, nvidia: { error: String(e) }, link: [], apps: [] }; }
+    }));
+    const sel = selBdf();
+    const target = sel || (list && list.default) || "";
+    $("gpu-banner").innerHTML = results.map(j => {
+      const n = j.nvidia || {}, bdf = j.bdf || "?";
+      const gi = info[bdf] || {};
+      const isSel = bdf === target;
+      const head = `<div class="flexline" style="margin:0 0 4px">` +
+        `<b class="mono">${esc(bdf)}</b>` +
+        (gi.ga100 ? ` <span class="tag">GA100 · fuse target</span>` : "") +
+        (isSel ? ` <span class="tag">selected</span>` : "") +
+        (n.error ? ` <span class="warn">nvidia-smi: ${esc(n.error)}</span>`
+                 : ` <span class="ok">${esc(n["name"] || gi.name || "GPU")}</span> ` +
+                   `<span class="note mono">updated ${esc(j.ts)}</span>`) +
+        (gi.driver ? ` <span class="note mono">driver=${esc(gi.driver)}</span>` : "") +
+        `</div>`;
+      const cards = n.error ? "" :
+        `<div class="grid" style="margin-bottom:8px">` +
+        Object.entries(GPU_LABELS)
+          .filter(([k]) => n[k] !== undefined && n[k] !== "[Not Supported]")
+          .map(([k, l]) => `<div class="card stat"><div class=\"k\">${l}</div>` +
+            `<div class=\"v mono\">${esc(n[k])}</div></div>`).join("") + `</div>`;
+      const link = (j.link || []).length
+        ? `<div class="mono note" style="margin-bottom:6px">${esc(j.link.join("\n"))}</div>` : "";
+      return `<div class="card" style="margin-bottom:10px">${head}${cards}${link}</div>`;
+    }).join("");
+    const cur = results.find(j => j.bdf === (sel || "")) || results[0] || {};
+    $("gpu-link").textContent = (cur.link || []).join("\n") || "no link info";
   }
   // ---- nvtop-style live monitor ----
   const gmonHist = [];
@@ -1409,7 +2652,7 @@ LIVEBOOT = r"""
   }
   async function gmonTick() {
     try {
-      const j = await jget("/api/gpu");
+      const j = await jget("/api/gpu" + bdfQs());
       renderGpu(j);
       const n = j.nvidia || {};
       const t = new Date().toTimeString().slice(0, 8);
@@ -1417,7 +2660,7 @@ LIVEBOOT = r"""
       else {
         const lim = gnum(n["power.limit"]) || 300;
         const tot = gnum(n["memory.total"]) || 81920;
-        gmonHist.unshift({t, name: n["name"],
+        gmonHist.unshift({t, name: (n["name"] || "GPU") + (j.bdf ? " · " + j.bdf : ""),
           temp: gnum(n["temperature.gpu"]), util: gnum(n["utilization.gpu"]),
           memu: gnum(n["utilization.memory"]), pw: gnum(n["power.draw"]),
           pwmax: lim, sm: gnum(n["clocks.sm"]), mc: gnum(n["clocks.mem"]),
@@ -1451,6 +2694,7 @@ LIVEBOOT = r"""
 
   const savedMs = +(localStorage.getItem("ga100.pollMs") || "0");
   document.getElementById("pollsel").value = String(savedMs);
+  populateGpuSel();
   fullDump().then(() => {
     fetchLive(true);
     if (savedMs > 0) heavyTimer = setInterval(() => fetchLive(true), savedMs);

@@ -87,8 +87,33 @@ SHADOW_REGS = {
     "STATUS_OPT_GPC":   0x820C1C,
     "STATUS_OPT_FBP":   0x820D38,
 }
-TPC_DISABLE_BASE = 0x820760   # 0x820760..0x82077C (TPC region)
-CTRL_TPC_BASE    = 0x820A40   # 0x820A40 + gpc*4, 8 GPCs
+# Per-GPC TPC masks: one word per GPC (8 GPCs), bit t = TPC t in that GPC,
+# bit SET = masked. GA100: 8 TPC per GPC, 2 SM per TPC.
+#   0x820760+gpc*4  TPC DEFECTIVE (fuse-derived dead silicon)
+#   0x820C38+gpc*4  effective TPC DISABLE (defective ⊆ disabled; the extra
+#                   bits are factory-disabled-but-healthy = unlock headroom)
+# REGRESSION 2026-11-19: this build relabelled 0x820760 as "the defective
+# array". It is not — kate-land's ga100-options table names it
+# TPC_GPC{n}_DISABLE (SKU floorsweep). Both 0x820760 and 0x820C38 are
+# runtime words inside the GPC power well: a floorswept GPC reads 0xFF in
+# both, so the apparent "defective ⊆ disable" relation was two mirrors of
+# the same power artifact agreeing. Consequence: a stock 170HX with three
+# gated GPCs counted 24 phantom dead TPCs and reported a 74-SM ceiling for
+# a die whose FF defect words say 126 (confirmed live: card unlocked to 126).
+# Ceiling MUST come from TPC_DEFECT_FF words.
+# Per-GPC TPC DEFECTIVE fuse readout — FF-region words (kate-land
+# ga100-options.json, the same table ffcalc uses; fleet-verified 13/13).
+# These stay correct for GPCs that are power-gated (floorswept) at dump
+# time, so the post-unlock ceiling is honest on stock SKU cards.
+TPC_DEFECT_FF = {0: 0x8205C8, 1: 0x820508, 2: 0x82050C, 3: 0x820514,
+                 4: 0x820564, 5: 0x8205AC, 6: 0x820B84, 7: 0x820B80}
+TPC_DEFECTIVE_BASE = 0x820508   # kept for symbol compat; prefer TPC_DEFECT_FF
+TPC_FFDIS_BASE     = 0x820760   # 0x820760..0x82077C SKU floorsweep disable
+TPC_DISABLE_BASE   = 0x820C38   # 0x820C38..0x820C54 runtime TPC mask
+CTRL_TPC_BASE      = 0x820A40   # 0x820A40 + gpc*4, 8 GPCs (closed at DSOV=1)
+
+TPCS_PER_GPC = 8
+SM_PER_TPC = 2
 
 HEX_WIN_START = 0x820000
 HEX_WIN_END   = 0x824400     # covers everything above incl. FPF_ROW_SHADOW
@@ -104,6 +129,81 @@ def bits(mask):
     return sorted(i for i in range(32) if (mask >> i) & 1)
 
 
+def tpc_summary(shadow, hexwin=None):
+    """Per-GPC TPC/SM availability from a shadow-register dict.
+
+    DEFECTIVE comes from the FF-region per-GPC words (TPC_DEFECT_FF) —
+    the only defect source that survives GPC power-gating, hence the only
+    correct ceiling source on stock floorswept cards. When `hexwin`
+    ([(addr, value), ...] hex window) is provided, the FF words are taken
+    from it directly: ground truth, and it retroactively repairs old dumps
+    whose TPC_DEFECTIVE_GPC keys were captured from the runtime word.
+
+    The runtime word (TPC_DISABLE_GPC{i}, 0x820C38) gives the live mask on
+    POWERED GPCs only; a floorswept GPC reads 0xFF there — a power-domain
+    artifact, never a defect count. 'sm_now' is therefore 0 for a
+    floorswept GPC, while its 'sm_max' stays (8 - FF-defective) * 2.
+    'recoverable' spans the whole gap to the ceiling, including the
+    full floorswept-but-healthy GPCs.
+    """
+    gpc_def = shadow.get("GPC_DEFECTIVE", 0) or 0
+    gpc_dis = shadow.get("GPC_DISABLE", 0) or 0
+    hwin = {a & 0xFFFFFFFF: v for a, v in (hexwin or [])}
+    gpcs, totals = [], {"sm_now": 0, "sm_max": 0, "sm_defective": 0,
+                        "sm_recoverable": 0, "tpc_defective": 0,
+                        "tpc_recoverable": 0, "have_data": False}
+    for g in range(8):
+        d = shadow.get(f"TPC_DEFECTIVE_GPC{g}")
+        if d is None:
+            d = shadow.get(f"TPC_DISABLE_{g}")   # legacy key = 0x820760 word
+        dis = shadow.get(f"TPC_DISABLE_GPC{g}")
+        if hwin:                                 # FF word is ground truth
+            d = hwin.get(TPC_DEFECT_FF[g], 0)
+            if dis is None:
+                dis = hwin.get(TPC_DISABLE_BASE + 4 * g, 0)
+        if d is None and dis is None:
+            gpcs.append({"gpc": g, "available": False})
+            continue
+        d = (d or 0) & 0xFF
+        dis = ((dis if dis is not None else d) or 0) & 0xFF
+        # Hardware can never run a defective TPC, even where the runtime
+        # mask doesn't cover it (observed on the A100-VBIOS bench card).
+        live = dis | d
+        gdead = (gpc_def >> g) & 1
+        gdis = (gpc_dis >> g) & 1
+        ndef = bin(d).count("1")
+        # Renderer mask: a floorswept GPC shows fully masked (it IS fully
+        # masked — the GPC itself is off; its runtime word's 0xFF is not
+        # informative, but "every healthy TPC in it is recoverable" is).
+        eff = 0xFF if gdis else live
+        ndis = bin(eff).count("1")
+        recov = 0 if gdead else ndis - ndef
+        tpc_now = 0 if gdis else TPCS_PER_GPC - bin(live).count("1")
+        tpc_max = 0 if gdead else TPCS_PER_GPC - ndef
+        sm_now = tpc_now * SM_PER_TPC
+        sm_max = tpc_max * SM_PER_TPC
+        gpcs.append({
+            "gpc": g, "available": True,
+            "def": d, "dis": dis, "eff": eff,   # raw masks (JS renderer reads these)
+            "defective_bits": bits(d), "disabled_bits": bits(eff),
+            "recoverable_bits": bits(eff & ~d),
+            "tpc_defective": ndef, "tpc_disabled": ndis,
+            "tpc_recoverable": recov, "tpc_now": tpc_now, "tpc_max": tpc_max,
+            "sm_now": sm_now, "sm_max": sm_max,
+            "sm_defective": ndef * SM_PER_TPC,
+            "gpc_defective": gdead, "gpc_disabled": gdis,
+        })
+        totals["have_data"] = True
+        totals["sm_now"] += sm_now
+        totals["sm_max"] += sm_max
+        totals["sm_defective"] += ndef * SM_PER_TPC
+        totals["sm_recoverable"] += recov * SM_PER_TPC
+        totals["tpc_defective"] += ndef
+        totals["tpc_recoverable"] += recov
+    return {"gpcs": gpcs, "totals": totals,
+            "tpcs_per_gpc": TPCS_PER_GPC, "sm_per_tpc": SM_PER_TPC}
+
+
 def sh(argv, timeout=15):
     """Run a command with an argv list (no shell) and return combined output."""
     try:
@@ -115,7 +215,8 @@ def sh(argv, timeout=15):
 
 
 def find_ga100s():
-    """Auto-detect GA100 CMP 170HX (10de:20c2 / 10de:2082)."""
+    """Auto-detect GA100 silicon: CMP 170HX (10de:20c2 / 10de:2082) and
+    A100 PCIe 80GB (10de:20b5) — same GA100 die, same fuse block."""
     primary = []
     for d in sorted(glob.glob("/sys/bus/pci/devices/*")):
         try:
@@ -125,7 +226,7 @@ def find_ga100s():
             continue
         if ven != "0x10de":
             continue
-        if dev.lower() in ("0x20c2", "0x2082"):
+        if dev.lower() in ("0x20c2", "0x2082", "0x20b5"):
             primary.append(os.path.basename(d))
     return primary
 
@@ -250,7 +351,9 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         for name, off in SHADOW_REGS.items():
             shadow[name] = bar.rd(off)
         for i in range(8):
-            shadow[f"TPC_DISABLE_{i}"] = bar.rd(TPC_DISABLE_BASE + 4 * i)
+            shadow[f"TPC_DEFECTIVE_GPC{i}"] = bar.rd(TPC_DEFECT_FF[i])
+            shadow[f"TPC_FFDISABLE_GPC{i}"] = bar.rd(TPC_FFDIS_BASE + 4 * i)
+            shadow[f"TPC_DISABLE_GPC{i}"] = bar.rd(TPC_DISABLE_BASE + 4 * i)
             shadow[f"CTRL_TPC_GPC{i}"] = bar.rd(CTRL_TPC_BASE + 4 * i)
         res["shadow"] = dict(shadow)
         for name in ("GPC_DISABLE", "GPC_DEFECTIVE", "FBP_DISABLE",
@@ -320,6 +423,12 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
             "live_mem_gb": (12 - len(bits(shadow.get("FBP_DISABLE", 0)))) * 8,
             "max_mem_gb": (12 - len(bits(shadow.get("FBP_DEFECTIVE", 0)))) * 8,
         }
+        res["tpc"] = tpc_summary(shadow, hexwin)
+        t = res["tpc"]["totals"]
+        log(f"  TPC/SM       defective {t['tpc_defective']} TPC "
+            f"({t['sm_defective']} SM) · recoverable {t['tpc_recoverable']} TPC "
+            f"({t['sm_recoverable']} SM) · SM now {t['sm_now']} → "
+            f"post-unlock ceiling {t['sm_max']}")
         fp_src = "".join(f"{shadow[k]:08x}" for k in
                          ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
                           "NVLINK_DEFECTIVE")) + str((sbfe or 0) & 1)
