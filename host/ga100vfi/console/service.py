@@ -2165,8 +2165,14 @@ def system_txt():
 
 
 SMI_FIELDS = ("index,name,serial,vbios_version,driver_version,compute_cap,"
-              "multiprocessor_count,clocks.sm,clocks.mem,power.limit,"
+              "clocks.sm,clocks.mem,power.limit,"
               "pcie.link.gen.current,pcie.link.width.current")
+
+# The SM-count field name is not in nvidia-smi's query vocabulary on any
+# driver (AI2, 620.70.06, 2026-11-22): the whole query errored on it.
+SMI_SM_NOTE = ("# SM count: see live_snapshot.json / interpretation.txt "
+               "(SM count is a CUDA/NVML attribute, not an nvidia-smi "
+               "query field)")
 
 
 def nvidia_smi_txt(bdfs):
@@ -2190,6 +2196,7 @@ def nvidia_smi_txt(bdfs):
         else:
             out.append(f"# {bdf}")
             out.append(res)
+    out.append(SMI_SM_NOTE)
     return ("\n".join(out) + "\n").encode()
 
 
