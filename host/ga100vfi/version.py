@@ -24,7 +24,7 @@ import re
 import subprocess
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 _PKG = Path(__file__).resolve().parent
 _FINGERPRINT_FILES = (_PKG / "version.py",

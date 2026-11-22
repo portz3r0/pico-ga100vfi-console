@@ -73,7 +73,11 @@ The live view of the card the service was started with.
   server-side BAR0 poller **pauses itself** (live indicator shows
   `⏸ driver bound`). Raw BAR0 reads against a GSP-driven card can wedge
   the GSP into a state only a full power-cycle recovers. Unload the
-  driver (Drivers tab) to resume live register viewing.
+  driver (Drivers tab) to resume live register viewing. The pause is not
+  a dead end: the paused banner explains it (fuse values only change via
+  burns/glitches — re-dump if anything changed) and offers **Capture
+  fuse dump (driver bound)**, a manual guarded capture (see
+  [Driver-bound guarded capture](#driver-bound-guarded-capture)).
 - **Live feed**: status + shadow register changes flash amber and land in
   the activity feed; you will see `DSOV` flip `1 → 0` the moment a
   glitch lands.
@@ -450,6 +454,44 @@ The check UI warns when a target row is outside that region — burning
 record-format values into the main array / FPF region is how cards get
 bricked.
 
+## Driver-bound guarded capture
+
+The live poll pauses while `nvidia` is bound, but fuse values still change
+under you (a burn elsewhere, a glitch). The paused banner therefore offers
+a manual **Capture fuse dump (driver bound)** — a guarded reader ported
+from the proven standalone collector (`ga100_dump.py`), which reads fuses
+with the driver bound by gating on hardware *state*, not driver presence.
+
+**Preflight conditions** (all read-only, shown before anything runs; the
+capture refuses with the specific failed condition + fix hint):
+
+| Condition | Expected | Fix hint when it fails |
+|---|---|---|
+| `PMC_BOOT_0` chip id | GA100 (`0x170`) | wrong card or BAR0 garbage |
+| `FUSECTRL_PLM` (`0x8200F8`) | `0xFFFFFFFF` | PLM locked — run the PLM unlock first |
+| `DEBUGCTRL` (`0x820060`) | `0` | controller debug/read mode nonzero — investigate first |
+| `SWIFF` (`0x820088`), `IFF_CTRL` (`0x820028`) | `0` | fuse loader transaction pending — wait/retry |
+| `FUSECTRL` state field | `4` (idle) | controller busy — wait, then retry |
+| `EN_SW_OVERRIDE` (`0x820040`) | `0` or `1` | software override set — physical reads need it disabled |
+| `FUSEADDR` (`0x820004`) | `< 512` | address counter out of range |
+
+**What the capture does** (shown in the consent panel; Confirm is enabled
+only when every condition passes): issues 512 fuse `CMD_READ`s ×2 passes
+(the two passes must agree), writes **only** `CTRL`/`ADDR`/`EN` — never
+PLM, SWIFF, GPIO or voltage — restores the controller's `ADDR`/`EN` in a
+`finally` block, snapshots the whole fuse aperture (`0x820000..0x826000`)
+before and after, and takes seconds. It refuses if the driver unbinds
+mid-flight or the host boot id changes.
+
+**UNVERIFIED semantics**: every result is labelled `UNVERIFIED (driver
+bound)` — in the result panel, in the saved `dump.json`
+(`"driver_bound": true, "verified": false`), and in the support bundle's
+`interpretation.txt`. The reads are the same physical path the
+driver-unbound dump uses, but they run with the driver loaded, so treat
+them as indicative until re-confirmed with the driver unbound. The saved
+dump lands in the normal dumps dir, so the Fuse Explorer, interpretation
+trace and support bundle all pick it up like any other dump.
+
 ## HTTP API (reference)
 
 | Method | Path | Purpose |
@@ -472,6 +514,8 @@ bricked.
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
 | GET | `/api/gpu` | nvidia-smi + lspci link state |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
+| GET | `/api/bound_dump/preflight` | driver-bound capture preflight (pure reads): `{conditions[], all_ok}`; each condition `{name, ok, value, expected, hint}`; `503 {"error": ...}` when BAR0 is unopenable; mock mode returns a synthetic `all_ok` block flagged `"mock": true` |
+| POST | `/api/bound_dump` | guarded capture with the driver **bound** (manual, consented): saves `dump.json` + `driver_bound: true` / `verified: false` markers into the dumps dir and returns the `tpc_summary` interpretation with `verified: false`; preflight refusal → `409` + `conditions` |
 | GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
@@ -549,8 +593,10 @@ machine. It contains, under `support/`:
   dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
   totals, per-GPC lines, ceilings, `crc_ok` and fingerprint are printed,
   together with which defect-word source actually fed the ceilings (FF
-  words from the hex window vs legacy shadow keys). A developer can
-  replay the exact numbers offline from the shipped `dump.json` alone.
+  words from the hex window vs legacy shadow keys). Driver-bound guarded
+  captures are additionally flagged `driver_bound: True — UNVERIFIED`. A
+  developer can replay the exact numbers offline from the shipped
+  `dump.json` alone.
 
 The bundle contains board serials and PCI info but **no credentials**.
 Attach it when reporting an issue — send it to the developers.

@@ -62,6 +62,13 @@ username and home paths are masked.*
   (v_dip/delay/pw),
   and can burn the checked payload in-process on the first Goldilocks
 - Campaigns refuse to start while a driver is bound to the card
+- Driver bound? The paused live view still offers a manual **Capture fuse
+  dump (driver bound)**: a read-only preflight (PLM open, loader idle,
+  controller idle, canonical read state) gates a consented 512-row
+  double-pass `CMD_READ` capture that writes only `CTRL`/`ADDR`/`EN` and
+  restores controller state — results are labelled **UNVERIFIED (driver
+  bound)** in the UI, the saved dump and the support bundle
+  ([docs/CONSOLE.md](docs/CONSOLE.md#driver-bound-guarded-capture))
 - One-click **Support bundle** download: console logs + newest dumps + a
   deterministic interpretation trace as one `tar.gz`, ready to attach to a
   bug report. The bundle self-identifies its build (tool version +

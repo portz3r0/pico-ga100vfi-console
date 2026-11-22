@@ -1396,6 +1396,7 @@ LIVEBAR = """
         monitor keep refreshing on their own.</span>
     </div>
     <div class="card verdict warnv" id="live-follow" style="display:none;margin-top:8px"></div>
+    <div class="card verdict warnv" id="boundpanel" style="display:none;margin-top:8px"></div>
     <div id="feed" class="mono" aria-live="polite"></div>
   </div>
 """
@@ -1472,7 +1473,8 @@ LIVEBOOT = r"""
       const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       followNote("live-follow", j.default_note);
-      if (j.paused) { note("⏸ " + j.paused, "warnl"); return; }
+      if (j.paused) { note("⏸ " + j.paused, "warnl"); boundPanel(j); return; }
+      boundHide();
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       D.status = j.status; D.shadow = j.shadow;
       if (j.tpc !== undefined) D.tpc = j.tpc;
@@ -1501,6 +1503,92 @@ LIVEBOOT = r"""
     finally { b.disabled = false; }
   }
   document.getElementById("fulldump").onclick = fullDump;
+
+  // ---- driver-bound guarded capture (paused live view is not a dead end) ----
+  const BOUND_ACTIONS = "Issues 512 fuse CMD_READs x2 passes; writes ONLY " +
+    "CTRL/ADDR/EN (never PLM, SWIFF, GPIO, voltage); restores controller " +
+    "state; takes seconds; small residual risk while the driver is loaded — " +
+    "do not run while a glitch tool is driving the card.";
+  function fmtAge(s) {
+    if (s < 90) return Math.round(s) + "s";
+    if (s < 5400) return Math.round(s / 60) + " min";
+    if (s < 172800) return (s / 3600).toFixed(1) + " h";
+    return (s / 86400).toFixed(1) + " days";
+  }
+  function boundHide() {
+    const el = document.getElementById("boundpanel");
+    if (el) { el.style.display = "none"; el.dataset.bound = "0"; }
+  }
+  function boundPanel(j) {
+    const el = document.getElementById("boundpanel");
+    if (!el) return;
+    if (!j.manual_dump_available) { boundHide(); return; }
+    if (el.dataset.bound === "1") return;   // keep an open panel across polls
+    el.dataset.bound = "1";
+    const age = (j.last_dump_age_s === null || j.last_dump_age_s === undefined)
+      ? "no complete dump saved yet"
+      : "last complete dump " + fmtAge(j.last_dump_age_s) + " ago";
+    el.innerHTML = `<div><b>${esc(j.paused || "")}</b></div>` +
+      `<div class="note" style="margin-top:4px">${esc(j.paused_hint || "")}</div>` +
+      `<div class="note">${esc(age)}.</div>` +
+      `<div style="margin-top:6px"><button class="btn" id="boundcap">` +
+      `Capture fuse dump (driver bound)</button></div>` +
+      `<div id="boundconsent" style="display:none;margin-top:8px"></div>` +
+      `<div id="boundresult" style="display:none;margin-top:8px"></div>`;
+    el.style.display = "";
+    document.getElementById("boundcap").onclick = boundConsent;
+  }
+  function condLines(conds, onlyFailed) {
+    return (conds || []).filter(c => !onlyFailed || !c.ok).map(c =>
+      `<div>${c.ok ? "✅" : "❌"} <b>${esc(c.name)}</b> — read ${esc(String(c.value))}, ` +
+      `expected ${esc(String(c.expected))}` +
+      (c.ok || !c.hint ? "" : ` <span class="note">→ ${esc(c.hint)}</span>`) +
+      `</div>`).join("");
+  }
+  async function boundConsent() {
+    const c = document.getElementById("boundconsent");
+    c.style.display = ""; c.innerHTML = "checking conditions (read-only)…";
+    let j;
+    try { j = await (await fetch("/api/bound_dump/preflight", { cache: "no-store" })).json(); }
+    catch (e) { c.innerHTML = "⚠ preflight unreachable: " + esc(String(e)); return; }
+    if (j.error) { c.innerHTML = "⚠ " + esc(j.error); return; }
+    c.innerHTML = `<div class="note">Conditions this capture checks` +
+      (j.mock ? " <b>(mock)</b>" : "") + `:</div>` + condLines(j.conditions, false) +
+      `<div class="note" style="margin-top:6px">What it does:</div>` +
+      `<div class="note">${esc(BOUND_ACTIONS)}</div>` +
+      `<div style="margin-top:6px"><button class="btn" id="boundgo"` +
+      (j.all_ok ? "" : " disabled") + `>Capture now</button>` +
+      (j.all_ok ? "" : ` <span class="note">fix the failed conditions first</span>`) +
+      `</div>`;
+    if (j.all_ok) document.getElementById("boundgo").onclick = boundRun;
+  }
+  async function boundRun() {
+    const b = document.getElementById("boundgo");
+    const r = document.getElementById("boundresult");
+    b.disabled = true;
+    r.style.display = ""; r.innerHTML = "capturing… (512 rows ×2 passes, takes seconds)";
+    try {
+      const res = await fetch("/api/bound_dump", { method: "POST" });
+      const j = await res.json();
+      if (j.error) {
+        r.innerHTML = `<span class="pill badl"><b>FAILED</b></span> ` + esc(j.error) +
+          (j.conditions ? `<div style="margin-top:4px">${condLines(j.conditions, true)}</div>` : "");
+        return;
+      }
+      const tot = (j.totals || {});
+      const gpcs = ((j.tpc || {}).gpcs || []).map(g => g.available
+        ? `gpc${g.gpc}: sm_now=${g.sm_now} ceiling=${g.sm_max} ` +
+          `tpc_defective=${g.tpc_defective} tpc_recoverable=${g.tpc_recoverable}`
+        : `gpc${g.gpc}: no data`).join("<br>");
+      r.innerHTML = `<span class="pill badl"><b>UNVERIFIED (driver bound)</b></span> ` +
+        `<span class="pill">SM now: <b>${tot.sm_now}</b></span>` +
+        `<span class="pill okl">fuse ceiling: <b>${tot.sm_max}</b> SM</span>` +
+        `<div class="mono" style="margin-top:6px">${gpcs}</div>` +
+        `<div class="note">saved ${esc(j.saved || "")} · double-pass agree: ` +
+        (j.passes_agree ? "yes" : "NO") + `</div>`;
+    } catch (e) { r.innerHTML = "⚠ capture failed: " + esc(String(e)); }
+    finally { b.disabled = false; }
+  }
   let heavyTimer = null;
   document.getElementById("pollsel").onchange = e => {
     if (heavyTimer) { clearInterval(heavyTimer); heavyTimer = null; }

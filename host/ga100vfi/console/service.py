@@ -21,6 +21,12 @@ Endpoints:
   GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
   GET  /api/gpus/all     every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF
   GET  /api/gpu            nvidia-smi + lspci link state (?bdf= any GPU on the host)
+  GET  /api/bound_dump/preflight  driver-bound capture: read-only condition
+                           check -> {conditions[], all_ok}; 503 if BAR0 unopenable
+  POST /api/bound_dump     guarded capture with the driver BOUND (manual,
+                           consented): saves dump.json + driver_bound marker,
+                           returns tpc interpretation with verified=false;
+                           409 + conditions when preflight refuses
   GET  /api/support_bundle tar.gz: console logs + newest dumps + live snapshot
                            + lspci/dmesg + nvidia-smi snapshot +
                            interpretation trace (pure reads;
@@ -53,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import io
 import json
 import mmap
@@ -74,6 +81,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .. import fusedump as fd
+from .. import guarded as gd
 from ..bar0 import Bar0, brd_serial
 from ..version import version_info
 from .gui import STUB, build_html, load_dump
@@ -221,6 +229,7 @@ def poller(interval):
                                             f"Unload nvidia stack to resume)",
                                    "driver": drv, "bdf": bdf,
                                    "ts": datetime.now().isoformat(timespec="seconds")}
+                            enrich_paused(snap)
                         else:
                             snap = probe(bdf)
                 except Exception as e:
@@ -249,6 +258,136 @@ def parse_hexwindow(hw):
 
 def dumps_dir():
     return os.path.join(CFG["state_dir"], "dumps")
+
+
+# ------------------------------------------------- driver-bound guarded dump
+PAUSED_HINT = ("live view paused: the nvidia driver is bound and raw BAR0 "
+               "reads can wedge GSP. Fuse values only change via burns or "
+               "glitches — if anything changed since the last dump, take a "
+               "manual fuse dump. A manual guarded capture is available "
+               "(button below); its results are UNVERIFIED while the "
+               "driver is loaded.")
+
+
+def last_dump_age_s():
+    """Age in seconds of the newest complete dump (a dir holding a
+    dump.json), or None when the state dir has none."""
+    dirs = _bundle_dump_dirs()
+    if not dirs:
+        return None
+    try:
+        return round(time.time() - os.path.getmtime(
+            os.path.join(dirs[-1], "dump.json")), 1)
+    except OSError:
+        return None
+
+
+def enrich_paused(snap):
+    """A paused /api/live snapshot must explain itself and point at the
+    manual guarded capture (the pause is not a dead end)."""
+    if snap.get("paused"):
+        snap["manual_dump_available"] = True
+        snap["paused_hint"] = PAUSED_HINT
+        snap["last_dump_age_s"] = last_dump_age_s()
+    return snap
+
+
+def bound_dump_preflight():
+    """GET /api/bound_dump/preflight — read-only condition check.
+    Returns (http_code, payload)."""
+    if CFG["mock"]:
+        return 200, {"mock": True, "all_ok": True, "conditions": [
+            {"name": c[0], "ok": True, "value": c[1], "expected": c[2],
+             "hint": ""} for c in (
+                ("PMC_BOOT_0 is GA100", "0x001700a1", "chip id 0x170"),
+                ("FUSECTRL_PLM open (host read access)", "0xffffffff", "0xFFFFFFFF"),
+                ("DEBUGCTRL zero", "0x00000000", "0x0"),
+                ("SWIFF zero", "0x00000000", "0x0"),
+                ("IFF_CTRL zero", "0x00000000", "0x0"),
+                ("FUSECTRL idle", "0x00040000", "state 4 (idle)"),
+                ("EN_SW_OVERRIDE canonical", "0x00000000", "0x0 or 0x1"),
+                ("FUSEADDR canonical", "0x00000000", "< 512"))]}
+    bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    try:
+        with gd.Bar(bdf) as bar:
+            conds = gd.preflight(bar)
+    except Exception as e:      # BAR0 unopenable (or gd.CaptureError)
+        return 503, {"error": f"BAR0 unopenable on {bdf}: {e}"}
+    return 200, {"conditions": conds,
+                 "all_ok": all(c["ok"] for c in conds)}
+
+
+def _bound_shadow_regs(regs):
+    """Shadow/FF register view of a guarded regs dict, shaped like probe()'s
+    shadow so fusedump.tpc_summary runs unchanged over it."""
+    shadow = {name: regs.get(off) for name, off in fd.SHADOW_REGS.items()}
+    for i in range(8):
+        shadow[f"TPC_DEFECTIVE_GPC{i}"] = regs.get(fd.TPC_DEFECT_FF[i])
+        shadow[f"TPC_FFDISABLE_GPC{i}"] = regs.get(fd.TPC_FFDIS_BASE + 4 * i)
+        shadow[f"TPC_DISABLE_GPC{i}"] = regs.get(fd.TPC_DISABLE_BASE + 4 * i)
+        shadow[f"CTRL_TPC_GPC{i}"] = regs.get(fd.CTRL_TPC_BASE + 4 * i)
+    return shadow
+
+
+def bound_dump_api():
+    """POST /api/bound_dump — guarded capture under card_lock, saved as a
+    normal dump.json (interpretation + support bundle pick it up) with a
+    driver_bound marker. Returns (http_code, payload); 409 on preflight
+    refusal."""
+    if CFG["mock"]:
+        return 200, {"error": "bound dump needs a live card — run the "
+                              "console without --mock"}
+    bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    if not card_lock.acquire(timeout=1.0):
+        return 200, {"error": "card busy (campaign or dump in progress)"}
+    try:
+        res = gd.guarded_capture(bdf)
+        if "error" in res:
+            if res.get("conditions"):
+                return 409, res
+            return 200, res
+        regs = {int(k, 16): v for k, v in res["regs"]["after"].items()}
+        shadow = _bound_shadow_regs(regs)
+        hexnonzero = [[a, v] for a, v in sorted(regs.items())
+                      if v and gd.FUSE_BASE <= a < gd.FUSE_BASE + gd.FUSE_SIZE]
+        tpc = fd.tpc_summary(shadow, hexnonzero)
+        d = {"bdf": bdf, "started": res["ts"],
+             "finished": datetime.now().isoformat(),
+             "driver": driver_of(bdf), "driver_bound": True,
+             "verified": False,
+             "rows": {str(i): v for i, v in enumerate(res["rows"])},
+             "row_count": len(res["rows"]),
+             "passes_agree": res["passes_agree"],
+             "regs": res["regs"],
+             "shadow": shadow, "hexnonzero": hexnonzero,
+             "ceilings": {
+                 "live_gpc": 8 - len(fd.bits(shadow.get("GPC_DISABLE", 0))),
+                 "max_gpc": 8 - len(fd.bits(shadow.get("GPC_DEFECTIVE", 0))),
+                 "live_fbp": 12 - len(fd.bits(shadow.get("FBP_DISABLE", 0))),
+                 "max_fbp": 12 - len(fd.bits(shadow.get("FBP_DEFECTIVE", 0))),
+                 "live_mem_gb": (12 - len(fd.bits(shadow.get("FBP_DISABLE", 0)))) * 8,
+                 "max_mem_gb": (12 - len(fd.bits(shadow.get("FBP_DEFECTIVE", 0)))) * 8,
+             },
+             "tpc": tpc}
+        crc = regs.get(fd.CRC_STATUS)
+        if isinstance(crc, int):
+            d["crc_ok"] = (crc & 0xFF) == 0x55
+        fp_src = "".join(f"{shadow[k] or 0:08x}" for k in
+                         ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
+                          "NVLINK_DEFECTIVE")) + str((regs.get(fd.SBFE) or 0) & 1)
+        d["fingerprint"] = hashlib.sha256(fp_src.encode()).hexdigest()[:16]
+        out = os.path.join(dumps_dir(), bdf if bdf != CFG["bdf"] else "",
+                           datetime.now().strftime("%Y%m%d-%H%M%S-bound"))
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "dump.json"), "w") as f:
+            json.dump(d, f, default=str)
+        return 200, {"saved": out, "bdf": bdf, "ts": res["ts"],
+                     "driver_bound": True, "verified": False,
+                     "passes_agree": res["passes_agree"],
+                     "tpc": tpc, "totals": tpc["totals"],
+                     "ceilings": d["ceilings"]}
+    finally:
+        card_lock.release()
 
 
 def full_dump(bdf=None):
@@ -2025,7 +2164,7 @@ def live_snapshot():
     with state_lock:
         snap = dict(STATE)
     if snap.get("paused"):
-        return snap
+        return enrich_paused(snap)
     if "error" in snap or snap.get("status") is None:
         err = {"error": snap.get("error", "no probe yet")}
         if snap.get("default_note"):
@@ -2083,6 +2222,10 @@ def interpretation_txt(dumps):
         tot = t["totals"]
         L.append(f"=== {member} ===")
         L.append(f"bdf: {d.get('bdf')}  started: {d.get('started')}")
+        if d.get("driver_bound"):
+            L.append("driver_bound: True — UNVERIFIED (driver-bound guarded "
+                     "capture; passes_agree: "
+                     f"{d.get('passes_agree')})")
         L.append(f"defect source: {src}")
         L.append(f"totals: sm_now={tot['sm_now']} sm_max={tot['sm_max']} "
                  f"sm_defective={tot['sm_defective']} "
@@ -2358,6 +2501,7 @@ class Handler(BaseHTTPRequestHandler):
                                     f"Unload nvidia stack to resume)",
                                     "driver": drv, "bdf": bdf,
                                     "ts": datetime.now().isoformat(timespec="seconds")}
+                            enrich_paused(snap)
                         else:
                             snap = probe(bdf)
                     except Exception as e:
@@ -2414,6 +2558,10 @@ class Handler(BaseHTTPRequestHandler):
                     {"tail": dmesg_tail(),
                      "ts": datetime.now().isoformat(timespec="seconds")},
                     default=str), "application/json")
+            elif path == "/api/bound_dump/preflight":
+                code, payload = bound_dump_preflight()
+                self._send(code, json.dumps(payload, default=str),
+                           "application/json")
             elif path == "/api/support_bundle":
                 # built fully in memory first — a failure raises and the
                 # generic handler below sends 500 + JSON, never a partial file
@@ -2462,6 +2610,10 @@ class Handler(BaseHTTPRequestHandler):
                 resp = arm_api(body)
             elif path == "/api/driver/op":
                 resp = driver_op_api(body)
+            elif path == "/api/bound_dump":
+                code, resp = bound_dump_api()
+                return self._send(code, json.dumps(resp, default=str),
+                                  "application/json")
             else:
                 resp = {"error": "not found"}
             self._send(200, json.dumps(resp, default=str), "application/json")
