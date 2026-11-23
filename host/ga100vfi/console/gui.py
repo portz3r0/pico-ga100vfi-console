@@ -100,14 +100,20 @@ HTML = r"""<!DOCTYPE html>
   .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace; font-size: 12px; }
 
-  /* Frozen header: topbar + tab bar stay selectable at every scroll
-     position. ONE sticky element (not topbar and tabs separately) so no
-     magic pixel offsets are needed when the topbar wraps taller on narrow
-     screens. --sticktop (default 0px) is maintained by a ResizeObserver in
-     the boot section so the sticky #livebar parks below it, never over it.
-     No overflow here: it must not clip the .tab.on underline or the
-     :focus-visible ring. */
+  /* Frozen header: the topbar stays selectable at every scroll position.
+     ONE sticky element so no magic pixel offsets are needed when the topbar
+     wraps taller on narrow screens. --sticktop (default 0px) is maintained
+     by a ResizeObserver in the boot section so the sticky #livebar and the
+     sticky tab rail park below it, never over it.
+     No overflow here: it must not clip the :focus-visible ring. */
   .sticktop { position: sticky; top: 0; z-index: 30; background: var(--bg); }
+
+  /* Two-column page: vertical tab rail on the left, panes on the right.
+     align-items:flex-start so the rail's sticky offset is measured against
+     the row, not a stretched full-height column. */
+  .layout { display: flex; align-items: flex-start; gap: 18px; }
+  .content { flex: 1 1 auto; min-width: 0; } /* min-width:0: wide tables/pre
+     blocks must not blow out the flex row */
 
   /* top bar */
   .topbar { display: flex; justify-content: space-between; align-items: flex-end;
@@ -348,17 +354,39 @@ HTML = r"""<!DOCTYPE html>
   table.nvproc td { padding: 3px 8px; border-bottom: 1px solid var(--border-soft); }
   .gmon-err { color: #f87171; padding: 10px; }
 
-  /* tabs + control panels */
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border);
-          margin-bottom: 14px; }
-  .tab { background: none; border: none; color: var(--muted-foreground);
-         padding: 9px 15px 8px; font-size: 13px; font-weight: 500; cursor: pointer;
-         border-bottom: 2px solid transparent; margin-bottom: -1px;
-         border-radius: 6px 6px 0 0; transition: color .15s, background .15s; }
+  /* tabs + control panels — vertical left rail; the active marker is a
+     LEFT border, not the old bottom underline. */
+  .tabs { display: flex; flex-direction: column; align-items: stretch;
+          gap: 2px; width: 190px; flex: 0 0 190px;
+          position: sticky; top: var(--sticktop, 0px);
+          max-height: calc(100vh - var(--sticktop, 0px) - 16px);
+          overflow-y: auto; z-index: 15; padding: 6px 0; }
+  .tab { background: none; border: none; text-align: left;
+         color: var(--muted-foreground);
+         padding: 8px 12px; min-height: 34px; font-size: 13px; font-weight: 500;
+         cursor: pointer;
+         border-left: 2px solid transparent;
+         border-radius: 0 6px 6px 0; transition: color .15s, background .15s; }
   .tab:hover { color: var(--foreground); background: rgba(76,194,255,.05); }
-  .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab.on { color: var(--accent); border-left-color: var(--accent); }
   .tabpane { display: none; }
   .tabpane.on { display: block; }
+
+  /* Narrow screens: rail collapses back to a horizontal sticky tab row with
+     the bottom-border active indicator. */
+  @media (max-width: 860px) {
+    .layout { flex-direction: column; }
+    .tabs { flex-direction: row; width: auto; flex: none;
+            position: sticky; top: var(--sticktop, 0px); z-index: 15;
+            overflow-x: auto; background: var(--bg);
+            border-bottom: 1px solid var(--border); margin-bottom: 14px;
+            max-height: none; padding: 0; }
+    .tab { text-align: center; padding: 9px 15px 8px; min-height: 0;
+           border-left: none; border-bottom: 2px solid transparent;
+           margin-bottom: -1px; border-radius: 6px 6px 0 0; }
+    .tab.on { border-left-color: transparent;
+              border-bottom-color: var(--accent); }
+  }
 
   /* B14: one visible keyboard-focus ring on the dark theme (UA default is
      rgb(16,16,16) on #0d1117 — invisible). B16: active row of the roving
@@ -437,6 +465,9 @@ HTML = r"""<!DOCTYPE html>
       <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
     </div>
   </header>
+  </div>
+__LIVEBAR__
+  <div class="layout">
   <nav class="tabs" role="tablist" aria-label="console views">
     <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"
             aria-selected="true" tabindex="0" data-tab="explorer">Fuse Explorer</button>
@@ -447,8 +478,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab" role="tab" id="tabbtn-gpu" aria-controls="tab-gpu"
             aria-selected="false" tabindex="-1" data-tab="gpu">GPU Info</button>
   </nav>
-  </div>
-__LIVEBAR__
+  <main class="content">
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <h2>Status</h2>
   <div class="grid" id="status"></div>
@@ -507,6 +537,8 @@ __LIVEBAR__
   <section id="tab-gpu" class="tabpane" role="tabpanel" aria-labelledby="tabbtn-gpu">
     <div class="card"><div class="note">GPU info is available in live mode.</div></div>
   </section>
+  </main>
+  </div>
 
   <div id="auditbg" role="dialog" aria-modal="true" aria-label="unit audit"><div id="audit"></div></div>
 
