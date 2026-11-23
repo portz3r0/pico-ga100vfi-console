@@ -295,7 +295,15 @@ burn-on-goldilocks mode creates that state on the selected GPU.
 - **Suggested burns — minimum common unlock**: derived from **this card's
   own defect masks** in the loaded dump — every disabled-but-healthy unit
   re-enabled in one pass: GPC 1 word + FBP 1 word + FBPA 2 words = 4
-  words. **⤓ Queue all needed records** puts them in the queue; already
+  words. Each word is labeled **PROPOSED** and names its **concrete
+  target row** (`row N → 0x…`, plus `+ mirror row N+1` when mirroring is
+  on), computed by the SAME `assignRows` allocator the burn queue uses,
+  run over the current queue plus these records in queue order and the
+  mirror setting **⤓ Queue all needed records** will read — so the rows
+  shown ARE the rows the queue assigns (proposal == queue by
+  construction; no free-row fallback: if the safe zone runs out the word
+  shows `no free row in burn zone`). **⤓ Queue all needed records** puts
+  them in the queue; already
   equal masks report *this card needs no unlock burns*; a word already
   present in the dump is tagged `ALREADY IN DUMP — row N`. An optional
   **DEVID change** adds an identity A/B pair via **+ Queue DEVID A/B pair**
@@ -303,6 +311,32 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   foreign demo value — it holds the loaded dump's own DEVID (decoded from
   its DEVIDA/B records, chain 2 block 37/38) when the card carries one,
   and starts empty with a placeholder otherwise.
+- **Advanced unlocks — optional, from bench burn history**: permanent
+  unlocks **actually burned on the bench cards GPU1/GPU2**, decoded from
+  their executed signed plans (`~/nvidia/GPU1/razk-batch1.bin`,
+  `~/nvidia/GPU2/razk-batch2.bin`). Single source:
+  `host/ga100vfi/advanced_unlocks.py` (`ADVANCED_UNLOCKS`), embedded into
+  the page by `build_html` (`__ADVANCED__`). Items: **PCIe Gen4
+  permanent**, **PLM unlock**, **Compute unlock (full floorsweep +
+  SS0/SS1)**. Each item shows its FF word(s) with chain/block/field
+  decode, the bench **provenance** (which card, plan, plan timestamp),
+  and a **confidence badge**: VERIFIED = field mapping documented in the
+  repo's evidence files or the GA100 hwref; UNVERIFIED = attribution
+  inferred, unresolved. These are **IRREVERSIBLE OTP writes and are NOT
+  derived from the shown card's defect masks** — the data words carry the
+  **bench card's** defect masks (GPU1 and GPU2 differ per-die at chain-1
+  blocks 8/12/15/16/17/23), so they must be checked against the shown
+  card before burning. FF steps show PROPOSED target rows through the
+  same `assignRows` allocator over the current queue plus the item's
+  steps (re-placed on the shown card — the plans' bench rows are shown
+  as provenance only, never as targets), and **+ queue** enqueues
+  exactly the item's FF words at those rows. Steps outside the queue's
+  path are flagged **MANUAL**: DIRECT rows (<222, plain OTP words, not
+  FF records) and IFF words (bit 5 set — refused by the placement
+  policy), because `burn_execute` accepts FF records at rows 222–487
+  only; an item with no FF steps shows *no queueable FF records —
+  manual burn path only*. Decode + attribution reasoning:
+  `evidence/30-advanced-unlocks.md`.
 - **Burn queue**: all queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement

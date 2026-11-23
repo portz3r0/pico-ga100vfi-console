@@ -16,6 +16,8 @@ import os
 import re
 import sys
 
+from ..advanced_unlocks import ADVANCED_UNLOCKS
+
 STUB = {
     "live": True, "bdf": "?", "started": "?", "vendor": "0x10de", "device": "0x20c2",
     "revision": "?", "driver": "?", "fingerprint": "—", "row_count": 0,
@@ -594,9 +596,14 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <script id="dumpdata" type="application/json">__PAYLOAD__</script>
+<script id="advanceddata" type="application/json">__ADVANCED__</script>
 <script>
 "use strict";
 let D = JSON.parse(document.getElementById("dumpdata").textContent);
+// task 30: optional advanced unlocks decoded from the bench cards' executed
+// signed plans — single source host/ga100vfi/advanced_unlocks.py, embedded
+// by build_html (see the Advanced unlocks card in the Glitch & Burn tab).
+const ADVANCED = JSON.parse(document.getElementById("advanceddata").textContent);
 // pristine copy of the server seed (the current card's own dump, or the
 // empty STUB) — "Back to current" restores the default face from it.
 const SEED = JSON.parse(document.getElementById("dumpdata").textContent);
@@ -2151,6 +2158,21 @@ LIVEBOOT = r"""
         <span class="note" id="plan-devid-note"></span>
       </div>
     </div>
+    <div class="card" id="gb-advanced" style="margin-top:12px">
+      <h3>Advanced unlocks — optional, from bench burn history</h3>
+      <div class="note" style="margin-bottom:8px">Permanent unlocks
+      <b>actually burned on bench cards GPU1/GPU2</b> (decoded from their
+      signed plans). <b class="warn">Irreversible OTP writes — NOT derived
+      from this card's defect masks:</b> the data words carry the bench
+      cards' defect masks; check them against this card before burning.
+      PROPOSED rows are placement candidates from the same allocator the
+      queue uses. DIRECT rows (&lt;222) and IFF words (bit 5 set) are
+      outside the queue's FF-record path (burn accepts FF records at rows
+      222–487 only) — <b>manual burn path</b>. Confidence: VERIFIED =
+      field mapping documented in repo evidence / GA100 hwref; UNVERIFIED
+      = attribution inferred, unresolved.</div>
+      <div id="adv-rows"></div>
+    </div>
     <div class="card" id="gb-queue" style="margin-top:12px">
       <h3>Burn queue <span class="note">(all of these burn in one Goldilocks window)</span></h3>
       <div id="queue-rows" class="queue-rows"></div>
@@ -2308,6 +2330,15 @@ LIVEBOOT = r"""
     const el = document.getElementById("plan-rows");
     if (!D.shadow) { el.innerHTML = `<span class="note">load a dump first</span>`; return; }
     const plan = suggestPlan();
+    // task 30: name the concrete target rows through the SAME allocator the
+    // queue uses — over the current queue plus these records in queue order
+    // and the mirror setting "Queue all" will read — so the rows shown ARE
+    // the rows the queue will assign (proposal == queue by construction).
+    const mirror = document.getElementById("gb-mirror").checked;
+    const entries = burnQueue.map(q => ({mirror: !!q.mirror, customRow: q.customRow}));
+    for (const p of plan) for (const w of (p.pair ? p.words : [p.word])) entries.push({mirror});
+    const asg = assignRows(entries);
+    let ai = burnQueue.length;   // flat word index of the plan's first word
     const needed = plan.length;
     document.getElementById("plan-summary").innerHTML = needed
       ? `<b>${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s)</b> in ${needed} record group(s)`
@@ -2316,12 +2347,20 @@ LIVEBOOT = r"""
       const words = p.pair ? p.words : [p.word];
       const rows = words.map(w => ({ w, ex: existingRecordFor(w) }));
       return `<div class="planrow">` +
-        `<div><b>${p.label}</b> <span class="note">${esc(p.recs)}</span></div>` +
+        `<div><b>${p.label}</b> <span class="tag prop-tag">PROPOSED</span> <span class="note">${esc(p.recs)}</span></div>` +
         rows.map(r => {
           const f = ffEffect(r.w);
+          const a = asg ? asg.rows[ai++] : null;
           return `<div class="planword">` +
+            `<span class="tag prop-tag">PROPOSED</span>` +
             `<span class="mono">0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</span>` +
             `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+            `<span class="note">target row: ` +
+              (!asg ? `FF layout not loaded — rows pending`
+                : a === null ? `<b class="bad">no free row in burn zone</b>`
+                : `<b data-planrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → 0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</b>` +
+                  (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
+            `</span>` +
             (r.ex !== null
               ? ` <span class="tag ok-tag">ALREADY IN DUMP — row ${r.ex}</span>`
               : ` <button class="btn" data-plan-add="${r.w}">+ queue</button>`) +
@@ -2336,7 +2375,80 @@ LIVEBOOT = r"""
     burnQueue.push({ word, src, customRow, mirror: !!mirror });
     renderQueue();
   }
+  // ---- task 30: Advanced unlocks (bench burn history) ----
+  // Optional permanent unlocks burned on bench GPU1/GPU2. FF-record steps
+  // are queueable and show their concrete target rows through the SAME
+  // assignRows allocator over (current queue + this item's steps) — the
+  // rows shown ARE the rows "+ queue" will assign. DIRECT (row < 222) and
+  // IFF (bit 5) steps are outside what burn_execute accepts (FF records,
+  // rows 222-487) — shown as manual-path only, never queued.
+  function renderAdvanced() {
+    const el = document.getElementById("adv-rows");
+    if (!el) return;
+    const hex = w => "0x" + w.toString(16).toUpperCase().padStart(8, "0");
+    const conf = c => `<span class="tag ${c === "VERIFIED" ? "ok-tag" : "prop-tag"}">${c}</span>`;
+    const mirror = document.getElementById("gb-mirror").checked;
+    el.innerHTML = ADVANCED.map(it => {
+      const ffSteps = it.steps.filter(s => s.kind === "ff");
+      const entries = burnQueue.map(q => ({mirror: !!q.mirror, customRow: q.customRow}));
+      ffSteps.forEach(() => entries.push({mirror}));
+      const asg = assignRows(entries);
+      let ai = burnQueue.length;
+      const stepsHtml = it.steps.map(s => {
+        if (s.kind === "ff") {
+          const a = asg ? asg.rows[ai++] : null;
+          const bench = [s.bench_rows && s.bench_rows.GPU1 ? `GPU1 row ${s.bench_rows.GPU1}` : "",
+                         s.bench_rows && s.bench_rows.GPU2 ? `GPU2 row ${s.bench_rows.GPU2}` : ""]
+                        .filter(Boolean).join(" · ");
+          return `<div class="planword">` +
+            `<span class="tag prop-tag">PROPOSED</span>` +
+            `<span class="mono">${hex(s.value)}</span>` +
+            `<span class="note">chain ${s.chain} · block ${s.block} · ${esc(s.field)}</span>` +
+            conf(s.confidence) +
+            `<span class="note">target row: ` +
+              (!asg ? `FF layout not loaded — rows pending`
+                : a === null ? `<b class="bad">no free row in burn zone</b>`
+                : `<b data-advrow="${it.id}:${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(s.value)}</b>` +
+                  (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
+            `</span>` +
+            `<span class="note">bench: ${esc(bench)}</span>` +
+            (s.gpu1_data !== undefined ? ` <span class="note"><b class="warn">GPU1 burned ${hex((s.value & 0xFFFF) | ((s.gpu1_data & 0xFFFF) << 16))} (per-die defect)</b></span>` : "") +
+            (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
+            `</div>`;
+        }
+        const isDirect = s.kind === "direct";
+        return `<div class="planword">` +
+          `<span class="tag">MANUAL</span>` +
+          `<span class="mono">rows ${s.rows.join(" / ")}${isDirect ? " Δ " + hex(s.delta) : " = " + s.words.map(hex).join(" + ")}</span>` +
+          `<span class="note">${esc(isDirect ? s.field : s.decode)}</span>` +
+          conf(s.confidence) +
+          `<span class="note">${isDirect ? "DIRECT row — manual burn path (queue burns FF records only)" : "IFF word — manual burn path (ff_policy refuses bit 5)"}</span>` +
+          (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
+          `</div>`;
+      }).join("");
+      return `<div class="planrow" data-adv-item="${it.id}" style="margin-top:10px">` +
+        `<div><b>${esc(it.name)}</b> <span class="tag prop-tag">PROPOSED</span> ` +
+        conf(it.confidence) +
+        (ffSteps.length
+          ? ` <button class="btn" data-adv-add="${it.id}">+ queue</button>`
+          : ` <span class="note">no queueable FF records — manual burn path only</span>`) +
+        `</div>` +
+        `<div class="note">provenance: ${esc(it.provenance)}</div>` +
+        `<div class="note">${esc(it.notes)}</div>` +
+        stepsHtml + `</div>`;
+    }).join("");
+    el.querySelectorAll("[data-adv-add]").forEach(b => b.onclick = () => {
+      const it = ADVANCED.find(a => a.id === b.dataset.advAdd);
+      if (!it) return;
+      const mir = document.getElementById("gb-mirror").checked;
+      for (const s of it.steps) if (s.kind === "ff") queueAdd(s.value, it.name, undefined, mir);
+      note(`advanced unlock “${it.name}” queued — irreversible OTP writes; values carry the BENCH card's defect masks, verify against this card before burning`, "warnl");
+    });
+  }
   function renderQueue() {
+    // task 30: proposed rows (suggested card + advanced card) are computed
+    // over the CURRENT queue — keep them in step with every queue change.
+    renderPlan(); renderAdvanced();
     const el = document.getElementById("queue-rows");
     if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
     // task 27: show each entry's assigned row through the SAME allocator the
@@ -2569,6 +2681,11 @@ LIVEBOOT = r"""
 
   // ---- FF placement policy (row map + budget + live row hint) ----
   let ffLayout = null;
+  // task 30: paint the advanced-unlock card at setup (works with no dump
+  // loaded — bench rows + provenance show, target rows say "pending").
+  // Must run AFTER the ffLayout declaration: renderAdvanced → assignRows →
+  // burnLayout reads it, and `let` is in TDZ before its declaration.
+  renderAdvanced();
   function renderFfMap() {
     const L = ffLayout;
     if (!L || !L.burn_zone) return;
@@ -2749,7 +2866,7 @@ LIVEBOOT = r"""
   };
   $("gb-srcrow").oninput = () => { invalidateChecked(); renderSrcDecode(); };
   $("gb-value").oninput = invalidateChecked;
-  $("gb-mirror").onchange = invalidateChecked;
+  $("gb-mirror").onchange = () => { invalidateChecked(); renderQueue(); };
 
   // ---- burn-form targets derived from the CURRENT card's loaded dump ----
   // No burn-payload field may carry a value that was not derived from this
@@ -3402,7 +3519,12 @@ def build_html(payload, live):
     # escape </ so a dump string (dmesg, lspci, serial) can never break out
     # of the <script type="application/json"> block; JSON.parse is unaffected
     payload_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    # bench-burn advanced-unlock table (host/ga100vfi/advanced_unlocks.py is
+    # the single source); same </ escape so it can never break the JSON tag.
+    advanced_json = json.dumps(ADVANCED_UNLOCKS,
+                               separators=(",", ":")).replace("</", "<\\/")
     return (HTML.replace("__PAYLOAD__", payload_json)
+                .replace("__ADVANCED__", advanced_json)
                 .replace("__LIVEBAR__", livebar)
                 .replace("__LIVEBOOT__", liveboot))
 
