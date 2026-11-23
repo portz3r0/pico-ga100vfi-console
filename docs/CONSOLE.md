@@ -215,9 +215,16 @@ The live view of the selected card.
   `No stock baseline recorded yet — this dump is the first record`.
 - **Proposed burns to reach INTENDED**: while the unit/TPC view is in the
   `INTENDED` state, a panel below the TPC map lists the burn records that
-  would achieve it — one row per planner record with target row, current
-  word → proposed word (hex), the units each word re-enables, and the
-  mirror-row note. Every row carries a `PROPOSED` badge and the header
+  would achieve it — one row per planner record naming its **exact** target
+  row (`row N → 0xWORD`, `+ mirror row M` when the burn form's mirror
+  setting is on; a word already present keeps its `already in dump (row X)`
+  line), the current word → proposed word (hex) and the units each word
+  re-enables. Proposals name their exact rows because the panel assigns
+  them through the SAME free-row allocator the burn queue uses (same dump,
+  same plan order, same mirror setting), so `Queue these burns` produces a
+  queue whose rows equal the proposed rows; if the safe zone runs out
+  mid-plan the word shows `NO FREE FF ROW — free space first` and the panel
+  header warns. Every row carries a `PROPOSED` badge and the header
   states `PROPOSED — not burned; irreversible OTP writes pending a
   Goldilocks campaign`: these are proposals, not accomplished facts, and
   they never render in the `STOCK` or `NOW` views. The rows come from the
@@ -782,7 +789,7 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE), and the provenance block `version` (`tool_version` / git sha / `fingerprint`). While the driver is bound it returns the `paused` snapshot (+ `paused_hint`, `manual_dump_available`, `last_dump_age_s` — same-serial dumps only —, `serial`, `serial_source`, and `last_dump_note` `no dump yet for this card (serial X)` when none). `?bdf=` probes another GA100 on demand (same never-probe-while-bound rule) |
 | GET | `/api/full` | full row dump + hex window; `409 {"error": "no GA100 present on this host"}` (or `no GA100 at <bdf> (found …)`) when the target is absent or not GA100 silicon — no ghost-BDF fallback; saves `dump.json` under `dumps/sn-<serial>/<ts>/` (`bdf-<bdf>/<ts>/` when the serial is unreadable) and returns `serial`, `serial_source`, `dump_dir` |
 | GET | `/api/dumps` | saved-dump history listing, newest first: `[{dir, serial, dumped, driver_bound, verified, row_count, current}]` over every stored layout; `current` = dump of the card present now; a dir whose `dump.json` can't be read or parsed lists as `{dir, unreadable}` instead of failing the listing |
-| GET | `/api/dumps/get?dir=<rel>` | one `dump.json` by `dumps_dir`-relative path (+ `dump_dir`); `404` unless the path resolves inside the dumps store (no `../` escape, no absolute path), `422` when the JSON is corrupt |
+| GET | `/api/dumps/get?dir=<rel>` | one `dump.json` by `dumps_dir`-relative path (+ `dump_dir`, + `ff_layout` — the zone layout derived from that dump's rows with the same zone math as `/api/ff/layout`, so the GUI names exact burn rows while browsing saved dumps with no card); `404` unless the path resolves inside the dumps store (no `../` escape, no absolute path), `422` when the JSON is corrupt |
 | GET | `/api/stock` | the PRESENT card's stock baseline: `{serial, stock, provenance, is_current}` — `stock` is the card's first-saved dump (`dumps/sn-<serial>/stock.json`, + `stock_provenance`); `stock: null` with a `reason` when no GA100 is present (`no GA100 present on this host`), its serial is unreadable, or no baseline is recorded yet (`no stock baseline recorded yet — this dump is the first record`) |
 | GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |

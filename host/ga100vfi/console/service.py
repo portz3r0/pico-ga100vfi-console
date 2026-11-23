@@ -865,6 +865,44 @@ def burn_execute(rd, wr, row, value, old, bdf, journal=None,
 
 
 # ---------------------------------------------------------------- FF placement policy
+def ff_layout_from_occupied(occupied):
+    """Zone math for a set of occupied FF rows — single source for the live
+    card scan (ff_layout) and for saved-dump browsing (dumps_get embeds it
+    so the client's row assignment names exact rows with no card present).
+    Zone bounds follow the same CFG reserves as the burn-time policy."""
+    last_occ = max(occupied) if occupied else FF_START - 1
+    tail = CFG["ff_tail_reserve"]
+    sm = CFG["ff_sm_reserve"]
+    zone_start = last_occ + 1 + CFG["ff_buffer"]
+    sm_start = FF_END - tail - sm + 1
+    zone_end = sm_start - 1
+    return {
+        "ff_start": FF_START, "ff_end": FF_END,
+        "occupied_count": len(occupied), "last_occupied": last_occ,
+        "buffer": CFG["ff_buffer"], "sm_reserve": sm, "tail_reserve": tail,
+        "burn_zone": [zone_start, zone_end],
+        "sm_zone": [sm_start, FF_END - tail],
+        "revert_zone": [FF_END - tail + 1, FF_END],
+        "free_in_zone": max(0, zone_end - zone_start + 1),
+    }
+
+
+def ff_layout_from_rows(rows):
+    """Layout from a rows map (str(row) -> value) with the same occupancy
+    filter as the live scan: only FF-region rows with a value other than
+    blank (0 / 0xFFFFFFFF) count as occupied."""
+    occupied = []
+    for k, v in (rows or {}).items():
+        try:
+            r = int(k)
+        except ValueError:
+            continue
+        if FF_START <= r <= FF_END and isinstance(v, int) \
+                and v not in (0, 0xFFFFFFFF):
+            occupied.append(r)
+    return ff_layout_from_occupied(occupied)
+
+
 def ff_layout(bdf=None):
     """Scan the FF record region (rows 222-487) and compute the safe burn
     layout: boot FFs | buffer | BURN ZONE | SM re-disable reserve | revert tail.
@@ -890,14 +928,9 @@ def ff_layout(bdf=None):
                 rows = json.load(f).get("rows", {})
         except Exception:
             rows = {}
-        for k, v in rows.items():
-            try:
-                r = int(k)
-            except ValueError:
-                continue
-            if FF_START <= r <= FF_END and isinstance(v, int) \
-                    and v not in (0, 0xFFFFFFFF):
-                occupied.append(r)
+        L = ff_layout_from_rows(rows)
+        L["bdf"] = bdf
+        return L
     else:
         if not card_lock.acquire(timeout=2.0):
             return {"error": "card busy (campaign or dump in progress)"}
@@ -925,22 +958,9 @@ def ff_layout(bdf=None):
                 bar.close()
         finally:
             card_lock.release()
-    last_occ = max(occupied) if occupied else FF_START - 1
-    tail = CFG["ff_tail_reserve"]
-    sm = CFG["ff_sm_reserve"]
-    zone_start = last_occ + 1 + CFG["ff_buffer"]
-    sm_start = FF_END - tail - sm + 1
-    zone_end = sm_start - 1
-    return {
-        "bdf": bdf,
-        "ff_start": FF_START, "ff_end": FF_END,
-        "occupied_count": len(occupied), "last_occupied": last_occ,
-        "buffer": CFG["ff_buffer"], "sm_reserve": sm, "tail_reserve": tail,
-        "burn_zone": [zone_start, zone_end],
-        "sm_zone": [sm_start, FF_END - tail],
-        "revert_zone": [FF_END - tail + 1, FF_END],
-        "free_in_zone": max(0, zone_end - zone_start + 1),
-    }
+    L = ff_layout_from_occupied(occupied)
+    L["bdf"] = bdf
+    return L
 
 
 def ff_policy(layout, row, mirror=False, value=None):
@@ -2445,6 +2465,10 @@ def dumps_get(rel):
     except ValueError as e:
         return 422, {"error": f"dump.json invalid JSON: {e}"}
     d["dump_dir"] = cand
+    # Task 27: the dump's own FF zone layout (same zone math as
+    # /api/ff/layout) so the client can name exact burn rows while browsing
+    # saved dumps with no card present.
+    d["ff_layout"] = ff_layout_from_rows(d.get("rows"))
     return 200, d
 
 

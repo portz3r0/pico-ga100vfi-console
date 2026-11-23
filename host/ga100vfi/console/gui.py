@@ -929,15 +929,18 @@ function renderTpc() {
   el.innerHTML = html;
 }
 
-// Proposed burns for the INTENDED state (task 26): the burn records that
-// would bring the live disable masks to this card's defective masks. Rows
-// come from window.__suggestPlan — the SAME planner function that feeds the
-// "Suggested burns" card on the Glitch & Burn tab — and the queue button
-// goes through window.__queueProposedBurns, the same queue path; nothing
-// here re-derives encodings. Recompute triggers: every state switch and
-// every dump change (renderLive runs on each poll tick and after each new
-// dump), so after a real burn moves NOW, the next dump shows fewer or no
-// proposals. Renders ONLY in the intended state — never in NOW or STOCK.
+// Proposed burns for the INTENDED state (tasks 26+27): the burn records
+// that would bring the live disable masks to this card's defective masks.
+// Words come from window.__suggestPlan and rows from
+// window.__planRowAssignment — the SAME planner and the SAME free-row
+// allocator that feed the "Suggested burns" card and the burn queue — so a
+// proposed "row N" IS the row "Queue these burns" will assign (same dump,
+// same plan order, same mirror setting). The queue button goes through
+// window.__queueProposedBurns, the same queue path; nothing here re-derives
+// encodings or rows. Recompute triggers: every state switch and every dump
+// change (renderLive runs on each poll tick and after each new dump), so
+// after a real burn moves NOW, the next dump shows fewer or no proposals.
+// Renders ONLY in the intended state — never in NOW or STOCK.
 function renderProposedBurns() {
   const el = document.getElementById("proposed-burns");
   if (!el) return;
@@ -947,14 +950,22 @@ function renderProposedBurns() {
   }
   el.style.display = "";
   const plan = window.__suggestPlan();
+  const asg = typeof window.__planRowAssignment === "function"
+    ? window.__planRowAssignment() : null;
+  const hex = w => "0x" + w.toString(16).toUpperCase().padStart(8, "0");
   let html = `<h3>Proposed burns to reach INTENDED</h3>` +
     `<div class="note"><b class="warn">PROPOSED — not burned; irreversible ` +
     `OTP writes pending a Goldilocks campaign.</b> These records would set ` +
     `the disable masks to the card's defective masks; nothing is written ` +
     `until a burn campaign runs.</div>`;
+  if (asg && asg.exhaustedAt >= 0)
+    html += `<div class="note"><b class="bad">⚠ free FF rows run out at word ` +
+      `${asg.exhaustedAt + 1} of ${asg.rows.length} — free space first; the ` +
+      `queue will refuse to start until rows are available.</b></div>`;
   if (!plan.length) {
     html += `<div class="note">no burns proposed — card already at intended state</div>`;
   }
+  let ai = 0;   // flat word index — same order as queuePlanRecords/assignRows
   for (const p of plan) {
     const words = p.pair ? p.words : [p.word];
     html += `<div class="planrow"><div><b>${esc(p.label)}</b> ` +
@@ -963,15 +974,19 @@ function renderProposedBurns() {
       words.map(w => {
         const f = window.__ffEffect(w);
         const ex = window.__existingRecordFor(w);
+        const a = asg ? asg.rows[ai++] : null;
         return `<div class="planword">` +
           `<span class="tag prop-tag">PROPOSED</span>` +
           (ex !== null
-            ? `<span class="mono">row ${ex}: 0x${w.toString(16).toUpperCase().padStart(8, "0")} — already in dump</span>`
-            : `<span class="mono">0x00000000 → 0x${w.toString(16).toUpperCase().padStart(8, "0")}</span>`) +
+            ? `<span class="mono">row ${ex}: ${hex(w)} — already in dump</span>`
+            : `<span class="mono">0x00000000 → ${hex(w)}</span>`) +
           `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
           `<span class="note">target row: ` +
-            (ex !== null ? `row ${ex} (record already present)`
-              : `auto-assigned in the safe FF zone at burn time; mirror row (even/odd pair) burned alongside when mirror is on`) +
+            (!asg ? `FF layout not loaded — rows pending`
+              : a === null ? `<b class="bad">NO FREE FF ROW — free space first</b>`
+              : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(w)}</b>` +
+                (a.mirror ? ` + mirror row ${a.row + 1}` : "") +
+                (ex !== null ? ` (record already present at row ${ex})` : "")) +
           `</span></div>`;
       }).join("") + `</div>`;
   }
@@ -2324,12 +2339,19 @@ LIVEBOOT = r"""
   function renderQueue() {
     const el = document.getElementById("queue-rows");
     if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
+    // task 27: show each entry's assigned row through the SAME allocator the
+    // burn payload uses — what the queue displays IS what it will burn.
+    const asg = assignRows(burnQueue);
     el.innerHTML = burnQueue.map((q, i) => {
       const f = ffEffect(q.word);
       const ex = existingRecordFor(q.word);
+      const a = asg ? asg.rows[i] : null;
       return `<div class="qrow${ex !== null ? " qexists" : ""}">` +
         `<span class="mono">#${i + 1}</span>` +
         `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
+        (asg ? (a !== null
+            ? `<span class="mono" data-qrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">→ row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</span>`
+            : `<span class="mono"><b class="bad">NO FREE FF ROW</b></span>`) : "") +
         `<span class="note">${esc(f.key)}</span>` +
         (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
         (ex !== null ? ` <span class="tag ok-tag">⚠ already in dump — row ${ex} (duplicate)</span>` : "") +
@@ -2339,44 +2361,80 @@ LIVEBOOT = r"""
     el.querySelectorAll("[data-q-del]").forEach(b => b.onclick = () => {
       burnQueue.splice(+b.dataset.qDel, 1); renderQueue(); });
   }
-  function queueRecords() {
-    // assign free safe-zone rows to queue entries that lack one (ascending,
-    // skipping occupied rows; mirror entries consume an even/odd pair).
-    // The server re-validates every row against ff_policy — this only picks
-    // plausible candidates so the common case needs no manual row typing.
-    if (!ffLayout || !ffLayout.burn_zone) {
-      alert("FF layout not loaded — reload the page before burning the queue");
-      return null;
-    }
-    const L = ffLayout;
+  // ---- shared free-row assignment (task 27, single source) ----
+  // The layout rows are assigned against: the live card's FF layout when
+  // present, else the SHOWN dump's own ff_layout (embedded by dumps_get
+  // with the same zone math server-side) — so proposals name exact rows
+  // even while browsing saved dumps with no card.
+  function burnLayout() {
+    if (ffLayout && ffLayout.burn_zone) return ffLayout;
+    const L = (D && D.ff_layout) || null;
+    return L && L.burn_zone ? L : null;
+  }
+  // Assign free safe-zone rows to entries in QUEUE ORDER (ascending,
+  // skipping occupied rows; mirror entries consume an even/odd pair;
+  // entries with a customRow keep it). queueRecords(), the queue display
+  // and the INTENDED-state proposal panel all go through this one function,
+  // so proposed rows == queued rows by construction. Returns
+  // {rows: [{row, mirror}|null], exhaustedAt} — from exhaustedAt on, every
+  // row is null (the queue refuses to start there) — or null when no
+  // layout is known. The server re-validates every row against ff_policy at
+  // burn time; this only picks plausible candidates so the common case
+  // needs no manual row typing.
+  function assignRows(entries) {
+    const L = burnLayout();
+    if (!L) return null;
     const used = new Set(Object.keys(D.rows || {}).map(Number));
     let cur = Math.max(L.burn_zone[0], L.last_occupied + 1);
     const alloc = (mirror) => {
-      if (mirror && (cur & 1)) { if (used.has(cur)) return null; used.add(cur); cur++; }
+      if (mirror && (cur & 1)) {
+        // Keep mirror pairs even-aligned: an odd row is consumed as padding.
+        // When the odd row is already used (the previous pair's mirror
+        // partner) just advance — the while loop below skips the rest. (The
+        // pre-task-27 code returned null here, which made every second
+        // mirror entry fail; plan queues with mirror on hit that at once.)
+        used.add(cur);
+        cur++;
+      }
       while (used.has(cur) && cur <= L.burn_zone[1]) cur++;
       if (cur > L.burn_zone[1]) return null;
       used.add(cur);
       if (mirror) used.add(cur + 1);
       return cur++;
     };
-    const recs = [];
-    for (const q of burnQueue) {
+    const rows = [];
+    let exhaustedAt = -1;
+    entries.forEach((q, i) => {
+      if (exhaustedAt >= 0) { rows.push(null); return; }
       const row = q.customRow || alloc(!!q.mirror);
-      if (row === null || row === undefined) {
-        alert("no free rows left in the safe burn zone — shrink the queue");
-        return null;
-      }
-      recs.push({ row, value: q.word, old: (D.rows || {})[row] || 0,
-                  mirror: !!q.mirror });
+      if (row === null || row === undefined) { exhaustedAt = i; rows.push(null); return; }
+      rows.push({row, mirror: !!q.mirror});
+    });
+    return {rows, exhaustedAt};
+  }
+  function queueRecords() {
+    if (!burnLayout()) {
+      alert("FF layout not loaded — reload the page before burning the queue");
+      return null;
     }
-    return recs;
+    const res = assignRows(burnQueue);
+    if (res.exhaustedAt >= 0) {
+      alert("no free rows left in the safe burn zone — shrink the queue");
+      return null;
+    }
+    return res.rows.map((r, i) => ({row: r.row, value: burnQueue[i].word,
+                                    old: (D.rows || {})[r.row] || 0,
+                                    mirror: r.mirror}));
   }
   function queuePlanRecords() {
     // single queue path for the planner's records: used by "Queue all needed
     // records" here AND by the INTENDED-state "Queue these burns" button
-    // (task 26) — same records, no divergence.
+    // (task 26) — same records, no divergence. Mirror follows the burn
+    // form's "burn mirror row too" setting — the same setting the proposal
+    // panel reads — so the queued rows equal the proposed rows.
+    const mirror = document.getElementById("gb-mirror").checked;
     for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
-      queueAdd(w, p.label);
+      queueAdd(w, p.label, undefined, mirror);
     note("all suggested records queued — review the queue, then start the campaign in burn mode", "okl");
   }
   document.getElementById("plan-queue-all").onclick = queuePlanRecords;
@@ -2385,6 +2443,16 @@ LIVEBOOT = r"""
   window.__suggestPlan = suggestPlan;
   window.__ffEffect = ffEffect;
   window.__existingRecordFor = existingRecordFor;
+  // task 27: the proposal panel's row assignment = this exact allocator over
+  // the exact queue order and the exact mirror setting "Queue these burns"
+  // will use — proposed rows ARE the rows the queue will assign.
+  window.__planRowAssignment = () => {
+    const mirror = document.getElementById("gb-mirror").checked;
+    const entries = [];
+    for (const p of suggestPlan())
+      for (const w of (p.pair ? p.words : [p.word])) entries.push({mirror});
+    return assignRows(entries);
+  };
   window.__queueProposedBurns = () => { queuePlanRecords(); switchTab("glitch"); };
   document.getElementById("queue-clear").onclick = () => { burnQueue = []; renderQueue(); };
   document.getElementById("cq-row").oninput = document.getElementById("cq-value").oninput = () => {
