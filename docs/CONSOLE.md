@@ -269,10 +269,13 @@ burn-on-goldilocks mode creates that state on the selected GPU.
 - **Burn placement policy**: the seven brick rules, a live row map of the
   FF region (`boot FFs · N` | `buffer N` | `BURN ZONE · N free` |
   `SM reserve N` | `revert N`) and the budget pill
-  (`safe zone rows A–B · N free · last boot FF: row N`). The target-row
-  field shows a live zone verdict (`✓ safe zone`, `✗ occupied (boot FF)`,
-  `✗ buffer zone`, `✗ SM reserve (keep free)`, `✗ revert tail (keep free)`,
-  `✗ outside FF region`).
+  (`safe zone rows A–B · N free · last boot FF: row N`; on an
+  already-burned card whose global zone is empty the pill instead says
+  placement is per-block — see the FF placement policy below). The
+  target-row field shows a live zone verdict (`✓ safe zone`, `✗ occupied
+  (boot FF)`, `✗ buffer zone`, `✗ SM reserve (keep free)`,
+  `✗ revert tail (keep free)`, `✗ outside FF region`; when the global
+  zone is empty it states the per-block rule the server enforces).
 - **Burn payload**: target row, **value source** selector (`typed hex` or
   `from dump row` — enter the row of an existing record and the console
   grabs its value from the loaded dump and shows it decoded, FF
@@ -301,8 +304,10 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   run over the current queue plus these records in queue order and the
   mirror setting **⤓ Queue all needed records** will read — so the rows
   shown ARE the rows the queue assigns (proposal == queue by
-  construction; no free-row fallback: if the safe zone runs out the word
-  shows `no free row in burn zone`). **⤓ Queue all needed records** puts
+  construction; no free-row fallback: placement is per block, so a word
+  whose own block has no blank row after the block's last record shows
+  `no free row after block B's last record` while the other words still
+  get concrete rows). **⤓ Queue all needed records** puts
   them in the queue; already
   equal masks report *this card needs no unlock burns*; a word already
   present in the dump is tagged `ALREADY IN DUMP — row N`. An optional
@@ -677,13 +682,29 @@ The FF record region (rows 222–487) is laid out and enforced live
   record — a stray IFF can truncate the FF pool (a canary burned as
   `0x00010020` read back as IFF chain=0 iff=1). The check applies to the
   value and its mirror on every burn path.
-- **A buffer (default 4 rows) is kept after the last boot FF** so new
-  records cannot interfere with the boot chain.
-- **The revert tail (default 12 rows) stays empty** — a wrong value can only
-  be corrected by burning a *later* record (last record per block wins), so
-  the tail is your correction budget and attempts are finite.
-- **The SM reserve (default 16 rows) stays free** so SMs that turn out to be
-  actually bad after unlocking can be re-disabled.
+- **Placement is PER BLOCK last-wins** when the burn value is known (every
+  queue/proposal path, and any checked burn): the controller replays FF
+  records in row order and the LAST record per block wins, so a new record
+  for block B (`block = bits[15:6]` of the word) must land in a blank row
+  **strictly after the last row holding a record for block B** —
+  `last_row_for_block` in `/api/ff/layout` and in the `ff_layout` embedded
+  in `/api/dumps/get`; a block with no history starts at row 222. IFF
+  words (bit 5 set) are invalidation markers, not block records, and never
+  bound placement. This is what lets an already-burned card — records
+  scattered to the end of the region — still place new records in its
+  blank rows instead of collapsing the burn zone. The allocator places
+  each word per block; a word whose own block has no free row is refused
+  per word (`NO FREE ROW FOR BLOCK B`, other words still get rows).
+- **The global zones are a display heuristic and the fallback rule** when
+  no value is known (a bare row check): a buffer (default 4 rows) after
+  the last boot FF, a BURN ZONE up to the SM re-disable reserve (default
+  16 rows) and the revert tail (default 12 rows) kept empty — a wrong
+  value can only be corrected by burning a *later* record, so the tail is
+  your correction budget and attempts are finite. On a card where the
+  burn zone would collapse (start past its end) the layout reports the
+  canonical empty range `[zone_end + 1, zone_end]` with
+  `global_zone_empty: true` — never an inverted range — and the budget
+  pill says placement is per-block.
 - The budget pill shows how many safe rows remain; burns refresh it.
 
 Reserves are tunable per deployment: `--ff-buffer`, `--ff-tail-reserve`,

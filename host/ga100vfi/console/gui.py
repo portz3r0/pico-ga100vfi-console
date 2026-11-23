@@ -965,10 +965,10 @@ function renderProposedBurns() {
     `OTP writes pending a Goldilocks campaign.</b> These records would set ` +
     `the disable masks to the card's defective masks; nothing is written ` +
     `until a burn campaign runs.</div>`;
-  if (asg && asg.exhaustedAt >= 0)
-    html += `<div class="note"><b class="bad">⚠ free FF rows run out at word ` +
-      `${asg.exhaustedAt + 1} of ${asg.rows.length} — free space first; the ` +
-      `queue will refuse to start until rows are available.</b></div>`;
+  if (asg && asg.noFree > 0)
+    html += `<div class="note"><b class="bad">⚠ ${asg.noFree} of ${asg.rows.length} ` +
+      `words have no blank row after their own block's last record — free ` +
+      `space first; the queue will refuse to start until rows are available.</b></div>`;
   if (!plan.length) {
     html += `<div class="note">no burns proposed — card already at intended state</div>`;
   }
@@ -990,7 +990,7 @@ function renderProposedBurns() {
           `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
           `<span class="note">target row: ` +
             (!asg ? `FF layout not loaded — rows pending`
-              : a === null ? `<b class="bad">NO FREE FF ROW — free space first</b>`
+              : a === null ? `<b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(w).blk} — free space first</b>`
               : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(w)}</b>` +
                 (a.mirror ? ` + mirror row ${a.row + 1}` : "") +
                 (ex !== null ? ` (record already present at row ${ex})` : "")) +
@@ -2335,8 +2335,8 @@ LIVEBOOT = r"""
     // and the mirror setting "Queue all" will read — so the rows shown ARE
     // the rows the queue will assign (proposal == queue by construction).
     const mirror = document.getElementById("gb-mirror").checked;
-    const entries = burnQueue.map(q => ({mirror: !!q.mirror, customRow: q.customRow}));
-    for (const p of plan) for (const w of (p.pair ? p.words : [p.word])) entries.push({mirror});
+    const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
+    for (const p of plan) for (const w of (p.pair ? p.words : [p.word])) entries.push({word: w, mirror});
     const asg = assignRows(entries);
     let ai = burnQueue.length;   // flat word index of the plan's first word
     const needed = plan.length;
@@ -2357,7 +2357,7 @@ LIVEBOOT = r"""
             `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
             `<span class="note">target row: ` +
               (!asg ? `FF layout not loaded — rows pending`
-                : a === null ? `<b class="bad">no free row in burn zone</b>`
+                : a === null ? `<b class="bad">no free row after block ${ffDecode(r.w).blk}'s last record</b>`
                 : `<b data-planrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → 0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</b>` +
                   (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
             `</span>` +
@@ -2390,8 +2390,8 @@ LIVEBOOT = r"""
     const mirror = document.getElementById("gb-mirror").checked;
     el.innerHTML = ADVANCED.map(it => {
       const ffSteps = it.steps.filter(s => s.kind === "ff");
-      const entries = burnQueue.map(q => ({mirror: !!q.mirror, customRow: q.customRow}));
-      ffSteps.forEach(() => entries.push({mirror}));
+      const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
+      ffSteps.forEach(s => entries.push({word: s.value, mirror}));
       const asg = assignRows(entries);
       let ai = burnQueue.length;
       const stepsHtml = it.steps.map(s => {
@@ -2463,7 +2463,7 @@ LIVEBOOT = r"""
         `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
         (asg ? (a !== null
             ? `<span class="mono" data-qrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">→ row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</span>`
-            : `<span class="mono"><b class="bad">NO FREE FF ROW</b></span>`) : "") +
+            : `<span class="mono"><b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(q.word).blk}</b></span>`) : "") +
         `<span class="note">${esc(f.key)}</span>` +
         (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
         (ex !== null ? ` <span class="tag ok-tag">⚠ already in dump — row ${ex} (duplicate)</span>` : "") +
@@ -2483,16 +2483,24 @@ LIVEBOOT = r"""
     const L = (D && D.ff_layout) || null;
     return L && L.burn_zone ? L : null;
   }
-  // Assign free safe-zone rows to entries in QUEUE ORDER (ascending,
-  // skipping occupied rows; mirror entries consume an even/odd pair;
-  // entries with a customRow keep it). queueRecords(), the queue display
-  // and the INTENDED-state proposal panel all go through this one function,
-  // so proposed rows == queued rows by construction. Returns
-  // {rows: [{row, mirror}|null], exhaustedAt} — from exhaustedAt on, every
-  // row is null (the queue refuses to start there) — or null when no
-  // layout is known. The server re-validates every row against ff_policy at
-  // burn time; this only picks plausible candidates so the common case
-  // needs no manual row typing.
+  // Assign free rows to entries in QUEUE ORDER using PER-BLOCK last-wins
+  // placement (task 31): the controller replays FF records in row order and
+  // the LAST record per block wins, so a word for block B lands at the
+  // first blank row strictly after the last row holding a record for block
+  // B (L.last_row_for_block, server-computed); a block with no history
+  // starts at ff_start. Rows already taken earlier in the same batch are
+  // skipped, mirror pairs keep even-alignment. No global burn-zone bound:
+  // the buffer-after-last-occupied heuristic collapsed the burn zone on
+  // already-burned cards whose records scatter to the end of the region.
+  // queueRecords(), the queue display, the INTENDED-state proposal panel
+  // and the Advanced card all go through this one function, so proposed
+  // rows == queued rows by construction. Returns
+  // {rows: [{row, mirror}|null], exhaustedAt, noFree} — rows[i] is null
+  // only for the word whose own block has no free row (exhaustedAt is the
+  // first such index, noFree their count; other words still get rows) —
+  // or null when no layout is known. The server re-validates every row
+  // against ff_policy at burn time; this only picks plausible candidates
+  // so the common case needs no manual row typing.
   function assignRows(entries) {
     const L = burnLayout();
     if (!L) return null;
@@ -2504,32 +2512,39 @@ LIVEBOOT = r"""
       const v = dumpRows[r];
       return typeof v === "number" && v !== 0 && v !== 0xFFFFFFFF;
     }));
-    let cur = Math.max(L.burn_zone[0], L.last_occupied + 1);
-    const alloc = (mirror) => {
-      if (mirror && (cur & 1)) {
+    const blockLast = {};
+    const raw = L.last_row_for_block || {};
+    Object.keys(raw).forEach(k => { blockLast[+k] = raw[k]; });
+    const cur = {};   // block -> next candidate row (advances past rows this batch took)
+    const alloc = (word, mirror) => {
+      const blk = ffDecode(word).blk;
+      let c = cur[blk] !== undefined ? cur[blk]
+        : Math.max(L.ff_start, (blockLast[blk] !== undefined ? blockLast[blk] : L.ff_start - 1) + 1);
+      if (mirror && (c & 1)) {
         // Keep mirror pairs even-aligned: an odd row is consumed as padding.
         // When the odd row is already used (the previous pair's mirror
-        // partner) just advance — the while loop below skips the rest. (The
-        // pre-task-27 code returned null here, which made every second
-        // mirror entry fail; plan queues with mirror on hit that at once.)
-        used.add(cur);
-        cur++;
+        // partner) just advance — the while loop below skips the rest.
+        used.add(c);
+        c++;
       }
-      while (used.has(cur) && cur <= L.burn_zone[1]) cur++;
-      if (cur > L.burn_zone[1]) return null;
-      used.add(cur);
-      if (mirror) used.add(cur + 1);
-      return cur++;
+      while (used.has(c) && c <= L.ff_end) c++;
+      if (c > L.ff_end) { cur[blk] = c; return null; }
+      used.add(c);
+      cur[blk] = c + 1;
+      if (mirror) { used.add(c + 1); cur[blk] = c + 2; }
+      return c;
     };
     const rows = [];
-    let exhaustedAt = -1;
+    let exhaustedAt = -1, noFree = 0;
     entries.forEach((q, i) => {
-      if (exhaustedAt >= 0) { rows.push(null); return; }
-      const row = q.customRow || alloc(!!q.mirror);
-      if (row === null || row === undefined) { exhaustedAt = i; rows.push(null); return; }
+      const row = q.customRow || alloc(q.word, !!q.mirror);
+      if (row === null || row === undefined) {
+        if (exhaustedAt < 0) exhaustedAt = i;
+        noFree++; rows.push(null); return;
+      }
       rows.push({row, mirror: !!q.mirror});
     });
-    return {rows, exhaustedAt};
+    return {rows, exhaustedAt, noFree};
   }
   function queueRecords() {
     if (!burnLayout()) {
@@ -2538,7 +2553,8 @@ LIVEBOOT = r"""
     }
     const res = assignRows(burnQueue);
     if (res.exhaustedAt >= 0) {
-      alert("no free rows left in the safe burn zone — shrink the queue");
+      alert(`no free row after the last record for ${res.noFree} queued ` +
+            `word(s)' block — shrink the queue`);
       return null;
     }
     return res.rows.map((r, i) => ({row: r.row, value: burnQueue[i].word,
@@ -2569,7 +2585,7 @@ LIVEBOOT = r"""
     const mirror = document.getElementById("gb-mirror").checked;
     const entries = [];
     for (const p of suggestPlan())
-      for (const w of (p.pair ? p.words : [p.word])) entries.push({mirror});
+      for (const w of (p.pair ? p.words : [p.word])) entries.push({word: w, mirror});
     return assignRows(entries);
   };
   window.__queueProposedBurns = () => { queuePlanRecords(); switchTab("glitch"); };
@@ -2701,8 +2717,11 @@ LIVEBOOT = r"""
       seg(L.burn_zone[0], L.burn_zone[1], "zone", `BURN ZONE · ${L.free_in_zone} free`) +
       seg(L.sm_zone[0], L.sm_zone[1], "smr", `SM reserve ${L.sm_reserve}`) +
       seg(L.revert_zone[0], L.revert_zone[1], "rev", `revert ${L.tail_reserve}`);
-    $("gb-budget").innerHTML =
-      `safe zone rows <b>${L.burn_zone[0]}–${L.burn_zone[1]}</b> · <b>${L.free_in_zone}</b> free · last boot FF: row ${L.last_occupied}`;
+    $("gb-budget").innerHTML = L.global_zone_empty
+      ? `global burn zone empty — last boot FF row <b>${L.last_occupied}</b>; ` +
+        `placement is <b>per-block</b>: each record lands after its own ` +
+        `block's last record (rows ${L.ff_start}–${L.ff_end})`
+      : `safe zone rows <b>${L.burn_zone[0]}–${L.burn_zone[1]}</b> · <b>${L.free_in_zone}</b> free · last boot FF: row ${L.last_occupied}`;
     // B25: never rewrite the user's typed row — updateRowHint shows the zone
     // verdict for whatever row is in the field (a deliberate probe of the SM
     // reserve must survive tab switches and layout refreshes).
@@ -2717,7 +2736,14 @@ LIVEBOOT = r"""
     if (!ffLayout || !ffLayout.burn_zone) { hint.innerHTML = "row —"; hint.className = "pill"; return; }
     const L = ffLayout;
     let txt, cls;
-    if (rv >= L.burn_zone[0] && rv <= L.burn_zone[1]) { txt = `row ${rv}: ✓ safe zone`; cls = "ok"; }
+    if (L.global_zone_empty) {
+      // Task 31: on an already-burned card the global zones are display
+      // only — the verdict for a typed row is per-block (blank + after the
+      // row's block's last record), which the server enforces at burn time.
+      txt = `row ${rv}: per-block placement — must be blank and after its block's last record`;
+      cls = "warn";
+    }
+    else if (rv >= L.burn_zone[0] && rv <= L.burn_zone[1]) { txt = `row ${rv}: ✓ safe zone`; cls = "ok"; }
     else if (rv < L.ff_start || rv > L.ff_end)       { txt = `row ${rv}: ✗ outside FF region`; cls = "bad"; }
     else if (rv <= L.last_occupied)                  { txt = `row ${rv}: ✗ occupied (boot FF)`; cls = "bad"; }
     else if (rv < L.burn_zone[0])                    { txt = `row ${rv}: ✗ buffer zone`; cls = "bad"; }

@@ -865,17 +865,66 @@ def burn_execute(rd, wr, row, value, old, bdf, journal=None,
 
 
 # ---------------------------------------------------------------- FF placement policy
-def ff_layout_from_occupied(occupied):
+# FF record field map (verified, see ff_decode below): block = bits[15:6].
+FF_MAX_BLOCK = 0x3FF   # widest value the 10-bit block field can hold
+
+
+def ff_last_row_for_block(values):
+    """block -> last FF row holding a live record for that block.
+
+    The controller replays FF records in row order and the LAST record per
+    block wins, so a new record for block B only needs a blank row strictly
+    after this row to take effect — not after every record in the zone.
+    That is what lets an already-burned card (records scattered to the end
+    of the zone) still place new records in its blank rows.
+
+    Words skipped (not chain/block/data records):
+      * IFF markers — bit 5 set. An IFF word is the invalidation flag, not
+        a block record (ff_policy refuses burning one; ff_decode_if skips
+        it for the same reason).
+      * words whose block field exceeds FF_MAX_BLOCK — defensive guard:
+        the field is masked to 10 bits, so this cannot fire today.
+    Keyed by block alone, not the controller's (chain, block) last-wins
+    key: a block's last row across ALL chains is the strictly-after bound
+    that wins replay for every chain of that block — the conservative pick.
+    """
+    out = {}
+    for r, v in (values or {}).items():
+        if v in (0, 0xFFFFFFFF) or (v >> 5) & 1:
+            continue
+        blk = (v >> 6) & FF_MAX_BLOCK
+        if blk > FF_MAX_BLOCK:
+            continue
+        if r > out.get(blk, FF_START - 1):
+            out[blk] = r
+    return out
+
+
+def ff_layout_from_occupied(occupied, values=None):
     """Zone math for a set of occupied FF rows — single source for the live
     card scan (ff_layout) and for saved-dump browsing (dumps_get embeds it
     so the client's row assignment names exact rows with no card present).
-    Zone bounds follow the same CFG reserves as the burn-time policy."""
+    Zone bounds follow the same CFG reserves as the burn-time policy.
+
+    `values` ({row: word} for the occupied rows) enables the per-block
+    last-row map; without it last_row_for_block is empty and callers fall
+    back to the conservative global rule.
+
+    The GLOBAL burn zone is a display heuristic only (task 31): on a card
+    whose records are scattered to the end of the FF region it collapses
+    (start > end). It is then reported as the canonical empty range
+    [zone_end + 1, zone_end] with global_zone_empty set — never inverted —
+    while per-block placement still has every blank row after each block's
+    own last record."""
     last_occ = max(occupied) if occupied else FF_START - 1
     tail = CFG["ff_tail_reserve"]
     sm = CFG["ff_sm_reserve"]
     zone_start = last_occ + 1 + CFG["ff_buffer"]
     sm_start = FF_END - tail - sm + 1
     zone_end = sm_start - 1
+    global_zone_empty = zone_start > zone_end
+    if global_zone_empty:
+        zone_start = zone_end + 1
     return {
         "ff_start": FF_START, "ff_end": FF_END,
         "occupied_count": len(occupied), "last_occupied": last_occ,
@@ -884,6 +933,9 @@ def ff_layout_from_occupied(occupied):
         "sm_zone": [sm_start, FF_END - tail],
         "revert_zone": [FF_END - tail + 1, FF_END],
         "free_in_zone": max(0, zone_end - zone_start + 1),
+        "global_zone_empty": global_zone_empty,
+        "occupied_rows": sorted(occupied),
+        "last_row_for_block": ff_last_row_for_block(values),
     }
 
 
@@ -892,6 +944,7 @@ def ff_layout_from_rows(rows):
     filter as the live scan: only FF-region rows with a value other than
     blank (0 / 0xFFFFFFFF) count as occupied."""
     occupied = []
+    values = {}
     for k, v in (rows or {}).items():
         try:
             r = int(k)
@@ -900,7 +953,8 @@ def ff_layout_from_rows(rows):
         if FF_START <= r <= FF_END and isinstance(v, int) \
                 and v not in (0, 0xFFFFFFFF):
             occupied.append(r)
-    return ff_layout_from_occupied(occupied)
+            values[r] = v
+    return ff_layout_from_occupied(occupied, values)
 
 
 def ff_layout(bdf=None):
@@ -909,8 +963,11 @@ def ff_layout(bdf=None):
 
     The rules this encodes (each one learned the hard way):
       * burns go only into blank rows — never touch boot FFs
-      * a buffer after the last boot FF keeps new records clear of the boot
-        chain
+      * placement is PER BLOCK last-wins (task 31): a new record for block
+        B lands strictly after the last row holding a record for block B —
+        the global burn zone below is a display heuristic, not the
+        placement bound, because an already-burned card scatters records
+        to the end of the zone while its blank rows stay usable
       * the tail stays empty for corrections/reverts — a wrong value can only
         be fixed by burning a LATER record (last record per block wins), so
         attempts are finite
@@ -922,6 +979,7 @@ def ff_layout(bdf=None):
         # fd.Bar — never point those at an arbitrary PCI device
         return {"error": err}
     occupied = []
+    values = {}
     if CFG["mock"]:
         try:
             with open(CFG["mock"]) as f:
@@ -950,6 +1008,7 @@ def ff_layout(bdf=None):
                             continue
                         if v not in (0, 0xFFFFFFFF):
                             occupied.append(r)
+                            values[r] = v
                 finally:
                     if en_sw != 0:
                         wr(EN_SW_OVERRIDE, en_sw)
@@ -958,7 +1017,7 @@ def ff_layout(bdf=None):
                 bar.close()
         finally:
             card_lock.release()
-    L = ff_layout_from_occupied(occupied)
+    L = ff_layout_from_occupied(occupied, values)
     L["bdf"] = bdf
     return L
 
@@ -966,6 +1025,17 @@ def ff_layout(bdf=None):
 def ff_policy(layout, row, mirror=False, value=None):
     """Placement-policy verdict for a candidate burn row. Returns a list of
     issues (empty = compliant). Hard-enforced on every burn path.
+
+    With `value` and a layout carrying `last_row_for_block` (task 31), the
+    placement rule is PER BLOCK last-wins: the row must be blank and
+    strictly after the last row holding a record for the value's block —
+    the controller replays FF records in row order and the LAST record per
+    block wins. The global burn/SM/revert zones are then display
+    heuristics only: an already-burned card scatters records to the end of
+    the zone, and its blank rows before the global last_occupied are valid
+    placements for blocks whose own history ends earlier.
+    Without a value (or a layout without the block map) the old
+    conservative global zone rule applies.
 
     With `value`, also refuses IFF records in the FF region: bit 5 of an FF
     word is the invalidation flag — a bit5-set record is not a chain/block/
@@ -984,23 +1054,40 @@ def ff_policy(layout, row, mirror=False, value=None):
                           f"IFF (invalidation) flag, not an FF record; IFF "
                           f"writes are prohibited (a stray IFF can truncate "
                           f"the FF pool)")
-        if row <= L["last_occupied"]:
-            issues.append(f"row {row} is OCCUPIED — boot FFs end at row "
-                          f"{L['last_occupied']} ({L['occupied_count']} records)")
-        elif row < zs:
-            issues.append(f"row {row} is inside the boot-FF buffer — keep "
-                          f">={L['buffer']} empty rows clear after the last "
-                          f"boot FF (row {L['last_occupied']})")
-        if row > ze:
-            if row >= L["revert_zone"][0]:
-                issues.append(f"row {row} is inside the reserved REVERT tail "
-                              f"(rows {L['revert_zone'][0]}-{L['revert_zone'][1]}) "
-                              f"— that space corrects mistakes; burning it "
-                              f"removes your recovery budget")
-            elif row >= L["sm_zone"][0]:
-                issues.append(f"row {row} is inside the reserved SM "
-                              f"re-disable zone (rows {L['sm_zone'][0]}-"
-                              f"{L['sm_zone'][1]})")
+        blmap = L.get("last_row_for_block")
+        if value is not None and blmap is not None:
+            occ = L.get("occupied_rows") or []
+            if row in occ:
+                issues.append(f"row {row} is OCCUPIED (non-blank) — FF "
+                              f"burns need a blank row")
+            blk = (value >> 6) & FF_MAX_BLOCK
+            last = blmap.get(blk, blmap.get(str(blk), FF_START - 1))
+            if row <= last:
+                issues.append(f"row {row} is not after block {blk}'s last "
+                              f"record (row {last}) — the controller "
+                              f"replays FF records in row order and the "
+                              f"LAST record per block wins; a record at or "
+                              f"before row {last} would not take effect")
+        else:
+            if row <= L["last_occupied"]:
+                issues.append(f"row {row} is OCCUPIED — boot FFs end at row "
+                              f"{L['last_occupied']} ({L['occupied_count']} "
+                              f"records)")
+            elif row < zs:
+                issues.append(f"row {row} is inside the boot-FF buffer — "
+                              f"keep >={L['buffer']} empty rows clear after "
+                              f"the last boot FF (row {L['last_occupied']})")
+            if row > ze:
+                if row >= L["revert_zone"][0]:
+                    issues.append(f"row {row} is inside the reserved REVERT "
+                                  f"tail (rows {L['revert_zone'][0]}-"
+                                  f"{L['revert_zone'][1]}) — that space "
+                                  f"corrects mistakes; burning it removes "
+                                  f"your recovery budget")
+                elif row >= L["sm_zone"][0]:
+                    issues.append(f"row {row} is inside the reserved SM "
+                                  f"re-disable zone (rows {L['sm_zone'][0]}-"
+                                  f"{L['sm_zone'][1]})")
     if mirror:
         mrow = row + 1 if row % 2 == 0 else row - 1
         for issue in ff_policy(layout, mrow, False, value):
