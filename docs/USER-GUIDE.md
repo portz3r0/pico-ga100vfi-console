@@ -120,10 +120,10 @@ loader `0x120060=0`, `FUSECTRL_PLM`/`PRIV_MASK` open, `DEBUGCTRL=0`,
 they read closed outside a burn by design and are opened by the arm
 sequence inside the burn itself — they never block the check or burn.
 
-![Check result — green window bits, amber arm-pending rows](images/console-check-panel.png)
+![Check result — green window bits, amber arm-pending rows (captured on a previous build)](images/console-check-panel.png)
 
-*Captured from the current console UI in mock mode on the latest code, including the brick-risk warning banner (representative fuse data);
-card serial, host name, IP addresses, username and home paths are masked.*
+*Captured on a previous build (horizontal-tab chrome). Check needs a live card — the mock console refuses it with an error line, so this
+result panel cannot be re-rendered from mock; the shot is kept as-is rather than replaced with a mock error strip.*
 
 **Burn Preview panel** (`Preview burn (read-only)`): a dry-run of the
 exact payload that **cannot write** — the server runs it through a card
