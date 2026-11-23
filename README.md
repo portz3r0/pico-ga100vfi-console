@@ -27,12 +27,13 @@ MIT licensed. See `LICENSE`.
 ## Fuse Console (this fork's addition)
 
 The Fuse Console is a self-contained web GUI for the whole GA100 fuse
-workflow — live register/fuse viewing, glitch campaigns, guarded burns,
-driver load/unload/blacklist, and GPU status, served from the `ga100vfi`
-package:
+workflow, built around one goal: **unlock every unlockable (recoverable)
+TPC/SM on the card**. Live register/fuse viewing, glitch campaigns,
+guarded burns, driver load/unload/blacklist, and GPU status, served from
+the `ga100vfi` package:
 
 ```sh
-sudo python3 -m ga100vfi console --port 8790
+sudo python3 -m ga100vfi.console --port 8790
 # open http://<host>:8790
 # the card is auto-detected — pass --bdf only to choose which one the live
 # view watches on a multi-GPU host (burns pick any GA100 at runtime)
@@ -48,9 +49,17 @@ sudo python3 -m ga100vfi console --port 8790
 mode on the latest code, including the brick-risk warning banner (representative fuse data); card serial, host name, IP addresses,
 username and home paths are masked.*
 
-- Four tabs: **Fuse Explorer** (pure-read live poll with a change feed, full
+- Four tabs — **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,
-  **Drivers**, **GPU Info**
+  **Drivers**, **GPU Info** — in a frozen topbar + vertical tab rail +
+  right status rail layout (collapses to stacked rows on narrow windows)
+- Unlock-goal interpretation: **DEFECTIVE** comes from the FF-region fuse
+  words (permanent dead silicon), the runtime/SKU disable words are *not*
+  defects; the TPC map shows `SM now`, the **fuse ceiling** and the
+  **unlock headroom** (ceiling − now) — your unlock target per GPC
+- Two operating modes: driver **unbound** = full live view + glitch/burn;
+  driver **bound** = live view paused (raw BAR0 reads can wedge GSP) with
+  a manual guarded capture instead
 - Burn values can be typed **or grabbed from a dump row** — the console
   shows the record decoded (`chain/block/data`, known block names) for
   verification, so hex never has to be hand-typed
@@ -83,7 +92,7 @@ username and home paths are masked.*
   HTTP API, systemd unit, troubleshooting:
   **[docs/CONSOLE.md](docs/CONSOLE.md)**
 
-Headless equivalents: `sudo python3 -m ga100vfi fusedump` (full dump, card
+Headless equivalents: `sudo python3 -m ga100vfi.fusedump` (full dump, card
 auto-detected) and `ga100vfi-console` (the service) after
 `pip install -e host/`.
 
@@ -317,15 +326,18 @@ host/
     sim.py         simulated cards for tuning the planner (`python -m ga100vfi.sim`)
     telemetry.py   per-run JSONL telemetry writer and opt-in anonymized upload
     cli.py         `ga100vfi` CLI (`campaign`, `attempt`, `classify`, `baseline`, `revert`, `share`)
-    fusedump.py    full read-only fuse dump (rows 0–487 via CMD_READ)
-    console/       web console: `python -m ga100vfi console`
+    fusedump.py    full read-only fuse dump (rows 0–487 via CMD_READ) + TPC/SM interpretation
+    guarded.py     driver-bound guarded fuse capture (preflight + write allowlist)
+    version.py     self-describing provenance (VERSION, git sha, fingerprint)
+    console/       web console: `python -m ga100vfi.console`
       service.py   HTTP service + glitch/burn/driver/gpu endpoints
       gui.py       the tabbed dark GUI (static + live HTML generator)
 docs/
   ADAPTIVE.md      `campaign --adaptive`: 3D CRC-guided search, flags, hardware and sim results
   BUILD.md         prerequisites, per-family build, flashing, verification
   PROTOCOL.md      serial command set and firmware safety invariants
-  CONSOLE.md       the Fuse Console: tabs, API, burn safety model, systemd unit
+  CONSOLE.md       the Fuse Console: UI, end-to-end unlock workflow, API, burn safety model, systemd unit
+  USER-GUIDE.md    plain-language operating manual (safeguards, success reading, recovery, glossary)
   images/          wiring diagram and tap-point photos
 ```
 

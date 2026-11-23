@@ -1,37 +1,44 @@
 # Fuse Console
 
-A self-contained web GUI + service for GA100 (CMP 170HX) fuse work: live
-register/fuse viewing, glitch campaigns, guarded fuse burns, driver control,
-and GPU status — all in the `ga100vfi` package, driven from a browser.
+A self-contained web GUI + service for GA100 fuse work (CMP 170HX and
+rebranded A100 `10de:20b5` — same die, same fuse block). Everything here
+serves one goal: **unlock every unlockable (recoverable) TPC/SM on the
+card** — read the die's own defect fuses, glitch into the state where the
+floorsweep can be rewritten, burn the FF records that re-enable every
+disabled-but-healthy unit, and verify the result. Live register/fuse
+viewing, glitch campaigns, guarded fuse burns, driver control and GPU
+status, all in the `ga100vfi` package, driven from a browser.
 
-This document has three parts: **how to run it**, **how to use it**
-(a tour of the tabs, the step-by-step workflows, and what every indicator
-means), and **reference** (burn safety model, HTTP API, systemd, testing).
-For a plain-language operating manual (safeguard table, success reading,
-failure recovery, glossary) see the [User Guide](USER-GUIDE.md).
+This document has three parts: **how to run it**, **how to use it** (the
+UI layout, the two operating modes, what the interpretation numbers mean,
+and the end-to-end unlock workflow), and **reference** (burn safety model,
+HTTP API, systemd, testing, troubleshooting). For a plain-language
+operating manual (safeguard table, success reading, failure recovery,
+glossary) see the [User Guide](USER-GUIDE.md).
 
 ## Requirements
 
-- Linux host with the CMP 170HX installed and the pico plugged into the
-  **same host** (`/dev/ttyACM0` — campaigns need serial control of the pico
-  and PCIe BAR0 access to the card simultaneously).
+- Linux host with the GA100 card installed and the pico plugged into the
+  **same host** (default `/dev/ttyACM0` — campaigns need serial control of
+  the pico and PCIe BAR0 access to the card simultaneously).
 - The `ga100vfi` package importable (`pip install -e host/` or
   `PYTHONPATH=host`), with `pyserial`.
 - Root — BAR0 access goes through sysfs `resource0`, and the driver
   blacklist actions write `/etc/modprobe.d`.
-- Any browser on the same LAN. The service has **no authentication**: run it
-  on a trusted network or front it with your own auth proxy.
+- Any browser on the same LAN. The service has **no authentication**: run
+  it on a trusted network or front it with your own auth proxy.
 
 ## Starting the console
 
 ```sh
-sudo python3 -m ga100vfi.console --port 8790
+sudo python3 -m ga100vfi.console --bdf 0000:41:00.0 --port 8790
 # or, after `pip install -e host/`:
 sudo ga100vfi-console --port 8790
-# the card is auto-detected; pass --bdf only to choose which card the
-# Fuse Explorer watches on a multi-GPU host (burns pick any GA100 at runtime).
-# If the configured BDF is not present (card moved slots), the console
-# follows the detected GA100 and says so via default_note — never a phantom.
+# --bdf is optional: the card is auto-detected; pass it only to choose
+# which card the Fuse Explorer watches on a multi-GPU host (burns and
+# campaigns pick any GA100 at runtime). If the configured BDF is not
+# present (card moved slots), the console follows the detected GA100 and
+# says so via default_note — never a phantom.
 ```
 
 Then open `http://<host>:8790`. The service generates its own `live.html`
@@ -44,208 +51,347 @@ Useful flags:
 |---|---|---|
 | `--bdf` | auto-detected | the card the Fuse Explorer tab watches live |
 | `--port` | `8790` | HTTP port |
-| `--state-dir` | `~/ga100-fuse-view` | full dumps, generated `live.html`, `goldilocks.jsonl` |
+| `--listen` | `0.0.0.0` | bind address (`127.0.0.1` keeps it host-local) |
+| `--state-dir` | `~/ga100-fuse-view` | full dumps, generated `live.html`, `goldilocks.jsonl`, burn journal |
 | `--poll` | `1.0` | server-side probe interval (seconds) |
 | `--rows` | `0-487` | row range for full dumps |
 | `--ff-buffer` / `--ff-tail-reserve` / `--ff-sm-reserve` | 4 / 12 / 16 | burn placement policy zones |
+| `--mock` | — | serve a recorded `dump.json` instead of a real card (see Testing) |
 
 For a permanent install see [the systemd unit](#systemd-example) below —
 order it after `network.target`, not `multi-user.target`, or it can come up
 minutes late on slow boots.
 
+## The UI at a glance
+
+- **Frozen top bar** — title `GA100 Fuse Console`, a meta line under it
+  (BDF, PCI id + revision, bound driver, dump time, fuse fingerprint, row
+  count), and on the right a **Support bundle** button (downloads the
+  `tar.gz` described in [Submitting a support bundle](#submitting-a-support-bundle))
+  next to the `pico-ga100vfi · live console` badge. The top bar stays
+  pinned while you scroll.
+- **Vertical tab rail (left)** — four tabs: `Fuse Explorer`,
+  `Glitch & Burn`, `Drivers`, `GPU Info`. The active tab is highlighted;
+  arrow keys move between them.
+- **Right status rail** — the live bar: the live indicator pill (starts at
+  `connecting…`), the `GPU:` selector (which GA100 the Fuse Explorer
+  targets), the `page poll:` selector (`off` / `1s` / `2s` / `5s`), the
+  **⟳ Run full dump** button, and the interpretation feed (timestamped
+  register-change lines).
+- **Narrow windows (≤ 860 px)** — the tab rail collapses to a horizontal
+  sticky row under the top bar and the status rail un-sticks and moves
+  above the content; nothing is hidden, the layout just stacks.
+
+## The two operating modes
+
+What the console can do depends on whether the `nvidia` driver is bound to
+the card:
+
+- **Driver unbound** — full operation. The server-side poller reads BAR0
+  directly (pure reads, safe any time), the live view updates, and glitch
+  campaigns / burns are available.
+- **Driver bound** — the live view **pauses**: raw BAR0 reads against a
+  GSP-driven card can wedge the GSP (WPR2 stuck — only a cold boot
+  recovers). The live pill shows
+  `driver '<driver>' bound — raw BAR0 live view disabled (Drivers tab -> Unload nvidia stack to resume)`
+  and the paused panel explains itself (fuse values only change via burns
+  or glitches — re-dump if anything changed) and offers a manual
+  **Capture fuse dump (driver bound)** — a preflighted, consented guarded
+  capture whose results are labelled **UNVERIFIED (driver bound)** (see
+  [Driver-bound guarded capture](#driver-bound-guarded-capture)).
+  Glitch campaigns refuse to start entirely while a driver is bound: every
+  attempt reprograms PCI `COMMAND`/`BAR0` via `bar0.restore()`, which
+  corrupts GSP boots under a bound driver.
+
+The **Drivers** tab is the switch between modes: **Unload nvidia stack**
+to go unbound, **Load nvidia** to hand the card back.
+
+## Reading the numbers: what DEFECTIVE, the ceiling and headroom mean
+
+Chasing the unlock means reading three things correctly. The console's
+TPC map and totals come from `fusedump.tpc_summary`:
+
+- **DEFECTIVE = FF-region fuse words, permanent.** Per-GPC defective TPC
+  masks come from the FF-region readout words `TPC_DEFECT_FF`
+  (`0x8205C8`, `0x820508`, `0x82050C`, `0x820514`, `0x820564`, `0x8205AC`,
+  `0x820B84`, `0x820B80`) — the only defect source that survives GPC
+  power-gating, hence the only correct ceiling source on stock floorswept
+  cards.
+- **The runtime / SKU words are NOT defects.** `0x820760+gpc*4` is the SKU
+  floorsweep disable word and `0x820C38+gpc*4` the runtime TPC mask — both
+  live inside the GPC power well, and a floorswept (powered-off) GPC reads
+  `0xFF` in both. That is a power artifact, never a defect count. (A
+  2026-11-19 regression read `0x820760` as the defective array and counted
+  24 phantom dead TPCs on a stock 170HX; the ceiling MUST come from the FF
+  words — fleet-verified 13/13 against the kate-land ga100-options table.)
+- **sm_now vs the fuse ceiling vs headroom.** `sm_now` counts SMs enabled
+  right now (0 for a floorswept GPC). The **fuse ceiling** (`sm_max`,
+  shown as `SM after unlock (fuse ceiling)`) is `(8 − defective TPC) × 2`
+  per non-defective GPC — the most this die can ever run. The gap between
+  them is your **unlock headroom** (`unlock headroom: N TPC / M SM`):
+  every disabled-but-healthy TPC, including whole floorswept-but-healthy
+  GPCs. That number is the unlock target.
+- **Old dumps self-repair.** When a dump carries the hex window
+  (`hex_window_0x820000.txt` / `hexnonzero`), the FF defect words are
+  re-read from it as ground truth — dumps saved by older builds whose
+  defect keys came from the runtime word interpret correctly again.
+
+Where each UI number comes from: the **TPC map** cells and per-GPC lines
+from the per-GPC masks above (bit set = masked; 8 TPC per GPC, 2 SM per
+TPC); the **Silicon topology** GPC/FBP boxes from `GPC_DISABLE` /
+`GPC_DEFECTIVE` / `FBP_DISABLE` / `FBP_DEFECTIVE`; the memory claim from
+live FBP count × 8 GB; the **Diagnosis** verdict from the floorsweep masks
+(zeroed masks + dead silicon enabled = the brick signature).
+
 ## A tour of the tabs
 
 ### Fuse Explorer
 
-The live view of the card the service was started with.
+The live view of the selected card.
 
 ![Fuse Explorer tab](images/console-explorer.png)
 
 - **Refresh model (default: calm)**: the heavy full-page register redraw
   is **off by default** — pick a rate in the `page poll` selector only
   when you want the register grid to live-redraw. What keeps refreshing
-  regardless: the **interpretation feed** (register-change diff, 2 s),
-  the **dmesg tail** (GPU-relevant lines, 2 s), the **Glitch campaign
-  log** (1 s), the **Drivers log**, and the **GPU Info monitor** (1 s,
-  user-adjustable 1–10 s or off). All pollers pause when the browser tab
-  is hidden.
-- **Safety guard**: while the `nvidia` driver is bound to the card, the
-  server-side BAR0 poller **pauses itself** (live indicator shows
-  `⏸ driver bound`). Raw BAR0 reads against a GSP-driven card can wedge
-  the GSP into a state only a full power-cycle recovers. Unload the
-  driver (Drivers tab) to resume live register viewing. The pause is not
-  a dead end: the paused banner explains it (fuse values only change via
-  burns/glitches — re-dump if anything changed) and offers **Capture
-  fuse dump (driver bound)**, a manual guarded capture (see
-  [Driver-bound guarded capture](#driver-bound-guarded-capture)).
+  regardless: the **interpretation feed** (register-change diff, 2 s), the
+  **dmesg tail** (GPU-relevant lines, 2 s), the **Glitch campaign
+  log** (1 s), and the **GPU Info monitor** (1 s, user-adjustable 1–10 s
+  or off). All pollers pause when the browser tab is hidden.
 - **Live feed**: status + shadow register changes flash amber and land in
-  the activity feed; you will see `DSOV` flip `1 → 0` the moment a
+  the activity feed; you will see `DSOV` flip from 1 to 0 the moment a
   glitch lands.
 - **⟳ Run full dump**: all fuse rows 0–487 via the fuse-macro `CMD_READ`
   path, plus the hex window and dmesg, archived to
   `<state-dir>/dumps/<ts>/`. The page requests one automatically on
-  load; while a campaign is running the server refuses it (a mid-campaign
-  sweep could push classify past the Goldilocks window).
-- **Topology**: GPC/FBP floorsweep vs. defective masks, with a state
-  selector (pre-glitch reference / intended / NOW) — dead silicon that is
-  *enabled* is drawn red-hatched.
+  load; while a campaign is running the server refuses it (`campaign
+  running — full dump refused` — a mid-campaign sweep could push classify
+  past the Goldilocks window).
+- **Diagnosis**: the brick-signature verdict — floorsweep masks fully
+  cleared with dead silicon enabled is drawn red; otherwise *masks-cleared
+  brick signature absent*.
+- **Silicon topology — GPC / FBP floorsweep**: one box per GPC and FBP
+  with a state selector (`Pre-glitch reference` / `Intended (this card's
+  defects)` / `NOW (live)`) and a legend: `active`,
+  `floorswept (re-enableable)`, `dead silicon · off`,
+  `dead silicon · ENABLED (brick)`. The unlock goal in this view: `NOW`
+  matching `Intended` — every non-defective unit active.
 - **TPC map — SM availability per GPC**: one row per GPC, 8 TPC cells
-  each (2 SM per TPC). Cell colours: **green** = enabled now, **yellow** =
-  disabled-but-healthy (unlock headroom), **red** = defective silicon
-  (never usable). Per-GPC line: `SM now · after unlock · defective SM
-  (+ recoverable)`; totals pills at the bottom.
-  - Sources: TPC **defective** from the FF-region per-GPC words
-    (`TPC_DEFECT_FF`) — ground truth, the only defect source that survives
-    GPC power-gating; the runtime word `0x820760 + gpc·4` is a legacy
-    fallback for old dumps only. Effective TPC **disable** array
-    `0x820C38 + gpc·4` (defective ⊆ disable; the extra bits are
-    factory-disabled-but-healthy).
-  - *After unlock* is the **fuse ceiling**: `(8 − defective TPC) × 2 SM`
-    per non-defective GPC. It assumes the GPC-level floorsweep is
-    unlocked too — the TPC mask is separate from `GPC_DISABLE`. Cells in
-    a floorswept or dead GPC are dimmed: their health is shown, but they
-    only run once the GPC itself is enabled.
-  - Note: a GPC can be unflagged in `GPC_DEFECTIVE` yet fully defective
-    at TPC granularity (e.g. GPC2 with all 8 TPCs masked) — the TPC map
-    exposes this; the GPC-level topology view cannot.
-- **Row explorer**: every fuse row with region colouring (MAIN / UNIQ /
-  FPF / FF), pairing, and the verified FF-record decode
-  (`chain`, `iff`, `block`, `data`). Click a row for its 32-bit breakdown.
+  each (2 SM per TPC). Cell colours: **green** = `enabled now`, **yellow**
+  = `disabled · healthy (unlock headroom)`, **red** =
+  `defective silicon (never usable)`. Per-GPC line: `SM now`,
+  `after unlock`, defective count and `+N recoverable`; totals pills at
+  the bottom (`SM now`, `SM after unlock (fuse ceiling)`, `defective`,
+  `unlock headroom`). Floorswept or dead GPCs are marked (`floorswept` /
+  `GPC defective`) and their cells dimmed: their health is shown, but
+  they only run once the GPC itself is enabled — the TPC ceiling assumes
+  the GPC-level floorsweep is unlocked too.
+  Note: a GPC can be unflagged in `GPC_DEFECTIVE` yet fully defective at
+  TPC granularity — the TPC map exposes this; the topology view cannot.
+- **Row explorer**: every fuse row with region colouring (`MAIN` / `UNIQ`
+  / `FPF` / `FF`), filter buttons `Non-blank`, `FF records`, `All rows`,
+  `MAIN`, `FPF`, `FF`, a search box, and the verified FF-record decode
+  (`chain`, `iff`, `block`, `data`). Click a row for its 32-bit breakdown
+  and the record timeline (last record per block marked
+  `LAST — EFFECTIVE`).
 - dmesg and hex-window browsers underneath.
 
 ### Glitch & Burn
 
-The campaign control room. Everything targets the GPU picked in the
-**Target** card at the top (serial + bound driver + live Goldilocks state).
-Below it: the **burn placement policy** (rules + a live row map of the FF
-region + the remaining burn budget), the **burn payload** form, and the
-**campaign** controls. See the workflows below for the full sequence.
-
-The burn payload form has a **value source** selector: *typed hex*, or
-*from dump row* — enter the row of an existing record and the console
-grabs its value from the loaded dump and shows it decoded
-(`FF ch·blk·data`, known block names, IFF flagged) for verification, so
-burn values never have to be typed by hand. Blank or missing source rows
-warn instead of proposing a burn of zero.
+The campaign control room. A brick warning banner heads the tab: *Burns
+are permanent OTP writes — a wrong burn can BRICK your GPU permanently.*
+Everything targets the GPU picked in the **Target** card at the top (live
+state pill + board serial + bound driver). Standalone burns are only
+allowed on a GPU currently in the **Goldilocks** state — the campaign's
+burn-on-goldilocks mode creates that state on the selected GPU.
 
 ![Glitch & Burn tab](images/console-glitch-burn.png)
 
+- **Burn placement policy**: the seven brick rules, a live row map of the
+  FF region (`boot FFs · N` | `buffer N` | `BURN ZONE · N free` |
+  `SM reserve N` | `revert N`) and the budget pill
+  (`safe zone rows A–B · N free · last boot FF: row N`). The target-row
+  field shows a live zone verdict (`✓ safe zone`, `✗ occupied (boot FF)`,
+  `✗ buffer zone`, `✗ SM reserve (keep free)`, `✗ revert tail (keep free)`,
+  `✗ outside FF region`).
+- **Burn payload**: target row, **value source** selector (`typed hex` or
+  `from dump row` — enter the row of an existing record and the console
+  grabs its value from the loaded dump and shows it decoded, FF
+  ch·blk·data with known block names, IFF flagged, so burn values never
+  have to be typed by hand; blank or missing source rows warn instead of
+  proposing a burn of zero), a mirror-row checkbox, **Check row & guards**
+  and **Preview burn (read-only)** (see the burn workflow below for what
+  each shows).
+  Editing any input invalidates a completed check (`payload edited —
+  re-check`) — the check IS the safety contract.
+- **Suggested burns — minimum common unlock**: derived from **this card's
+  own defect masks** in the loaded dump — every disabled-but-healthy unit
+  re-enabled in one pass: GPC 1 word + FBP 1 word + FBPA 2 words = 4
+  words. **⤓ Queue all needed records** puts them in the queue; already
+  equal masks report *this card needs no unlock burns*; a word already
+  present in the dump is tagged `ALREADY IN DUMP — row N`. An optional
+  **DEVID change** (e.g. `0x20B5`) adds an identity A/B pair via
+  **+ Queue DEVID A/B pair** (takes effect at next cold boot).
+- **Burn queue**: all queued records burn together inside **one**
+  Goldilocks window; rows are auto-assigned to free safe-zone rows at
+  campaign start (the server re-validates every row against the placement
+  policy). Custom records can be added by row + hex value, optionally
+  mirrored; **clear queue** empties it.
+- **Glitch campaign**: `v_dip mV`, `pulses`, `pw µs`, `gap µs`, `delay`,
+  `max attempts`, a **v_dip strategy** selector (`fixed v_dip` or the
+  default `adaptive 3D (v_dip · delay · pw)` with `adaptive v min mV` /
+  `adaptive v max mV` bounds), the pico **port** dropdown with **⟳
+  rescan**, a **mode** selector (`classify only — observe glitch states`
+  or `burn payload on first Goldilocks`), and a **Goldilocks window**
+  selector (`hold open — no revert (default)` or `auto-revert VRM`).
+  Buttons: **▶ Start campaign**, **■ Stop**, **⟲ Revert VRM** (enabled
+  only while a window is held). Stats chips: attempts / valid / lost /
+  nack / dsov=0 / goldilocks / burn aborts / image verify / held window.
+
 ### Drivers
 
-Live driver state (bound driver, module list, version, blacklist status) and
-Load / Unload stack / Blacklist nvidia+nouveau / Remove blacklist actions
-with two-step confirm buttons. Glitching needs `nvidia` unloaded **and**
-blacklisted — the driver re-locks the VRM and binds the card before you can
-inspect BAR0. The blacklist written here still allows manual `modprobe`, so
-you stay in control.
+Live driver state (bound driver, driver version, blacklist status, loaded
+modules) and the actions **Load nvidia**, **Unload nvidia stack**,
+**Blacklist nvidia + nouveau** (two-step confirm: click, then `confirm?`)
+and **Remove blacklist**. Glitching needs `nvidia` unloaded **and**
+blacklisted — the driver re-locks the VRM and binds the card before you
+can inspect BAR0. The blacklist written here (`/etc/modprobe.d/ga100-fuse-blacklist.conf`)
+still allows manual `modprobe`, so you stay in control. Unload unbinds the
+GPU from sysfs first, then `rmmod`s `nvidia_drm` / `nvidia_modeset` /
+`nvidia_uvm` / `nvidia`.
 
 ![Drivers tab](images/console-drivers.png)
 
 ### GPU Info
 
-nvidia-smi card grid (auto-refresh) + `lspci` link state. Reports the
+One section per GPU on the host (nvidia-smi card grid + `GA100 · fuse
+target` / `selected` tags), an nvtop-style **Live monitor** (util/mem
+sparklines, VRAM, power, temp, PCIe gen, compute-process table; refresh
+`1s`–`10s` or off) and **PCIe link (lspci)** state. Reports the
 `nvidia-smi` error string honestly when the card is GFW-dead — that banner
-is normal until the card boots cleanly.
+is normal until the card boots cleanly. While the nvidia module is absent
+the console deliberately skips nvidia-smi (`driver not loaded — nvidia-smi
+skipped (NVML would auto-load the driver)`) — calling it would silently
+undo a deliberate unload.
 
 ![GPU Info tab](images/console-gpu.png)
 
-## Workflows
+## The end-to-end unlock workflow
+
+The whole chase, in the order that actually works:
+
+1. **Drivers tab → driver unbound.** **Unload nvidia stack**, then
+   **Blacklist nvidia + nouveau** so a reboot doesn't re-bind it. Campaign
+   start refuses while any driver is bound.
+2. **PLM unlock (first Goldilocks).** Run a `classify only — observe glitch
+   states` campaign; when it hits Goldilocks (`DSOV = 0`, `CRC_STATUS =
+   0x55`, privilege masks open) the default **hold open — no revert**
+   leaves the window open — that state is the PLM unlock. Close it with
+   **⟲ Revert VRM** when done.
+3. **Full dump.** **⟳ Run full dump** on the Fuse Explorer tab (driver
+   unbound — the normal live path). The dump archives to
+   `<state-dir>/dumps/…`.
+4. **Read the ceiling and the headroom.** On the TPC map: `SM after unlock
+   (fuse ceiling)` is the maximum this die can run; `unlock headroom` is
+   what the unlock can still win. Defective TPCs are permanent — never
+   plan a burn that enables them.
+5. **Plan the records.** **Glitch & Burn** → *Suggested burns — minimum
+   common unlock* → **⤓ Queue all needed records** (GPC + FBP + FBPA
+   words derived from this card's own defect masks; optionally **+ Queue
+   DEVID A/B pair**). Review the queue; every record burns in one window.
+6. **Arm.** Type `BURN` in the arm field and press **Arm (120 s)** — the
+   button is gated on the selected GPU's live Goldilocks state.
+7. **Glitch campaign in burn mode.** Mode **burn payload on first
+   Goldilocks**, **▶ Start campaign**. On the first Goldilocks the
+   campaign burns the queued records **in-process** (the PCIe window dies
+   seconds after the campaign loop returns — a separate burn call would
+   miss it), re-checking every guard before each `CMD_WRITE`. The run ends
+   only when every record verifies; the window is then held open
+   (`window HELD open — verify/burn now, then Revert VRM or cold-boot`).
+8. **Cold boot and re-dump.** Power-cycle so the fuse controller replays
+   the new FF chain, then **⟳ Run full dump** again (re-unload the driver
+   first if it re-bound).
+9. **Verify against the ceiling.** `NOW (live)` topology should match
+   `Intended (this card's defects)`; `SM now` should have moved toward
+   `SM after unlock (fuse ceiling)`; `STATUS_OPT_GPC` / `STATUS_OPT_FBP`
+   are the latch that proves the chain took effect (a bit-exact row
+   readback does NOT prove the shadow followed). SMs that turn out bad
+   after unlocking get re-disabled with records in the **SM reserve** zone.
+10. **Anything looks wrong? Grab the Support bundle** (top bar) and attach
+    it to your bug report — it carries the exact bytes and the
+    interpretation trace.
 
 ### 1. Look at a card (read-only, zero risk)
 
 1. Start the console and open it. The status cards tell you the fuse-block
    health (`CRC_STATUS == 0x55` = parses cleanly) and lock state
    (`DSOV = 1` = factory-locked, the normal state).
-2. Press **⟳ Run full dump**. After a few seconds the row explorer fills in;
-   filter to *FF records* to see every chain/block/data triple.
+2. Press **⟳ Run full dump**. After a few seconds the row explorer fills
+   in; filter to `FF records` to see every chain/block/data triple.
 3. The dump is archived under `<state-dir>/dumps/<ts>/` — re-open it later
    with `python3 -m ga100vfi.console.gui <dump_dir> out.html`.
 
-### 2. Prepare the host for glitching
-
-1. Open the **Drivers** tab.
-2. **Unload nvidia stack** (click, then confirm). **Blacklist nvidia +
-   nouveau** (click, then confirm) so a reboot doesn't re-bind it.
-3. The state cards should now show `bound: none`. A campaign will refuse to
-   start otherwise (see Troubleshooting).
-
-Reverse with **Load nvidia** / **Remove blacklist** when you're done.
-
-### 3. Glitch to Goldilocks
+### 2. Glitch to Goldilocks (observe only)
 
 1. **Glitch & Burn** tab → Target card: pick the GPU (the pill shows its
    live state; the serial identifies the physical card) and the pico port
-   (dropdown, with a rescan button).
-2. Campaign card: choose the **v_dip strategy** — `adaptive 3D` is the
-   default selection. `fixed` uses your v_dip
-   value; `adaptive` (recommended for a card you haven't characterised)
-   runs the 3D CRC-guided search over (v_dip, delay, pw) and converges
-   on the card's window.
-3. Mode: **classify only** — no burns, just observe.
-4. **▶ Start campaign** and watch the log: every shot gets a line with its
-   `v_dip` and outcome (`under` / `hit` / `over` / `lost`) plus the
-   per-attempt classify values. Adaptive mode updates its model from every
-   outcome; fixed mode repeats one voltage.
-5. When the five checks pass the log prints `<< GOLDILOCKS`, the stats chip
-   flips to `goldilocks YES`, and (if you look at the Fuse Explorer tab) the
-   feed shows `DSOV: 0x1 → 0x0`. The hit is also appended to
+   (dropdown, with **⟳ rescan**).
+2. Choose the **v_dip strategy**: `adaptive 3D (v_dip · delay · pw)` is
+   the default — it runs the 3D CRC-guided search over (v_dip, delay, pw)
+   and converges on the card's window; `fixed v_dip` repeats one voltage.
+3. Mode: `classify only — observe glitch states` — no burns.
+4. **▶ Start campaign** and watch the log: every shot gets a line with
+   its `v_dip` and outcome — `under`, `crc_fail`, `warm`, `hit`, `over`,
+   `lost`, or `goldilocks` — plus the per-attempt classify values. The
+   adaptive planner steers from every outcome (see
+   [docs/ADAPTIVE.md](ADAPTIVE.md)); a hit prints `<< GOLDILOCKS` and the
+   goldilocks chip flips to `YES`. The hit is appended to
    `<state-dir>/goldilocks.jsonl` with the card serial.
-6. **Goldilocks window hold (default):** the campaign's **Goldilocks
-   window** dropdown defaults to **hold open — no revert**, so the run
-   ends with NVVDD still at glitch voltage and the shadow registers
-   writable — time to verify or burn from the Fuse Explorer tab. A
-   `window HELD open` chip appears; close the window with **⟲ Revert
-   VRM** (manual hand-back to PWM-VID) or a cold boot. Choosing
-   **auto-revert VRM** restores the old behavior (the campaign hands the
-   VRM back itself on exit). Misses, stops, and errors always revert
-   regardless of the dropdown — an interrupted run can never leave NVVDD
-   low.
-7. **■ Stop** ends a run early (the VRM is handed back). A stopped or
+5. **Goldilocks window hold (default):** the run ends with NVVDD still at
+   glitch voltage and the shadow registers writable — a `window HELD open
+   — verify/burn now, then Revert VRM or cold-boot` chip appears; close
+   the window with **⟲ Revert VRM** or a cold boot. Choosing
+   `auto-revert VRM` hands the VRM back on exit. Misses, stops, and errors
+   always revert regardless — an interrupted run can never leave NVVDD low.
+6. **■ Stop** ends a run early (the VRM is handed back). A stopped or
    exhausted campaign leaves the card in whatever state the last shot
    produced — re-run to try again.
 
-### 4. Burn an FF record (the full sequence)
+### 3. Burn an FF record (the full sequence)
 
 The full confidence sequence is **preview → check → arm → burn →
 predicted-vs-actual**.
 
-Prerequisite: a record derived from **this card's own defect masks**
-(e.g. via ffcalc) — never blind ffcalc output, and never a payload copied
-from another card. Plan the burn against the placement policy: the row map
-shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
+Prerequisite: a record derived from **this card's own defect masks** —
+never blind ffcalc output, and never a payload copied from another card.
+Plan against the placement policy: the row map shows the safe zone and the
+row field shows the zone verdict for whatever row you type.
 
-1. **Burn payload**: pick the **target row** (blank, inside the safe zone).
-   For the value, either type it, or — preferred — choose **value source:
-   from dump row** and enter the row of an existing record: the console
-   grabs the value from the loaded dump and shows it decoded
-   (`FF ch·blk·data`, plus the known block names) for you to verify —
-   no hex typing, no fat fingers. (Re-applying an existing record at a
-   later row is exactly how you override a block: last record wins.)
-   Press **Preview burn (read-only)** first — the console's version of
-   `ga100_burn.py`'s default preview mode. It works ANY time, even on a
-   cold-booted card outside any window, with no arm and no token
-   (`CMD_READ` is gated by `FUSECTRL_PLM`, not `EFP`), and issues **zero
-   fuse writes**: the server path receives a handle whose writes are
-   restricted to the `CMD_READ` controller path and raises on anything
-   that could latch. The panel shows:
+1. **Burn payload**: pick the **target row** (blank, inside the safe
+   zone). For the value, type it or use **from dump row** (preferred —
+   re-applying an existing record at a later row is exactly how you
+   override a block: last record wins). Press **Preview burn
+   (read-only)** first. It works ANY time, even on a cold-booted card
+   outside any window, with no arm and no token (`CMD_READ` is gated by
+   `FUSECTRL_PLM`, not `EFP`), and issues **zero fuse writes**: the server
+   path receives a handle whose writes are restricted to the `CMD_READ`
+   controller path and raises on anything that could latch. The panel
+   shows:
    - `before → Δ → after` per row (mirror included) with the delta bits
      highlighted on the bit strip;
    - both words decoded as FF records (`chain/iff/block/data` + known
      block names) when the row is in the FF region;
    - a **collision scan**: every existing record with the same
      `(chain, block)` key, row-numbered, with a LAST-WINS verdict badge —
-     green *will win*, or red *will LOSE to row N* (the burn would be
+     `LAST-WINS: will win`, or red *will LOSE to row N* (the burn would be
      **inert**; correct it by burning a later row); a same-key record at
      exactly a burned row is captioned *record already present at this
      row — re-burn is a no-op/ALREADY path*;
-   - **partial-landing hazards**: every subset of the delta that, if
-     only it latched, would win its `(chain, block)` key (a partial at
-     the burned row beats every earlier record) with data different
-     from the intent — advisory only, never a gate; same-data-as-intent
-     is benign, a strictly-later override is inert; effects are relative
-     to the burned row's effective winner (baseline stated) and every
-     burn row (mirror included) is analyzed; skipped above 12 delta
-     bits ("too many subsets");
+   - **partial-landing hazards**: every subset of the delta that, if only
+     it latched, would win its `(chain, block)` key with data different
+     from the intent — advisory only, never a gate; effects are relative
+     to the burned row's effective winner (baseline stated) and every burn
+     row (mirror included) is analyzed; skipped above 12 delta bits;
    - the **predicted effect** line when decodable (e.g. `FBP_DISABLE data
      0x4290 → 0x4200 (unmasks FBP1/FBP4)`) — `STATUS_OPT_*` shadows update
      only after a power cycle;
@@ -254,25 +400,26 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    `IMPOSSIBLE` (red, bits would clear) / `ALREADY BURNED` (amber).
    Preview is also the one burn-adjacent feature that works in `--mock`
    mode (read-only over the mock rows).
-   Then press **Check row & guards**. The result shows the row's current value,
-   the 0→1 purity, the **placement policy verdict** (bit-5/IFF values are
-   refused), and the **burn window** checks (top-line `SAFE TO BURN` /
-   `REFUSED`). `EFP`, `PROGRAM_DIS`, `SBFE`, `WDATA_SECURE` and
-   `FUSEWDATA_PLM` are shown amber as *arm pending* — they read closed
-   outside a burn by design and are opened at burn time by the SENSE_CTRL
-   arm sequence; they never block the check.
+   Then press **Check row & guards**. The result shows the row's current
+   value, the 0→1 purity, the **placement policy verdict** (`placement
+   policy: OK — row is in the safe burn zone` / `VIOLATION`; bit-5/IFF
+   values are refused), and the **burn window** checks (top-line
+   `SAFE TO BURN` / `REFUSED`). `EFP`, `PROGRAM_DIS`, `SBFE`,
+   `WDATA_SECURE` and `FUSEWDATA_PLM` are shown amber as *arm pending* —
+   they read closed outside a burn by design and are opened at burn time
+   by the SENSE_CTRL arm sequence; they never block the check.
 2. Type `BURN` into the arm field and press **Arm (120 s)**. The button is
-   disabled while the GPU in the target selector is not Goldilocks (tooltip
-   `selected GPU not Goldilocks — glitch first`); the server re-runs the same
-   4-check pure-read at arm time and refuses with the failing checks named if
-   the state changed between poll and arm. The countdown shows how long the
-   arm token is valid.
-3. Campaign card: mode **burn payload on first Goldilocks**. (The burn runs
-   *inside the campaign process* because the Goldilocks PCIe window dies
-   seconds after the campaign loop returns — a separate burn call would
-   miss it.)
-4. **▶ Start campaign**, confirm the dialog (it repeats the exact row,
-   value, mirror and target). The campaign glitches; on the first
+   disabled while the GPU in the target selector is not Goldilocks
+   (tooltip `selected GPU not Goldilocks — glitch first`); the server
+   re-runs the same 4-check pure-read at arm time and refuses with the
+   failing checks named if the state changed between poll and arm. The arm
+   pill counts the token down (`● armed Ns`).
+3. Campaign card: mode **burn payload on first Goldilocks**. (The burn
+   runs *inside the campaign process* because the Goldilocks PCIe window
+   dies seconds after the campaign loop returns — a separate burn call
+   would miss it.)
+4. **▶ Start campaign**, confirm the dialog (it repeats the exact rows,
+   values, mirror and target). The campaign glitches; on the first
    Goldilocks it burns the records in-process: each burn re-checks the
    driver-unbound state, journal, GPIO19 preflight and window, runs the
    SENSE_CTRL arm sequence, the EN=1 + GPIO19/TRIGGER program bracket with
@@ -291,42 +438,27 @@ shows the safe zone, and the row input auto-snaps into it with a ✓/✗ hint.
    readback and post-burn scan — any mismatch is red. Both the last
    preview and the last burn report are stored in the state dir
    (`last-preview.json`, `last-burn.json`, served by `/api/burn/last`).
-6. Cold-boot the card, then verify honestly — see workflow 5.
-
-### 5. After a burn: verify and, if needed, correct
-
-- A `VERIFY OK` readback means the bits landed — **not** that the shadow
-  followed. After the power cycle, open Fuse Explorer and check
-  `STATUS_OPT_GPC` / `STATUS_OPT_FBP`: they are the latch that proves the
-  chain took effect. Watch the topology view (NOW state) to see the floorsweep
-  change.
-- If a record was wrong or the shadow didn't follow: the fix is a **later**
-  record for the same block (last record per block wins). Use the next free
-  row in the safe zone — the revert tail at the end of the region exists
-  exactly for this, which is why the policy keeps it empty.
-- SMs that turn out to be actually bad after unlocking: re-disable them
-  with records in the **SM reserve** zone (kept free for this).
-- Every burn consumes a row; the budget pill counts down. Attempts are
-  finite — plan records before arming.
+6. Cold-boot the card, then verify honestly — step 9 of the end-to-end
+   workflow.
 
 ## Reading the UI
 
 | Indicator | States and meaning |
 |---|---|
-| live bar pill (top) | `● live — <time>` polling fine · `⚠ service unreachable` page lost the server · `⚠ BAR0 unreadable` card link is down — **normal mid-glitch** |
+| live bar pill (top of the status rail) | `● live — <time>` polling fine · `⏸ driver '<driver>' bound — raw BAR0 live view disabled (Drivers tab -> Unload nvidia stack to resume)` (paused, driver bound) · `⚠ service unreachable` page lost the server · `BAR0 unreadable — bus hung or PCIe link down (normal mid-glitch / after reset)` — **normal mid-glitch** |
 | activity feed | timestamped register changes; flashes the matching card |
-| target GPU pill | `● Goldilocks — glitch window` (4-check read-only approximation) · `locked (DSOV=1) — glitch first` · `⚠ unreadable` |
-| burn window pill | `● burn window open` · `burn window closed (<failed bits>)` · `window: n/a` — read-only verdict from `/api/live` (`window_ok` + `window_checks`) |
+| target GPU pill (Glitch & Burn) | `● Goldilocks — glitch window` (4-check read-only approximation) · `locked (DSOV=<n>) — glitch first` · `⚠ <error>` · `no GA100 detected` |
+| burn window pill | `● burn window open` · `burn window closed (<failed checks>)` · `window: n/a` — read-only verdict from `/api/live` (`window_ok` + `window_checks`) |
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
-| row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve` · `✗ revert tail` |
-| value source decode | `dump row N → 0x…` + decoded `FF ch·blk·data` (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
+| row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve (keep free)` · `✗ revert tail (keep free)` · `✗ outside FF region` |
+| value source decode | `dump row N → 0x…` + decoded FF ch·blk·data (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | Preview burn button | enabled whenever row+value are set — **no window/arm/token requirement** (read-only works on a cold card and in mock); panel: verdict banner `SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`, before→Δ→after with delta bits highlighted, FF decode table, LAST-WINS collision badge (green win / red lose), amber hazard list, predicted effect, window/arm/journal strip |
 | budget pill | safe zone rows, free count, last boot FF row |
-| arm pill | `● armed Ns` (countdown) · `not armed` · red = rejected phrase or server Goldilocks refusal (failing checks named) |
+| arm pill | `● armed Ns` (countdown) · `not armed` · red = refused (bad phrase or server Goldilocks refusal, failing checks named) — the refusal stays visible until the phrase is edited or an arm succeeds |
 | Arm button | disabled until the current poll of the **selected** GPU says Goldilocks (tooltip `selected GPU not Goldilocks — glitch first`); re-evaluated on poll refresh and GPU-dropdown change; the server re-runs the 4-check pure-read at arm time |
-| Burn now button | enabled only when armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
-| campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` |
-| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / image verify failed |
+| Burn now button | enabled only when checked **and** armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
+| campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` · `idle` |
+| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts (not final — attempts keep firing) / image verify failed (window NOT held) / `window HELD open — verify/burn now, then Revert VRM or cold-boot` |
 | burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero latching writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
 
 ## Burn safety model (reference)
@@ -376,7 +508,7 @@ server-side immediately before `CMD_WRITE`:
    `CMD_READ` (`FUSEADDR`/`FUSECTRL`) and conditionally clears/restores
    `EN_SW_OVERRIDE` for the read — it never issues SENSE, never writes
    `FUSEWDATA`, never raises `EN_SW_OVERRIDE`, and never touches
-   `GPIO`/`TRIGGER`. A static `EFP == 0` or `FUSEWDATA_PLM == 0xFFFFFFF8`
+   `GPIO`/`TRIGGER`. A static `EFP == 0` or closed `FUSEWDATA_PLM`
    is normal outside a burn and must not block the check or the burn.
 8a. **Preview** (`/api/burn/preview`, mirrors `ga100_burn`'s default
    preview mode) is structurally read-only: it receives a card handle
@@ -457,13 +589,20 @@ bricked.
 ## Driver-bound guarded capture
 
 The live poll pauses while `nvidia` is bound, but fuse values still change
-under you (a burn elsewhere, a glitch). The paused banner therefore offers
+under you (a burn elsewhere, a glitch). The paused panel therefore offers
 a manual **Capture fuse dump (driver bound)** — a guarded reader ported
 from the proven standalone collector (`ga100_dump.py`), which reads fuses
 with the driver bound by gating on hardware *state*, not driver presence.
+The panel can be collapsed to a one-line bar (**Expand ▾** / **Collapse
+▴**) that keeps showing the age of the last complete dump.
 
-**Preflight conditions** (all read-only, shown before anything runs; the
-capture refuses with the specific failed condition + fix hint):
+**Consent flow**: the button first runs a read-only preflight and shows
+every condition with its read value, expected value and fix hint, plus
+what the capture will do; the **Capture now** button is enabled only when
+every condition passes (`fix the failed conditions first` otherwise).
+
+**Preflight conditions** (all read-only; the capture itself re-runs them
+and refuses with `preflight refused: <names>` + the failed conditions):
 
 | Condition | Expected | Fix hint when it fails |
 |---|---|---|
@@ -475,17 +614,17 @@ capture refuses with the specific failed condition + fix hint):
 | `EN_SW_OVERRIDE` (`0x820040`) | `0` or `1` | software override set — physical reads need it disabled |
 | `FUSEADDR` (`0x820004`) | `< 512` | address counter out of range |
 
-**What the capture does** (shown in the consent panel; Confirm is enabled
-only when every condition passes): issues 512 fuse `CMD_READ`s ×2 passes
-(the two passes must agree), writes **only** `CTRL`/`ADDR`/`EN` — never
+**What the capture does** (shown in the consent panel): issues 512 fuse
+`CMD_READ`s ×2 passes (the two passes must agree — `Physical fuse read
+passes disagree` otherwise), writes **only** `CTRL`/`ADDR`/`EN` — never
 PLM, SWIFF, GPIO or voltage — restores the controller's `ADDR`/`EN` in a
-`finally` block, snapshots the whole fuse aperture (`0x820000..0x826000`)
+`finally` block, snapshots the whole fuse aperture (0x820000..0x826000)
 before and after, and takes seconds. It refuses if the driver unbinds
 mid-flight or the host boot id changes.
 
 **UNVERIFIED semantics**: every result is labelled `UNVERIFIED (driver
 bound)` — in the result panel, in the saved `dump.json`
-(`"driver_bound": true, "verified": false`), and in the support bundle's
+(`driver_bound` / `verified` markers), and in the support bundle's
 `interpretation.txt`. The reads are the same physical path the
 driver-unbound dump uses, but they run with the driver loaded, so treat
 them as indicative until re-confirmed with the driver unbound. The saved
@@ -496,26 +635,28 @@ trace and support bundle all pick it up like any other dump.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — and the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE) |
+| GET | `/` | the tabbed GUI (generated `live.html`) |
+| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE), and the provenance block `version` (`tool_version` / git sha / `fingerprint`). While the driver is bound it returns the `paused` snapshot (+ `paused_hint`, `manual_dump_available`, `last_dump_age_s`). `?bdf=` probes another GA100 on demand (same never-probe-while-bound rule) |
 | GET | `/api/full` | full row dump + hex window |
 | GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
+| GET | `/api/gpus/all` | every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF |
 | GET | `/api/ff/layout` | FF region occupancy + policy zones |
 | GET | `/api/glitch/status` | campaign stats + log tail |
-| POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, records, `no_revert` — default **true**: a Goldilocks result holds the window open) |
+| POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, `min_v`/`max_v`, records, `no_revert` — default **true**: a Goldilocks result holds the window open; `ack_uncertain`) |
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
-| GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) |
+| GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) + `policy` verdict + `pure_0to1` |
 | POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
-| POST | `/api/arm` | `{phrase: "BURN", bdf?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`): not Goldilocks → `{"error": "GPU <bdf> is not Goldilocks — failing: <checks>"}`, no token; success adds `bdf` + `checks` dict |
+| POST | `/api/arm` | `{phrase: "BURN", bdf?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; success adds `bdf` + `checks` dict |
 | GET | `/api/driver` | driver state |
-| POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` |
-| GET | `/api/gpu` | nvidia-smi + lspci link state |
+| POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` (`blacklist`/`unload` need `confirm: true`) |
+| GET | `/api/gpu` | nvidia-smi + lspci link state (`?bdf=` any GPU on the host) |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
 | GET | `/api/bound_dump/preflight` | driver-bound capture preflight (pure reads): `{conditions[], all_ok}`; each condition `{name, ok, value, expected, hint}`; `503 {"error": ...}` when BAR0 is unopenable; mock mode returns a synthetic `all_ok` block flagged `"mock": true` |
-| POST | `/api/bound_dump` | guarded capture with the driver **bound** (manual, consented): saves `dump.json` + `driver_bound: true` / `verified: false` markers into the dumps dir and returns the `tpc_summary` interpretation with `verified: false`; preflight refusal → `409` + `conditions` |
+| POST | `/api/bound_dump` | guarded capture with the driver **bound** (manual, consented): saves `dump.json` + `driver_bound` / `verified` markers into the dumps dir and returns the `tpc_summary` interpretation with `verified: false`; preflight refusal → `409` + `conditions` |
 | GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
@@ -558,9 +699,10 @@ on a trusted network or front it with your own auth proxy.
 ## Submitting a support bundle
 
 The header **Support bundle** button (or `GET /api/support_bundle`)
-downloads one `tar.gz` built on the fly — everything a developer needs to
-reproduce an interpretation bug on *your* card without logging into your
-machine. It contains, under `support/`:
+downloads one `tar.gz` built fully in memory — everything a developer needs
+to reproduce an interpretation bug on *your* card without logging into your
+machine; a failure anywhere returns a JSON error, never a partial archive.
+It contains, under `support/`:
 
 - `manifest.json` — tool version, git SHA and source (may be `null`
   outside a git checkout), 12-hex tool fingerprint, build time (UTC),
@@ -572,23 +714,24 @@ machine. It contains, under `support/`:
   copied out of git and no SHA is resolvable — match the fingerprint
   against the repo. A `.git_sha` file next to the package adds exact-SHA
   precision but is optional, not required. The same version block is
-  served at `/api/live` under `"version"`.
-- `console.log` and `goldilocks.jsonl` (tail 2 MiB each) and
-  `last-preview.json` — the console's own working logs.
-- `dumps/<bdf>/<ts>/dump.json` + `hex_window_0x820000.txt` for the newest
+  served at `/api/live` under `version`.
+- `console.log`, `goldilocks.jsonl` and `last-preview.json` (tail 2 MiB
+  each) — the console's own working logs; missing files are listed in
+  `warnings`, not fatal.
+- `dumps/<…>/dump.json` + `hex_window_0x820000.txt` for the newest
   5 dump dirs (oldest first). If the total would exceed 25 MiB the oldest
-  dumps are dropped and listed in `manifest.truncated`.
+  dumps are dropped and listed in `truncated`.
 - `live_snapshot.json` — the same snapshot `/api/live` serves right now
-  (a `{"paused": ...}` body while the driver is bound is normal).
+  (a `paused` or `error` body while the driver is bound is normal).
 - `system.txt` — `lspci -nn -vv` stanzas for the GA100 device IDs
   (`[10de:20c2]`/`[10de:20b5]`/`[10de:2082]`) and the GPU-relevant
   `dmesg` tail.
 - `nvidia_smi.txt` — `nvidia-smi` snapshot (index, name, serial, VBIOS,
   driver, compute cap, clocks, power limit, PCIe link) for the
   console's BDF; SM count is not an nvidia-smi query field — read it from
-  `live_snapshot.json` / `interpretation.txt` instead. States `driver unbound`
-  when the nvidia module is absent
-  (calling nvidia-smi then would auto-load the driver).
+  `live_snapshot.json` / `interpretation.txt` instead. States
+  `driver unbound — nvidia-smi not applicable` when the nvidia module is
+  absent (calling nvidia-smi then would auto-load the driver).
 - `interpretation.txt` — the **interpretation trace**: for every bundled
   dump, `fusedump.tpc_summary(shadow, hexnonzero)` is re-run and the
   totals, per-GPC lines, ceilings, `crc_ok` and fingerprint are printed,
@@ -607,6 +750,14 @@ Attach it when reporting an issue — send it to the developers.
   `sudo python3 -m ga100vfi.fusedump --bdf 0000:41:00.0`
 - Static HTML snapshot of a dump:
   `python3 -m ga100vfi.console.gui <dump_dir> out.html`
+- CLI campaigns (`ga100vfi campaign`, see [docs/ADAPTIVE.md](ADAPTIVE.md))
+  additionally write per-run JSONL telemetry under `telemetry/` (card
+  serials included — keep it out of anything you publish). Sharing is
+  **opt-in**: after a Goldilocks hit the CLI *asks* before uploading
+  redacted runs to the collector; `ga100vfi share` (or `--dry-run` to
+  inspect first) does it manually, `--no-telemetry` disables the file.
+  Console campaigns do not upload telemetry — they log
+  `goldilocks.jsonl` in the state dir only.
 
 ## systemd example
 
@@ -635,26 +786,53 @@ WantedBy=multi-user.target
 
 ## Testing without hardware
 
-```
+```sh
 python3 -m ga100vfi.console --mock /path/to/dump.json --port 8790
 ```
 
-Serves a recorded `dump.json` instead of a real card; glitch/burn endpoints
-report unavailability. Useful for working on the GUI.
+Serves a recorded `dump.json` instead of a real card — useful for working
+on the GUI. What mock mode does and refuses (all verified against a live
+mock server):
+
+- `/api/live` serves the recorded dump verbatim (no live `tpc`/`window_ok`
+  probe); `/api/gpus` lists the mock card with driver `mock`.
+- `/api/burn/preview` works read-only over the mock rows; `/api/ff/layout`
+  computes zones from the recorded rows.
+- `/api/bound_dump/preflight` returns a synthetic `all_ok` condition list
+  flagged `"mock": true`; `/api/bound_dump`, `/api/glitch/start`,
+  `/api/burn`, `/api/burn/check`, `/api/revert` and `/api/driver/op` all
+  refuse with a `not available in mock mode` style error.
+- `/api/arm` runs the Goldilocks gate against the mock status registers.
 
 ## Troubleshooting
 
 | Symptom | Meaning / fix |
 |---|---|
 | Page won't load right after boot | The service starts with the network; give it a few seconds. `systemctl status ga100-fuse-view` if it persists. |
-| GPU Info shows "No devices were found" | Expected while the card is GFW-dead; the banner is honest, not an error. |
-| Live pill shows `BAR0 unreadable` | Normal during a campaign — the PCIe link drops on every shot and comes back. |
-| Campaign start refused: "driver … is bound" | Every glitch attempt reprograms PCI COMMAND/BAR0, which corrupts GSP boots under a bound driver. Drivers tab → **Unload nvidia stack**. |
-| Burn now stays disabled | Either not armed (type `BURN`, 120 s TTL) or the burn window pill says closed — run a glitch campaign first. |
+| Live pill: `driver '<driver>' bound — raw BAR0 live view disabled (Drivers tab -> Unload nvidia stack to resume)` | Working as designed — raw BAR0 reads can wedge GSP while the driver is bound. Drivers tab → **Unload nvidia stack**, or use the guarded capture. |
+| Live pill: `BAR0 unreadable — bus hung or PCIe link down (normal mid-glitch / after reset)` | Normal during a campaign — the PCIe link drops on every shot and comes back. |
+| GPU Info shows an nvidia-smi error / "No devices were found" | Expected while the card is GFW-dead; the banner is honest, not an error. While the module is absent the console reports `driver not loaded — nvidia-smi skipped (NVML would auto-load the driver)`. |
+| Campaign start refused: `driver '<driver>' is bound to <bdf> — every glitch attempt reprograms PCI COMMAND/BAR0 via bar0.restore(), which corrupts GSP boots under a bound driver. Unload it from the Drivers tab first.` | AGENTS rule: never write PCI `COMMAND`/BAR0 under a bound driver. Drivers tab → **Unload nvidia stack**. |
+| Campaign start refused: `v_dip <n> mV outside 200-500 — refusing (check for a typo)` | Fat-fingered v_dip; the firmware does not clamp `vd`. |
+| Campaign start refused: `adaptive range invalid: min_v <a> >= max_v <b>` | Swap the adaptive v min/max fields. |
+| Campaign start refused: `burn mode requires a valid arm token (type BURN in the burn panel, 120s TTL)` | Arm first; the token expires after 120 s. |
+| Campaign start refused: `burn mode needs at least one record (set + check the burn payload first)` | Queue records or Check the payload first. |
+| Campaign start refused: `burn placement policy: <issues>` | A queued row violates the zone rules (occupied / buffer / SM reserve / revert tail / outside FF region) or a value has bit 5 set (IFF). |
+| Arm refused: `GPU <bdf> is not Goldilocks — failing: <checks>` | The 4-check pure-read (dsov / crc_ok / priv_open / fpf_readable) failed on the selected GPU — glitch it to Goldilocks first. |
+| Burn now stays disabled | Not checked (`payload edited — re-check` means the check was invalidated by an edit), not armed, or the burn window pill says closed — run a glitch campaign first. |
 | Check shows EFP/WDATA_PLM amber (arm pending) | Normal — they are auto-armed at burn via SENSE_CTRL; only the red window checks block. |
-| Check top-line says REFUSED | The burn window is closed (red window checks) — that's what the burn-on-first-Goldilocks campaign mode is for. |
-| "card busy" on check/dump | A campaign or another dump is running; wait for it to finish. |
-| Target card shows "no GA100 detected" | Wrong `--bdf`, or the card dropped off the bus — check `lspci`. |
-| Pico port dropdown is empty | Pico not connected / not enumerated; fix the cable, press **⟳ rescan**. |
+| Check top-line says `REFUSED` | The burn window is closed (red window checks) — that's what the burn-on-first-Goldilocks campaign mode is for. |
+| Burn result `ABORT — uncertain burn state — resolve journal` | The burn journal has an unresolved `command_may_be_issued` — a previous CMD_WRITE may have latched without readback. Inspect `burn_journal.jsonl`; the GUI offers an explicit proceed-anyway (`ack_uncertain`). |
+| Burn result `ABORT — row <n> reads 0x…, expected 0x…` | The row drifted from the checked value — re-Check before burning. |
+| Burn result `ABORT — guard failure (no Goldilocks window)` | The window closed between check and burn (standalone burns only work inside a held window). |
+| Burn result `IMAGE VERIFY FAILED` | The multi-record image re-read wrong — the window is NOT held and success is not claimed; re-glitch and retry. |
+| `card busy (campaign or dump in progress)` on check/dump/live | A campaign or another dump holds the card; wait for it to finish. |
+| `campaign running — full dump refused` | The full-dump sweep could push classify past the Goldilocks window; stop the campaign first. |
+| Target card shows `no GA100 detected` / `no GA100 detected on this host` | Wrong `--bdf`, or the card dropped off the bus — check `lspci`. |
+| Pico port dropdown shows `no pico detected` | Pico not connected / not enumerated; fix the cable, press **⟳ rescan**. A note appears when serial ports exist but none is a Raspberry Pi device. |
 | Campaign log fills with `nack` | The pico↔VRM I2C link is marginal; budget attempts per power-cycle and let the VRM cool, per the repo's safety notes. |
+| Bound capture refuses: `preflight refused: <conditions>` | Fix the named conditions (the panel shows each failed condition + hint); most common: PLM locked → run the PLM unlock first. |
+| Bound capture refuses: `driver '<drv>' not bound on <bdf> — use the normal full dump (no guard needed)` | The guard only applies with nvidia bound; unload the driver and use **⟳ Run full dump**. |
+| Browser shows `Host '<name>' rejected — use the host IP or localhost (DNS-rebinding guard)` | Browse by IP or localhost; a domain rebound onto this host is refused. |
+| Browser POST shows `cross-origin '<origin>' rejected (CSRF guard)` | The page was opened from a different origin than the console's Host; open the console directly. |
 | Where did my successful campaign go? | `<state-dir>/goldilocks.jsonl`, one JSON line per hit with the card serial. |
