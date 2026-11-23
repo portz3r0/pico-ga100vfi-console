@@ -1658,6 +1658,7 @@ LIVEBOOT = r"""
     const hex = j.hexnonzero; delete j.hexnonzero;
     Object.assign(D, j); D.hexnonzero = hex || [];
     renderAll(); renderPlan(); renderQueue();
+    refreshBurnFormDefaults();   // burn-form targets follow the newly loaded dump
   }
   async function pickDump(dir) {
     try {
@@ -1705,6 +1706,7 @@ LIVEBOOT = r"""
       } else {
         D = JSON.parse(JSON.stringify(SEED));
         renderAll(); renderPlan(); renderQueue();
+        refreshBurnFormDefaults();
       }
     } catch (e) { note("⚠ back-to-current failed (" + e + ")", "badl"); }
     updateEmptyState();
@@ -1819,6 +1821,7 @@ LIVEBOOT = r"""
       if (HIST) { HIST = null; clearStale(); }  // a fresh dump of the present card replaces any browsed one
       renderAll();
       renderPlan(); renderQueue();
+      refreshBurnFormDefaults();
       fetchStock();   // this dump may have just seeded the stock baseline
       note("full dump loaded — " + j.started, "okl");
     } catch (e) { note("⚠ full dump failed (" + e + ")", "badl"); }
@@ -2030,14 +2033,14 @@ LIVEBOOT = r"""
     <div class="card" id="gb-burn" style="margin-top:12px">
       <h3>Burn payload</h3>
       <div class="frow">
-        <div class="field"><label>target row</label><input type="number" id="gb-row" value="306" min="0" max="487"></div>
+        <div class="field"><label>target row</label><input type="number" id="gb-row" placeholder="row — pick from Fuse Explorer or FF audit" min="0" max="487" style="width:170px"></div>
         <div class="field"><label>value source</label>
           <select id="gb-srcmode">
             <option value="typed">typed hex</option>
             <option value="dump">from dump row</option>
           </select></div>
-        <div class="field" id="gb-typedwrap"><label>value (hex)</label><input type="text" id="gb-value" value="0x00010041" class="mono" style="width:120px"></div>
-        <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" value="304" min="0" max="487"></div>
+        <div class="field" id="gb-typedwrap"><label>value (hex)</label><input type="text" id="gb-value" placeholder="0x…" class="mono" style="width:120px"></div>
+        <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" placeholder="first blank FF row (≥222)" min="0" max="487"></div>
         <label class="checkline"><input type="checkbox" id="gb-mirror" checked> burn mirror row too</label>
         <button class="btn" id="gb-check">Check row &amp; guards</button>
         <button class="btn" id="gb-preview" title="read-only burn preview: FF decode, last-wins collision scan, partial-landing hazards — works any time (no window/arm/token; CMD_READ is gated by FUSECTRL_PLM, not EFP)">Preview burn (read-only)</button>
@@ -2078,9 +2081,10 @@ LIVEBOOT = r"""
       <div id="queue-rows" class="queue-rows"></div>
       <div class="frow" style="margin-top:8px; align-items:end">
         <div class="field"><label>custom record — row</label>
-          <input type="number" id="cq-row" value="306" min="222" max="487"></div>
+          <input type="number" id="cq-row" placeholder="row — first free FF row" min="222" max="487"></div>
+        <button class="btn" id="cq-firstfree" title="fill row with the first blank FF row (≥222) in the loaded dump">first free FF row</button>
         <div class="field"><label>value (hex FF record)</label>
-          <input type="text" id="cq-value" value="0x420004C1" class="mono" style="width:120px"></div>
+          <input type="text" id="cq-value" placeholder="0x… FF record" class="mono" style="width:120px"></div>
         <button class="btn" id="cq-add">+ Add custom record</button>
         <label class="checkline"><input type="checkbox" id="cq-mirror"> mirror each</label>
         <button class="btn" id="queue-clear">clear queue</button>
@@ -2322,11 +2326,27 @@ LIVEBOOT = r"""
     el.innerHTML = `decode: chain ${f.ch} · ${f.iff ? '<b class="warn">IFF — REFUSED (bit 5 set)</b>' : `block ${f.blk} · data 0x${f.data.toString(16)}`} · ${esc(ef.key)}`;
   };
   document.getElementById("cq-add").onclick = () => {
-    const row = +document.getElementById("cq-row").value;
-    const v = parseInt(document.getElementById("cq-value").value, 16);
-    if (isNaN(v)) { alert("bad hex value"); return; }
+    const rowStr = document.getElementById("cq-row").value.trim();
+    const row = +rowStr;
+    if (rowStr === "" || !Number.isInteger(row)) {
+      alert("custom record: target row is empty — type a row or press 'first free FF row'; no default row is assumed");
+      return;
+    }
+    const vStr = document.getElementById("cq-value").value.trim();
+    const v = parseInt(vStr, 16);
+    if (vStr === "" || isNaN(v)) { alert("custom record: value is empty — type the FF record hex word"); return; }
     const mirror = document.getElementById("cq-mirror").checked;
     queueAdd(v, `custom row ${row}${mirror ? " + mirror" : ""}`, row, mirror);
+  };
+  document.getElementById("cq-firstfree").onclick = () => {
+    const r = firstBlankFFRow();
+    if (r === null) {
+      alert("no blank FF row (≥222) in the loaded dump — run a full dump first (⟳ on the Fuse Explorer tab)");
+      return;
+    }
+    const el = document.getElementById("cq-row");
+    el.value = String(r);
+    el.dispatchEvent(new Event("input"));
   };
   document.getElementById("plan-devid-add").onclick = () => {
     let dv = parseInt(document.getElementById("plan-devid").value, 16);
@@ -2429,6 +2449,9 @@ LIVEBOOT = r"""
   function updateRowHint() {
     const hint = $("gb-rowhint");
     const rv = +$("gb-row").value;
+    if ($("gb-row").value.trim() === "" || !Number.isInteger(rv)) {
+      hint.innerHTML = "row —"; hint.className = "pill"; return;
+    }
     if (!ffLayout || !ffLayout.burn_zone) { hint.innerHTML = "row —"; hint.className = "pill"; return; }
     const L = ffLayout;
     let txt, cls;
@@ -2583,13 +2606,73 @@ LIVEBOOT = r"""
   $("gb-value").oninput = invalidateChecked;
   $("gb-mirror").onchange = invalidateChecked;
 
+  // ---- burn-form targets derived from the CURRENT card's loaded dump ----
+  // No burn-payload field may carry a value that was not derived from this
+  // card's own dump or typed by the user: a pre-filled foreign default on
+  // irreversible OTP fields masquerades as a computed target.
+  function firstBlankFFRow() {
+    // first blank row (0x0 / 0xFFFFFFFF) in the FF record region of the
+    // loaded dump; null when no dump is loaded or none is blank.
+    const rows = D.rows || {};
+    if (!(D.row_count > 0)) return null;
+    for (let r = 222; r <= 487; r++) {
+      const v = rows[r];
+      if (v === 0 || v === 0xFFFFFFFF) return r;
+    }
+    return null;
+  }
+  function cardDevidFromDump() {
+    // the card's own DEVID from its DEVIDA/B records (chain 2, block 37/38)
+    // in the loaded dump; last record per block wins, so keep the last hit.
+    const rows = D.rows || {};
+    let devid = null;
+    Object.keys(rows).map(Number).sort((a, b) => a - b).forEach(r => {
+      const v = rows[r];
+      if (typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) return;
+      const e = ffEffect(v);
+      if (e.field === "DEVID") devid = e.devid;
+    });
+    return devid;
+  }
+  function refreshBurnFormDefaults() {
+    const sr = $("gb-srcrow");
+    if (!sr) return;   // glitch pane not built yet
+    const blank = firstBlankFFRow();
+    if (blank === null) {
+      sr.value = "";
+      sr.placeholder = "no blank FF row in this dump";
+    } else {
+      sr.value = String(blank);
+      sr.placeholder = "first blank FF row (≥222)";
+    }
+    renderSrcDecode();
+    updateRowHint();
+    // DEVID suggestion: keep only what matches the card's own DEVID context
+    // (or fill the card's own DEVID when the field is still empty); never
+    // leave a foreign demo value standing.
+    const dv = $("plan-devid");
+    const cardDevid = cardDevidFromDump();
+    const cur = parseInt(dv.value, 16);
+    if (cardDevid !== null && (cur === cardDevid || dv.value.trim() === "")) {
+      dv.value = "0x" + cardDevid.toString(16).toUpperCase().padStart(4, "0");
+      dv.placeholder = "0x100–0xFFFF";
+    } else {
+      dv.value = "";
+      dv.placeholder = cardDevid !== null
+        ? `card DEVID 0x${cardDevid.toString(16).toUpperCase()} — type new`
+        : "0x100–0xFFFF (e.g. 0x20B5)";
+    }
+    updatePreviewBtn();
+  }
+
   // ---- read-only burn preview: ga100_burn's default preview mode inside
   // the UI. Works ANY time — CMD_READ is gated by FUSECTRL_PLM, not EFP —
   // no window, no arm, no token, and the server path cannot write fuses.
   let lastPreview = null;
   function currentPayload() {
     const fromDump = $("gb-srcmode").value === "dump";
-    return {row: +$("gb-row").value,
+    const rowStr = $("gb-row").value.trim();
+    return {row: rowStr === "" ? NaN : +rowStr,
             value: fromDump ? (payloadValue === null ? "" : "0x" + payloadValue.toString(16))
                             : $("gb-value").value.trim(),
             mirror: $("gb-mirror").checked};
@@ -2606,6 +2689,7 @@ LIVEBOOT = r"""
   ["gb-srcmode", "gb-mirror"].forEach(id =>
     $(id).addEventListener("change", updatePreviewBtn));
   updatePreviewBtn();
+  refreshBurnFormDefaults();   // seed from the dump embedded in the page
 
   function decodeSpan(d) {
     if (!d) return `<span class="note">— not a live FF record</span>`;
@@ -2702,11 +2786,22 @@ LIVEBOOT = r"""
   }
 
   $("gb-check").onclick = async () => {
-    const row = +$("gb-row").value;
-    const fromDump = $("gb-srcmode").value === "dump";
-    const value = fromDump ? (payloadValue === null ? "0x0" : "0x" + payloadValue.toString(16)) : $("gb-value").value.trim();
-    const mirror = $("gb-mirror").checked;
     const res = $("gb-checkresult");
+    const rowStr = $("gb-row").value.trim();
+    const row = +rowStr;
+    const fromDump = $("gb-srcmode").value === "dump";
+    const value = fromDump ? (payloadValue === null ? "" : "0x" + payloadValue.toString(16)) : $("gb-value").value.trim();
+    const mirror = $("gb-mirror").checked;
+    // client-side refusal for empty inputs (UX only — the server check
+    // stays authoritative): no burn target or value is ever assumed.
+    if (rowStr === "" || !Number.isInteger(row)) {
+      res.innerHTML = `<span class="bad">⚠ target row is empty — pick a row from the Fuse Explorer or the FF audit first; no default row is assumed</span>`;
+      payloadChecked = null; updateArmState(); return;
+    }
+    if (value === "") {
+      res.innerHTML = `<span class="bad">⚠ value is empty — type the hex word, or pick a non-blank source row in the dump</span>`;
+      payloadChecked = null; updateArmState(); return;
+    }
     res.innerHTML = "checking…";
     $("gb-editwarn").style.display = "none";
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);

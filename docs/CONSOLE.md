@@ -259,6 +259,15 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   proposing a burn of zero), a mirror-row checkbox, **Check row & guards**
   and **Preview burn (read-only)** (see the burn workflow below for what
   each shows).
+  Burn-payload fields carry **no hardcoded defaults**: target row and
+  value start empty (placeholders only) — the FF audit pills and the
+  loaded dump are the sources of targets, and **Check row & guards**
+  refuses an empty row or value client-side (the server check stays
+  authoritative). The `from dump row` field defaults to the **first blank
+  FF row (≥222) of the currently loaded dump**, recomputed whenever the
+  loaded dump changes (history pick, back-to-current, full dump); a dump
+  with no blank FF row leaves it empty with a `no blank FF row in this
+  dump` placeholder.
   Editing any input invalidates a completed check (`payload edited —
   re-check`) — the check IS the safety contract.
 - **Suggested burns — minimum common unlock**: derived from **this card's
@@ -267,12 +276,17 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   words. **⤓ Queue all needed records** puts them in the queue; already
   equal masks report *this card needs no unlock burns*; a word already
   present in the dump is tagged `ALREADY IN DUMP — row N`. An optional
-  **DEVID change** (e.g. `0x20B5`) adds an identity A/B pair via
-  **+ Queue DEVID A/B pair** (takes effect at next cold boot).
+  **DEVID change** adds an identity A/B pair via **+ Queue DEVID A/B pair**
+  (takes effect at next cold boot); the field is never pre-filled with a
+  foreign demo value — it holds the loaded dump's own DEVID (decoded from
+  its DEVIDA/B records, chain 2 block 37/38) when the card carries one,
+  and starts empty with a placeholder otherwise.
 - **Burn queue**: all queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement
-  policy). Custom records can be added by row + hex value, optionally
+  policy). Custom records can be added by row + hex value (both start
+  empty; the **first free FF row** button fills the row with the first
+  blank FF row of the loaded dump), optionally
   mirrored; **clear queue** empties it.
 - **Glitch campaign**: `v_dip mV`, `pulses`, `pw µs`, `gap µs`, `delay`,
   `max attempts`, a **v_dip strategy** selector (`fixed v_dip` or the
