@@ -665,6 +665,18 @@ slots change between boots. Dumps are therefore keyed by the card's
   `no serial`), and the last-dump age in the driver-bound panel counts
   same-serial dumps only.
 
+Saved-dump views are labelled by serial and presence state, never left
+masquerading as live: the Fuse Explorer compares the displayed dump's
+serial with the card `/api/live` reports present now. When no GA100 is
+present, or a *different* card is (serial mismatch), the header meta line
+is prefixed `SAVED DUMP OF` and suffixed `— card not present` /
+`— different card present (serial Y)`; an amber strip above the
+dump-derived panels reads `showing saved dump of card serial X (dumped
+<ts>)`, and those panels are dimmed with an amber left rule. Browsing
+saved dumps card-less stays fully functional — the panels keep their
+data, they just say whose data it is. When the displayed dump's serial
+matches the present card, nothing changes (present-tense is honest).
+
 Hard BDF validation goes with it: every BAR0-touching path first reads
 `/sys/bus/pci/devices/<bdf>/{vendor,device}` and requires
 `0x10de` + a GA100 device ID (`fusedump.require_ga100`) before any mmap

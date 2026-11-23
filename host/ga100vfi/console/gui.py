@@ -160,6 +160,12 @@ HTML = r"""<!DOCTYPE html>
   .verdict.warnv { border-left-color: var(--warn);
              background: linear-gradient(90deg, rgba(210,153,34,.09), rgba(210,153,34,0) 55%); }
 
+  /* Saved-dump view of an absent/different card: dim the dump-derived
+     panels and mark the wrapper with an amber rule so stale-vs-live is
+     obvious at a glance (the #dumpsrc strip names the source). */
+  #dumpwrap.stale { opacity: .75; border-left: 3px solid var(--warn);
+             padding-left: 12px; }
+
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border-soft); }
   th { font-size: 10px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: .08em;
@@ -494,8 +500,10 @@ HTML = r"""<!DOCTYPE html>
   </nav>
   <main class="content">
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
-  <h2>Status</h2>
   <div class="card verdict" id="cardless" style="display:none"></div>
+  <div class="card verdict warnv" id="dumpsrc" style="display:none"></div>
+  <div id="dumpwrap">
+  <h2>Status</h2>
   <div class="grid" id="status"></div>
 
   <h2>Diagnosis</h2>
@@ -518,6 +526,7 @@ HTML = r"""<!DOCTYPE html>
     <span><i class="sw dead"></i>defective silicon (never usable)</span>
   </div>
   <div class="card" id="tpcmap"></div>
+  </div><!-- /#dumpwrap: dimmed + labelled when the shown dump is not the present card -->
 
   <h2>Shadow registers</h2>
   <div class="scroll" id="shadow"></div>
@@ -590,13 +599,25 @@ const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max) ||
   { min: r, max: r, name: "TAIL", desc: "rows beyond 487 — outside the documented row map" };
 
 // ---------------------------------------------------------------- renderers
+// Data-source state for the dump-derived panels: null = the shown dump
+// belongs to the card in the slot (or nothing to compare against);
+// {reason:"absent"|"different", curSerial} = the shown dump is SAVED data
+// of another card — label it, don't render it as present-tense live.
+let STALE = null;
+function staleSuffix() {
+  if (!STALE) return "";
+  return STALE.reason === "absent" ? "  —  card not present"
+    : "  —  different card present (serial " + (STALE.curSerial || "unknown") + ")";
+}
 function renderMeta() {
   const nb = Object.keys(D.nonblank_rows || {}).length;
   const sn = D.serial ? "SN " + D.serial
     : "no serial" + (D.serial_source === "unavailable" ? " (unreadable)" : "");
   document.getElementById("meta").textContent =
+    (STALE ? "SAVED DUMP OF  " : "") +
     `${D.bdf}  ·  ${sn}  ·  ${D.vendor}:${D.device} rev ${D.revision}  ·  driver=${D.driver}  ·  ` +
-    `dumped ${D.started}  ·  fingerprint ${D.fingerprint}  ·  ${D.row_count} rows, ${nb} non-blank`;
+    `dumped ${D.started}  ·  fingerprint ${D.fingerprint}  ·  ${D.row_count} rows, ${nb} non-blank` +
+    staleSuffix();
 }
 
 function renderStatus() {
@@ -1485,22 +1506,47 @@ LIVEBOOT = r"""
 
   function note(msg, cls) { ind.textContent = msg; ind.className = "pill " + (cls || ""); }
   function cardlessBanner(msg) {
-    // card-less boot is a supported state: replace the stale seed panels
-    // with one honest banner until a card appears (self-heals on the next
-    // successful poll, which re-renders status + verdict)
+    // card-less boot is a supported state: one honest banner until a card
+    // appears (self-heals on the next successful poll). The saved-dump
+    // panels below stay rendered — setStale("absent") labels and dims
+    // them instead of blanking them (browsing saved dumps card-less is
+    // a feature; masquerading as live is the defect).
     if (!el_cardless || !/no GA100/i.test(msg)) return;
     el_cardless.innerHTML = `<b class="bad">⚠ ${esc(msg)}</b> — no card in ` +
       `the slot. Insert a GA100 and the console self-detects it on the next ` +
       `poll; endpoints answer their honest error meanwhile and the Support ` +
       `bundle stays available.`;
     el_cardless.style.display = "";
-    const st = document.getElementById("status");
-    if (st) st.innerHTML = "";
-    const v = document.getElementById("verdict");
-    if (v) { v.classList.remove("good"); v.innerHTML = "waiting for a card…"; }
   }
   function hideCardless() {
     if (el_cardless) el_cardless.style.display = "none";
+  }
+  function setStale(reason, curSerial) {
+    // the panels below show a SAVED dump, not the present card's live
+    // state: name the source (serial + dump ts), dim the wrapper, and
+    // re-render the header meta with the SAVED DUMP OF prefix.
+    if (!(D.row_count > 0)) return;   // empty seed: nothing to label
+    STALE = { reason: reason, curSerial: curSerial || null };
+    const strip = document.getElementById("dumpsrc");
+    if (strip) {
+      const tail = reason === "absent" ? "no GA100 present"
+        : "different card present (serial " + esc(curSerial || "unknown") + ")";
+      strip.innerHTML = `<b class="warn">showing saved dump of card serial ` +
+        `${esc(D.serial || "unknown")} (dumped ${esc(D.started || "?")})</b> — ${tail}`;
+      strip.style.display = "";
+    }
+    const w = document.getElementById("dumpwrap");
+    if (w) w.classList.add("stale");
+    renderMeta();
+  }
+  function clearStale() {
+    if (!STALE) return;
+    STALE = null;
+    const strip = document.getElementById("dumpsrc");
+    if (strip) strip.style.display = "none";
+    const w = document.getElementById("dumpwrap");
+    if (w) w.classList.remove("stale");
+    renderMeta();
   }
   function followNote(id, n) {
     // amber honesty banner: console follows a card other than the configured BDF
@@ -1565,16 +1611,25 @@ LIVEBOOT = r"""
       const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       followNote("live-follow", j.default_note);
-      if (j.paused) { note("⏸ " + j.paused, "warnl"); hideCardless(); boundPanel(j); return; }
+      if (j.paused) { note("⏸ " + j.paused, "warnl"); hideCardless();
+        if (STALE && STALE.reason === "absent") clearStale();  // card is back (serial unknown while bound: no comparison, no alarm)
+        boundPanel(j); return; }
       boundHide();
-      if (j.error) { note("⚠ " + j.error, "badl"); cardlessBanner(j.error); return; }
+      if (j.error) { note("⚠ " + j.error, "badl"); cardlessBanner(j.error);
+        if (/no GA100/i.test(j.error)) setStale("absent", null); return; }
       hideCardless();
+      // /api/live carries the PRESENT card's serial (task 20): compare it
+      // with the displayed dump's serial — a mismatch must never render
+      // the saved dump as present-tense live data.
+      const curSerial = j.serial || null;
+      const staleNow = !!(curSerial && D.serial && curSerial !== D.serial);
       D.status = j.status; D.shadow = j.shadow;
       if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
-      D.started = j.ts;
+      if (!staleNow) D.started = j.ts;   // keep the SAVED dump's ts visible while labelled
       diff(j);
+      if (staleNow) setStale("different", curSerial); else clearStale();
       renderLive();  // cheap cards refresh on the light poll too; rows/hex stay heavy-only
       renderPlan(); renderQueue();
       note("● live — " + j.ts, "okl");
