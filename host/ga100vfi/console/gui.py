@@ -96,7 +96,7 @@ HTML = r"""<!DOCTYPE html>
                       "Helvetica Neue", Arial, sans-serif;
          font-size: 13.5px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
   @media (min-width: 1200px) { .app { margin: 0 auto; } }
-  .app { max-width: 1140px; padding: 20px 22px 48px; }
+  .app { max-width: min(1780px, 100%); padding: 20px 22px 48px; }
   .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace; font-size: 12px; }
 
@@ -112,19 +112,19 @@ HTML = r"""<!DOCTYPE html>
      right. align-items:flex-start so each rail's sticky offset is measured
      against the row, not a stretched full-height column. */
   .layout { display: flex; align-items: flex-start; gap: 18px; }
-  .content { flex: 1 1 auto; min-width: 0; } /* min-width:0: wide tables/pre
-     blocks must not blow out the flex row */
+  .content { flex: 1 1 auto; min-width: 0; width: 100%; } /* min-width:0: wide
+     tables/pre blocks must not blow out the flex row */
   /* Right status rail: the livebar card lives here and stays put while the
      center column scrolls. :empty covers static (non-live) builds, where
      the placeholder substitutes nothing. */
-  .siderail { flex: 0 0 380px; width: 380px; position: sticky;
+  .siderail { flex: 0 0 360px; width: 360px; position: sticky;
               top: calc(var(--sticktop, 0px) + 8px); align-self: flex-start;
               max-height: calc(100vh - var(--sticktop, 0px) - 16px);
               overflow-y: auto; z-index: 15; }
   .siderail:empty { display: none; }
   @media (max-width: 1200px) { /* mid-width: shrink the rail so the center
      column isn't squeezed */
-    .siderail { flex-basis: 320px; width: 320px; } }
+    .siderail { flex-basis: 300px; width: 300px; } }
 
   /* top bar */
   .topbar { display: flex; justify-content: space-between; align-items: flex-end;
