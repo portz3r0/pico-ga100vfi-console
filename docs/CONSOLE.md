@@ -38,7 +38,11 @@ sudo ga100vfi-console --port 8790
 # which card the Fuse Explorer watches on a multi-GPU host (burns and
 # campaigns pick any GA100 at runtime). If the configured BDF is not
 # present (card moved slots), the console follows the detected GA100 and
-# says so via default_note — never a phantom.
+# says so via default_note — never a phantom. An explicit --bdf that is
+# not GA100 silicon present at startup is a hard error (typo guard).
+# With no --bdf and no GA100 on the host the console still starts and
+# serves: it logs a warning, shows 'no GA100 present on this host', and
+# self-detects a card inserted later on the next poll.
 ```
 
 Then open `http://<host>:8790`. The service generates its own `live.html`
@@ -49,7 +53,7 @@ Useful flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--bdf` | auto-detected | the card the Fuse Explorer tab watches live |
+| `--bdf` | auto-detected | the card the Fuse Explorer tab watches live; must name a present GA100 at startup (hard error otherwise) — omit it to run card-less |
 | `--port` | `8790` | HTTP port |
 | `--listen` | `0.0.0.0` | bind address (`127.0.0.1` keeps it host-local) |
 | `--state-dir` | `~/ga100-fuse-view` | full dumps, generated `live.html`, `goldilocks.jsonl`, burn journal |
@@ -817,7 +821,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/ga100-fuse-view
-ExecStart=/usr/bin/python3 -m ga100vfi.console --bdf 0000:41:00.0 --port 8790 --state-dir /opt/ga100-fuse-view
+# No --bdf: the console auto-detects and also starts card-less (a pinned
+# --bdf must name a present GA100 at startup, or the unit restarts).
+ExecStart=/usr/bin/python3 -m ga100vfi.console --port 8790 --state-dir /opt/ga100-fuse-view
 Restart=always
 RestartSec=3
 User=root
@@ -874,6 +880,7 @@ mock server):
 | `card busy (campaign or dump in progress)` on check/dump/live | A campaign or another dump holds the card; wait for it to finish. |
 | `campaign running — full dump refused` | The full-dump sweep could push classify past the Goldilocks window; stop the campaign first. |
 | Target card shows `no GA100 detected` / live shows `no GA100 present on this host` | The card dropped off the bus or never enumerated — check `lspci`. The pinned `--bdf` is never used as a ghost: dumps and burns refuse until a GA100 is detected. |
+| Console started with no GA100 in any slot | Supported: it serves card-less (banner `no GA100 present on this host`, endpoints answer their honest 409/error JSON, Support bundle works with zero cards). Insert a card and the next poll self-detects it. A startup `warning: no GA100 CMP 170HX present — serving card-less` on stderr is expected; only an explicit `--bdf` naming a missing device exits. |
 | Pico port dropdown shows `no pico detected` | Pico not connected / not enumerated; fix the cable, press **⟳ rescan**. A note appears when serial ports exist but none is a Raspberry Pi device. |
 | Campaign log fills with `nack` | The pico↔VRM I2C link is marginal; budget attempts per power-cycle and let the VRM cool, per the repo's safety notes. |
 | Bound capture refuses: `preflight refused: <conditions>` | Fix the named conditions (the panel shows each failed condition + hint); most common: PLM locked → run the PLM unlock first. |

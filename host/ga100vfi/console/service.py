@@ -2144,7 +2144,7 @@ def effective_bdf(detected):
 def default_note(eff):
     """Honest note when the console follows a card other than the
     configured one; None when no fallback happened."""
-    if CFG["mock"] or eff == CFG["bdf"]:
+    if CFG["mock"] or CFG["bdf"] is None or eff == CFG["bdf"]:
         return None
     return (f"configured BDF {CFG['bdf']} not present — following {eff}"
             if eff else
@@ -2239,6 +2239,10 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
 
 def gpu_info(bdf=None):
     bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    if bdf is None:
+        return {"nvidia": {"error": NO_GA100},
+                "link": [], "apps": [], "bdf": None,
+                "ts": datetime.now().isoformat(timespec="seconds")}
     if not valid_bdf(bdf) \
             and bdf not in {g["bdf"] for g in nvidia_gpu_bdfs()}:
         return {"nvidia": {"error": f"{bdf} is not a GPU on this host"},
@@ -2286,8 +2290,9 @@ def gpu_info(bdf=None):
 def dmesg_tail(n=80):
     """Live GPU-relevant dmesg tail (nvidia/NVRM/Xid + this card's slot)."""
     bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
-    pat = re.compile(r"nvidia|NVRM|Xid|ga100|" + re.escape(slot), re.I)
+    slot = bdf.split(":", 1)[1] if bdf and bdf.count(":") == 2 else bdf
+    pat = re.compile(r"nvidia|NVRM|Xid|ga100"
+                     + (r"|" + re.escape(slot) if slot else ""), re.I)
     out = sh(["dmesg", "-T"], timeout=10) or ""
     return [l for l in out.splitlines() if pat.search(l)][-n:]
 
@@ -2862,17 +2867,32 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     if a.bdf:
+        # An explicit --bdf must name GA100 silicon that is present: an
+        # operator typo fails loudly at startup, never silently as a
+        # card-less console.
+        try:
+            fd.require_ga100(a.bdf)
+        except ValueError as e:
+            print(f"--bdf {a.bdf}: {e} — fix the BDF or omit --bdf to "
+                  f"auto-detect", file=sys.stderr)
+            return 1
         CFG["bdf"] = a.bdf
     elif a.mock:
         pass  # no hardware needed; keep the default bdf
     else:
         found = fd.find_ga100s()
         if not found:
-            print("No GA100 CMP 170HX found — pass --bdf explicitly.",
-                  file=sys.stderr)
-            return 1
-        CFG["bdf"] = found[0]
-        if len(found) > 1:
+            # Card-less boot is a supported state (task 21): the poll loop
+            # already serves {"error": NO_GA100} and effective_bdf follows
+            # a card the moment one appears — exiting here only fed the
+            # systemd restart loop on hosts with no GPU.
+            CFG["bdf"] = None
+            print("warning: no GA100 CMP 170HX present — serving card-less; "
+                  "insert a card and the next poll self-detects it "
+                  "(or pass --bdf to pin one)", file=sys.stderr, flush=True)
+        else:
+            CFG["bdf"] = found[0]
+        if found and len(found) > 1:
             print(f"multiple GA100s found ({', '.join(found)}); live poll "
                   f"watches {found[0]} — pick any of them for burns in the "
                   f"Target selector", flush=True)
@@ -2915,7 +2935,8 @@ def main(argv=None) -> int:
 
     signal.signal(signal.SIGTERM, _sigterm)
 
-    print(f"ga100vfi fuse console on {a.listen}:{a.port}  bdf={CFG['bdf']}  "
+    print(f"ga100vfi fuse console on {a.listen}:{a.port}  "
+          f"bdf={CFG['bdf'] or 'none (card-less)'}  "
           f"html={CFG['html']}  dumps={dumps_dir()}  poll={a.poll}s  "
           f"mock={bool(a.mock)}", flush=True)
     srv.serve_forever()

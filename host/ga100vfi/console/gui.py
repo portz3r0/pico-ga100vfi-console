@@ -495,6 +495,7 @@ HTML = r"""<!DOCTYPE html>
   <main class="content">
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <h2>Status</h2>
+  <div class="card verdict" id="cardless" style="display:none"></div>
   <div class="grid" id="status"></div>
 
   <h2>Diagnosis</h2>
@@ -1477,11 +1478,30 @@ LIVEBOOT = r"""
 // ---------------------------------------------------------------- live layer
 (function () {
   const ind = document.getElementById("liveind");
+  const el_cardless = document.getElementById("cardless");
   const feedEl = document.getElementById("feed");
   const feedLines = [];
   let prev = null, timer = null;
 
   function note(msg, cls) { ind.textContent = msg; ind.className = "pill " + (cls || ""); }
+  function cardlessBanner(msg) {
+    // card-less boot is a supported state: replace the stale seed panels
+    // with one honest banner until a card appears (self-heals on the next
+    // successful poll, which re-renders status + verdict)
+    if (!el_cardless || !/no GA100/i.test(msg)) return;
+    el_cardless.innerHTML = `<b class="bad">⚠ ${esc(msg)}</b> — no card in ` +
+      `the slot. Insert a GA100 and the console self-detects it on the next ` +
+      `poll; endpoints answer their honest error meanwhile and the Support ` +
+      `bundle stays available.`;
+    el_cardless.style.display = "";
+    const st = document.getElementById("status");
+    if (st) st.innerHTML = "";
+    const v = document.getElementById("verdict");
+    if (v) { v.classList.remove("good"); v.innerHTML = "waiting for a card…"; }
+  }
+  function hideCardless() {
+    if (el_cardless) el_cardless.style.display = "none";
+  }
   function followNote(id, n) {
     // amber honesty banner: console follows a card other than the configured BDF
     const el = document.getElementById(id);
@@ -1545,9 +1565,10 @@ LIVEBOOT = r"""
       const r = await fetch("/api/live" + bdfQs(), { cache: "no-store" });
       const j = await r.json();
       followNote("live-follow", j.default_note);
-      if (j.paused) { note("⏸ " + j.paused, "warnl"); boundPanel(j); return; }
+      if (j.paused) { note("⏸ " + j.paused, "warnl"); hideCardless(); boundPanel(j); return; }
       boundHide();
-      if (j.error) { note("⚠ " + j.error, "badl"); return; }
+      if (j.error) { note("⚠ " + j.error, "badl"); cardlessBanner(j.error); return; }
+      hideCardless();
       D.status = j.status; D.shadow = j.shadow;
       if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
