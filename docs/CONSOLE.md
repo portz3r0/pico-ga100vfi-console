@@ -194,11 +194,25 @@ The live view of the selected card.
   cleared with dead silicon enabled is drawn red; otherwise *masks-cleared
   brick signature absent*.
 - **Silicon topology — GPC / FBP floorsweep**: one box per GPC and FBP
-  with a state selector (`Pre-glitch reference` / `Intended (this card's
-  defects)` / `NOW (live)`) and a legend: `active`,
+  with a state selector (`Stock state (this card's factory fuses)` /
+  `Intended (this card's defects)` / `NOW (live)`) and a legend: `active`,
   `floorswept (re-enableable)`, `dead silicon · off`,
   `dead silicon · ENABLED (brick)`. The unlock goal in this view: `NOW`
   matching `Intended` — every non-defective unit active.
+- **Stock / Intended / Now — the three states**: `STOCK` is **this
+  card's own factory baseline** — the first dump ever saved for its board
+  serial (`dumps/sn-<serial>/stock.json`, served by `/api/stock`),
+  rendered with the same GPC/FBP/mem/TPC extraction as `NOW`. It replaced
+  a hardcoded CMP 170HX SKU template that showed a virgin card a phantom
+  "pre-glitch" difference (AI2, 2026-11-23). `INTENDED` = the disable
+  mask equals this card's defective mask: every unit that is not dead
+  silicon runs. `NOW` = the live registers of the shown dump/poll.
+  Diff honesty follows: a stock-vs-now difference is a **real fuse
+  change** (campaign effect); a virgin card shows zero difference. If the
+  card was modified before this console first saw it, stock = state at
+  first sight (the provenance line in the note names the baseline). When
+  no baseline exists yet, the stock view shows the now state with
+  `No stock baseline recorded yet — this dump is the first record`.
 - **TPC map — SM availability per GPC**: one row per GPC, 8 TPC cells
   each (2 SM per TPC). Cell colours: **green** = `enabled now`, **yellow**
   = `disabled · healthy (unlock headroom)`, **red** =
@@ -684,6 +698,14 @@ slots change between boots. Dumps are therefore keyed by the card's
 - The GUI header shows the loaded dump's serial (`SN <serial>` or
   `no serial`), and the last-dump age in the driver-bound panel counts
   same-serial dumps only.
+- **Stock baseline**: the first dump saved for a serial also seeds
+  `dumps/sn-<SERIAL>/stock.json` — that card's `STOCK` reference for the
+  topology/TPC state views, served by `/api/stock`. Written once
+  (`O_EXCL`, never overwritten) with `stock_provenance`
+  `first dump seen for this serial at <ts>`; only full dumps seed it
+  (driver-bound guarded captures are UNVERIFIED). A card modified before
+  this console first saw it has stock = state at first sight — the
+  provenance line is what it claims, nothing more.
 
 Saved-dump views are labelled by serial and presence state, never left
 masquerading as live. The default face resolves current-card-only (task
@@ -713,6 +735,16 @@ resurrecting the pinned address. (A pinned BDF pointing at an AMD dummy
 function took fuse CMD_READ *writes* after a card swap and rebooted the
 host — owner, 2026-11-23.)
 
+With that same validation gate goes **BAR auto-enable**: on a fresh cold
+boot with no driver bound the kernel leaves PCI `COMMAND` memory-enable
+(bit 1) clear — `lspci` shows `Region 0 … [disabled]` and BAR0 reads
+return garbage (AI2, 2026-11-23). Before mapping BAR0 of a
+`require_ga100`-validated device the console sets that bit itself
+(`bar0.ensure_mem_decode`, config-space write via
+`/sys/bus/pci/devices/<bdf>/config`, one log line per write, idempotent).
+Non-GA100 functions are never touched; if the write fails or BAR0 stays
+unreadable the honest `BAR0 unreadable` error path is unchanged.
+
 ## HTTP API (reference)
 
 | Method | Path | Purpose |
@@ -722,6 +754,7 @@ host — owner, 2026-11-23.)
 | GET | `/api/full` | full row dump + hex window; `409 {"error": "no GA100 present on this host"}` (or `no GA100 at <bdf> (found …)`) when the target is absent or not GA100 silicon — no ghost-BDF fallback; saves `dump.json` under `dumps/sn-<serial>/<ts>/` (`bdf-<bdf>/<ts>/` when the serial is unreadable) and returns `serial`, `serial_source`, `dump_dir` |
 | GET | `/api/dumps` | saved-dump history listing, newest first: `[{dir, serial, dumped, driver_bound, verified, row_count, current}]` over every stored layout; `current` = dump of the card present now; a dir whose `dump.json` can't be read or parsed lists as `{dir, unreadable}` instead of failing the listing |
 | GET | `/api/dumps/get?dir=<rel>` | one `dump.json` by `dumps_dir`-relative path (+ `dump_dir`); `404` unless the path resolves inside the dumps store (no `../` escape, no absolute path), `422` when the JSON is corrupt |
+| GET | `/api/stock` | the PRESENT card's stock baseline: `{serial, stock, provenance, is_current}` — `stock` is the card's first-saved dump (`dumps/sn-<serial>/stock.json`, + `stock_provenance`); `stock: null` with a `reason` when no GA100 is present (`no GA100 present on this host`), its serial is unreadable, or no baseline is recorded yet (`no stock baseline recorded yet — this dump is the first record`) |
 | GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/gpus/all` | every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF |

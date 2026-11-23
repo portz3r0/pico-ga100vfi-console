@@ -93,7 +93,7 @@ Live pure-read view of the target card. Controls and indicators:
 | page poll | heavy register-grid redraw rate; default **off** — the interpretation feed, dmesg tail, campaign log and GPU monitor refresh regardless, and all pollers pause when the browser tab is hidden |
 | ⟳ Run full dump | rows 0–487 via fuse `CMD_READ` + hex window, archived to `<state-dir>/dumps/sn-<serial>/<ts>/` (board-serial-keyed; `bdf-<bdf>/<ts>/` when the serial is unreadable); refused while a campaign runs; when no GA100 is present the button reports `no GA100 present on this host` — it never dumps the pinned `--bdf` of an absent card |
 | interpretation feed | register-change diff (`DSOV: 0x1 → 0x0` the moment a glitch lands) |
-| topology + state buttons | GPC/FBP floorsweep vs defective masks; `Pre-glitch reference` / `Intended (this card's defects)` / `NOW (live)`; dead-but-enabled silicon drawn red-hatched; click any unit for a full register audit dialog |
+| topology + state buttons | GPC/FBP floorsweep vs defective masks; `Stock state (this card's factory fuses)` / `Intended (this card's defects)` / `NOW (live)` — stock renders from this card's own first-saved baseline (`/api/stock`), not a SKU template; dead-but-enabled silicon drawn red-hatched; click any unit for a full register audit dialog |
 | TPC map | per-GPC SM availability: green enabled, yellow disabled-healthy (unlock headroom), red defective; "after unlock" is the fuse ceiling |
 | row table | all rows with region colouring (MAIN/UNIQ/FPF/FF), mirror pairing, FF decode (`chain/iff/block/data` + block names); filter buttons + search; click a row for its bit breakdown |
 

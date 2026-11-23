@@ -20,6 +20,12 @@ Endpoints:
   GET  /api/dumps/get?dir=<rel>  one dump.json by dumps_dir-relative path;
                          404 unless the path resolves inside the dumps
                          store (no ../ escape, no absolute path).
+  GET  /api/stock        the PRESENT card's stock baseline: {serial, stock,
+                         provenance, is_current}; stock null + reason when
+                         no card, serial unreadable, or no baseline yet.
+                         The baseline is dumps/sn-<serial>/stock.json —
+                         the FIRST dump saved for that serial, never
+                         overwritten (see seed_stock_baseline).
   GET  /api/glitch/status  campaign stats + log tail
   POST /api/glitch/start   {params..., mode, records[], token, no_revert, ack_uncertain}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open; ack_uncertain proceeds despite an unresolved burn journal)
   POST /api/glitch/stop
@@ -51,6 +57,12 @@ Endpoints:
 Safety model:
   * /api/live never writes to the card.
   * /api/full only issues fuse CMD_READs (FUSEWDATA never written).
+  * BAR auto-enable: before mapping BAR0 of a require_ga100-validated
+    device the console sets PCI COMMAND memory-enable (bit 1) if the
+    kernel left it clear at cold boot (no driver bound -> BAR0 reads
+    return garbage). Config-space write only, only behind require_ga100,
+    idempotent, one log line per write; failures keep the honest
+    "BAR0 unreadable" error path.
   * Burns require: armed token (typed phrase, 120s TTL), current row value
     matching the expected old value, pure 0->1 bit transition, and the burn
     WINDOW (DSOV=0, CRC=0x55, loader 0x120060=0, PLMs open, DEBUGCTRL=0,
@@ -98,7 +110,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .. import fusedump as fd
 from .. import guarded as gd
-from ..bar0 import Bar0, brd_serial
+from ..bar0 import Bar0, brd_serial, ensure_mem_decode
 from ..version import version_info
 from .gui import STUB, build_html, load_dump
 
@@ -231,6 +243,7 @@ def card_serial(bdf):
         s = SERIAL_CACHE[bdf]
         return (s, "inforom") if s else (None, "unavailable")
     try:
+        ensure_bar0_decode(bdf)   # cold boot: decode off -> PROM reads garbage
         with Bar0(bdf) as bar:
             s = brd_serial(bar.mm)
     except OSError:
@@ -274,8 +287,33 @@ def dump_serial_of(dd):
 
 
 # ---------------------------------------------------------------- probe
+def ensure_bar0_decode(bdf):
+    """BAR auto-enable before any BAR0 mapping of `bdf`.
+
+    Cold-boot finding (AI2, 2026-11-23): with no driver bound the kernel
+    leaves PCI COMMAND memory-enable clear — BAR0 reads return garbage and
+    the console honestly says "BAR0 unreadable". Set the bit, but ONLY for
+    require_ga100-validated devices (config-space writes never go near
+    another vendor's function). One log line when a write happened.
+    Any failure is silent here: the caller's existing honest error path
+    (probe's FUSECTRL check, dump_card's read failures) still reports an
+    unreadable BAR0."""
+    try:
+        fd.require_ga100(bdf)
+        if ensure_mem_decode(bdf):
+            sys.stdout.write(f"{datetime.now().strftime('%H:%M:%S')} "
+                             f"BAR auto-enable: set PCI COMMAND "
+                             f"memory-enable on {bdf}\n")
+            sys.stdout.flush()
+    except (ValueError, OSError):
+        pass
+
+
 def probe(bdf):
-    """Pure-read probe: status + shadow + TPC registers. Zero register writes."""
+    """Pure-read probe: status + shadow + TPC registers. Zero register
+    writes to the card; the only host-side write is ensure_bar0_decode's
+    PCI COMMAND memory-enable for this require_ga100-validated device."""
+    ensure_bar0_decode(bdf)
     path = f"/sys/bus/pci/devices/{bdf}/resource0"
     f = os.open(path, os.O_RDONLY | os.O_SYNC | os.O_CLOEXEC)   # OS-enforced
     try:                                                         # read-only
@@ -564,6 +602,7 @@ def full_dump(bdf=None):
         with open(os.path.join(out, "dump.json"), "w") as f:
             json.dump(d, f, default=str)
         d["dump_dir"] = out
+        seed_stock_baseline(serial, d)
         return 200, d
     finally:
         card_lock.release()
@@ -2409,6 +2448,73 @@ def dumps_get(rel):
     return 200, d
 
 
+# ------------------------------------------------------- stock baseline
+def stock_path(serial):
+    return os.path.join(dumps_dir(), f"sn-{serial}", "stock.json")
+
+
+def seed_stock_baseline(serial, d):
+    """First dump saved for a card serial becomes that card's STOCK
+    baseline — the stock view's reference, replacing the old hardcoded
+    CMP 170HX SKU template (a virgin card with different fuses showed a
+    phantom "pre-glitch vs now" difference, AI2 2026-11-23). Never
+    overwritten: O_EXCL so a race can't clobber the first record. Only
+    full_dump seeds (driver-bound guarded captures are UNVERIFIED). A
+    failed baseline write never fails the dump."""
+    if not serial:
+        return
+    d = dict(d)
+    d["stock_provenance"] = (
+        "first dump seen for this serial at "
+        f"{d.get('started') or datetime.now().isoformat(timespec='seconds')}")
+    path = stock_path(serial)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd_ = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return
+    except OSError:
+        return
+    try:
+        with os.fdopen(fd_, "w") as f:
+            json.dump(d, f, default=str)
+    except OSError:
+        try:
+            os.unlink(path)   # never leave a truncated baseline
+        except OSError:
+            pass
+
+
+def stock_api():
+    """GET /api/stock — the PRESENT card's stock baseline:
+    {serial, stock, provenance, is_current}. `stock` is null with a
+    `reason` when no GA100 is present, its serial is unreadable, or no
+    baseline has been recorded for it yet."""
+    bdf = effective_bdf(fd.find_ga100s())
+    if not bdf:
+        return {"serial": None, "stock": None, "provenance": None,
+                "is_current": False, "reason": NO_GA100}
+    serial, _src = card_serial(bdf)
+    if not serial:
+        return {"serial": None, "stock": None, "provenance": None,
+                "is_current": False,
+                "reason": "card serial unreadable — the stock baseline is "
+                          "keyed by board serial"}
+    try:
+        with open(stock_path(serial)) as f:
+            stock = json.load(f)
+    except FileNotFoundError:
+        return {"serial": serial, "stock": None, "provenance": None,
+                "is_current": True,
+                "reason": "no stock baseline recorded yet — this dump is "
+                          "the first record"}
+    except (OSError, ValueError) as e:
+        return {"serial": serial, "stock": None, "provenance": None,
+                "is_current": True, "reason": f"stock.json unreadable: {e}"}
+    return {"serial": serial, "stock": stock, "is_current": True,
+            "provenance": stock.get("stock_provenance")}
+
+
 def interpretation_txt(dumps):
     """Re-run fusedump.tpc_summary(shadow, hexnonzero) on every bundled dump
     so a developer can replay the interpretation offline against the very
@@ -2755,6 +2861,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/dumps/get":
                 code, payload = dumps_get(qs.get("dir"))
                 self._send(code, json.dumps(payload, default=str),
+                           "application/json")
+            elif path == "/api/stock":
+                self._send(200, json.dumps(stock_api(), default=str),
                            "application/json")
             elif path == "/api/glitch/status":
                 self._send(200, json.dumps(glitch_status(), default=str),

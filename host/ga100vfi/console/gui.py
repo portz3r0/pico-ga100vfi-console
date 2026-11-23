@@ -597,6 +597,11 @@ let D = JSON.parse(document.getElementById("dumpdata").textContent);
 // pristine copy of the server seed (the current card's own dump, or the
 // empty STUB) — "Back to current" restores the default face from it.
 const SEED = JSON.parse(document.getElementById("dumpdata").textContent);
+// Stock baseline of the PRESENT card (task 24): the first dump ever saved
+// for its serial (dumps/sn-<serial>/stock.json via /api/stock). null = no
+// baseline yet — the stock view then shows the now state and says so.
+let STOCK = null;
+let STOCK_NOTE = "";
 
 const fmt = v => "0x" + ((v ?? 0) >>> 0).toString(16).toUpperCase().padStart(8, "0");
 const bitsOf = v => { const b = []; v = (v ?? 0) >>> 0;
@@ -696,7 +701,7 @@ function renderVerdict() {
 
 // topology ---------------------------------------------------------------
 let curState = "now";
-const STATES = { pre: "Pre-glitch reference",
+const STATES = { stock: "Stock state (this card's factory fuses)",
                 intended: "Intended (this card's defects)",
                 now: "NOW (live)" };
 function renderStateBtns() {
@@ -718,8 +723,12 @@ function renderTopo() {
   const sh = D.shadow || {};
   const gpcDef = sh.GPC_DEFECTIVE ?? 0, fbpDef = sh.FBP_DEFECTIVE ?? 0;
   let gpcDis, fbpDis;
-  if (curState === "pre") {
-    gpcDis = 0x86; fbpDis = 0x852;   // stock CMP 170HX SKU floorsweep (factory, same per SKU)
+  if (curState === "stock") {
+    // Stock = THIS card's own first-saved dump (stock.json), same
+    // extraction as NOW. No baseline yet -> show the now state; the
+    // note below says it is the first record.
+    const ss = (STOCK && STOCK.shadow) || sh;
+    gpcDis = ss.GPC_DISABLE ?? 0; fbpDis = ss.FBP_DISABLE ?? 0;
   } else if (curState === "intended") {
     // Per-card, derived from THIS card's dump: the unlock goal is to
     // re-enable every unit that is not defective, so the intended
@@ -755,15 +764,18 @@ function renderTopo() {
 
 // TPC map -----------------------------------------------------------------
 const TPC_FFDEF = [0x8205c8,0x820508,0x82050c,0x820514,0x820564,0x8205ac,0x820b84,0x820b80];
-function computeTpc() {
+function computeTpc(dump) {
   // Mirror of fusedump.tpc_summary(). DEFECTIVE = FF-region words
   // (TPC_FFDEF, kate-land ga100-options offsets) — readable and correct
   // even for floorswept GPCs; the hex window, when present, is ground
   // truth and repairs old dumps whose shadow keys came from the runtime
   // word. 0x820760 (SKU) and 0x820C38 (runtime) both read 0xFF on a
   // power-gated GPC — power artifact, never a defect count.
-  const sh = D.shadow || {};
-  const hw = D.hexnonzero || [];
+  // `dump` defaults to the shown dump; the stock view passes STOCK so
+  // the very same extraction runs over the card's own baseline.
+  const D0 = dump || D;
+  const sh = D0.shadow || {};
+  const hw = D0.hexnonzero || [];
   const word = off => { const e = hw.find(([o]) => o === off); return e ? e[1] >>> 0 : null; };
   const gpcDef = sh.GPC_DEFECTIVE ?? 0, gpcDis = sh.GPC_DISABLE ?? 0;
   const gpcs = [], totals = { sm_now: 0, sm_max: 0, sm_defective: 0,
@@ -804,11 +816,6 @@ function computeTpc() {
   }
   return { gpcs, totals };
 }
-// CMP 170HX stock SKU factory TPC floorsweep (per-GPC disable words,
-// bit t = TPC t masked). From the reference card's pre-glitch array:
-// GPC1/2/7 fully masked, one TPC masked in each of the others.
-const STOCK_TPC_DIS = [0x01, 0xFF, 0xFF, 0x01, 0x01, 0x01, 0x01, 0xFF];
-const STOCK_GPC_DIS = 0x86;   // stock SKU GPC floorsweep: GPC 1, 2, 7
 function renderTpc() {
   const el = document.getElementById("tpcmap");
   const sh = D.shadow || {};
@@ -818,6 +825,8 @@ function renderTpc() {
     return;
   }
   const T = (D.tpc && D.tpc.totals && D.tpc.totals.have_data) ? D.tpc : computeTpc();
+  // Stock rows: the SAME extraction run over this card's own baseline.
+  const TS = (curState === "stock" && STOCK) ? computeTpc(STOCK) : null;
   const gpcDef = sh.GPC_DEFECTIVE ?? 0;
   const tot = { sm_now: 0, sm_max: 0, tpc_def: 0, sm_def: 0,
                 tpc_recov: 0, sm_recov: 0 };
@@ -832,9 +841,15 @@ function renderTpc() {
     const gdead = (gpcDef >> g) & 1;
     const def = (r.def ?? 0) & 0xFF;   // silicon truth — same in every state
     let dis, gdis;
-    if (curState === "pre") {
-      const ffD = (D.shadow || {})["TPC_FFDISABLE_GPC" + g];
-      dis = ffD != null ? ffD : STOCK_TPC_DIS[g]; gdis = (STOCK_GPC_DIS >> g) & 1;
+    if (curState === "stock") {
+      // This card's own baseline (same extraction as NOW); no baseline
+      // yet -> the now row, and the note says this dump is the record.
+      const sr = TS ? TS.gpcs[g] : null;
+      if (sr && sr.available) {
+        dis = (sr.eff ?? ((sr.def ?? 0) | (sr.dis ?? 0))) & 0xFF;
+        gdis = sr.gpc_disabled ? 1 : 0;
+      } else { dis = (r.eff ?? ((r.def ?? 0) | (r.dis ?? 0))) & 0xFF;
+               gdis = r.gpc_disabled ? 1 : 0; }
     } else if (curState === "intended") {
       dis = def; gdis = gdead;        // goal: everything not dead runs
     } else {
@@ -854,8 +869,8 @@ function renderTpc() {
     for (let t = 0; t < 8; t++) {
       const d = (def >> t) & 1, z = (eff >> t) & 1;
       const cls = d ? "dead" : (z ? "recov" : "on");
-      const zLbl = curState === "pre"
-        ? "factory-disabled, healthy — the unlock prize"
+      const zLbl = curState === "stock"
+        ? "disabled at first sight, healthy — the unlock prize"
         : "disabled, healthy — unlock headroom";
       cells += `<div class="tpccell ${cls}${(gdead || gdis) && !d ? " goff" : ""}" ` +
         `data-audit="tpc:${g}:${t}" ` +
@@ -876,7 +891,7 @@ function renderTpc() {
     tot.tpc_def += ndef; tot.sm_def += ndef * 2;
     tot.tpc_recov += gdead ? 0 : recov; tot.sm_recov += recovSm;
   }
-  const stateTag = { pre: "PRE-GLITCH (stock 170HX SKU floorsweep)",
+  const stateTag = { stock: "STOCK (this card's factory fuses — first dump seen)",
                      intended: "INTENDED (this card's defects — everything not dead runs)",
                      now: "NOW (live registers)" }[curState];
   html += `<div class="statline">` +
@@ -888,10 +903,14 @@ function renderTpc() {
     `</div>` +
     `<div class="note" style="margin-top:8px">Defective bits are this card's own silicon and are ` +
     `identical in all three states. ` +
-    (curState === "pre"
-      ? `Pre-glitch uses the stock CMP 170HX SKU floorsweep: GPC_DISABLE 0x86 (GPC 1/2/7) plus the ` +
-        `factory TPC mask 0x01/0xFF pattern (29 TPC masked → 70 SM). The yellow cells are what the ` +
-        `unlock recovers.`
+    (curState === "stock"
+      ? (STOCK
+          ? `Stock is THIS card's own first-saved baseline (${esc(STOCK_NOTE)}). ` +
+            `If this card was modified before this console first saw it, stock = state at first sight. ` +
+            `The yellow cells are what the unlock recovers; a stock-vs-now difference is a real ` +
+            `fuse change (campaign effect), never a template artifact.`
+          : `No stock baseline recorded yet — this dump is the first record; the stock view shows ` +
+            `the now state until a baseline is saved.`)
       : curState === "intended"
         ? `Intended = disable mask equals the card's defective mask: every unit that is not dead ` +
           `silicon runs. No yellow cells by definition.`
@@ -904,6 +923,18 @@ function renderTpc() {
     `floorswept/dead GPC are dimmed: their health is shown, but they only run once the GPC ` +
     `itself is enabled.</div>`;
   el.innerHTML = html;
+}
+
+// stock baseline fetch (task 24): the present card's first-saved dump.
+// null/absent -> the stock view falls back to the now state and says so.
+async function fetchStock() {
+  try {
+    const r = await fetch("/api/stock", { cache: "no-store" });
+    const j = await r.json();
+    STOCK = j.stock || null;
+    STOCK_NOTE = j.provenance || j.reason || "";
+    if (curState === "stock") { renderTopo(); renderTpc(); }
+  } catch (e) { /* static page or service down: stock view shows now-state */ }
 }
 
 // unit audit ---------------------------------------------------------------
@@ -1466,6 +1497,7 @@ document.querySelector(".tabs").addEventListener("keydown", e => {
 
 // ---------------------------------------------------------------- boot
 renderStateBtns();
+fetchStock();
 wireRowBtns();
 renderAll();
 const initialTab = (location.hash || "").replace("#", "");
@@ -1787,6 +1819,7 @@ LIVEBOOT = r"""
       if (HIST) { HIST = null; clearStale(); }  // a fresh dump of the present card replaces any browsed one
       renderAll();
       renderPlan(); renderQueue();
+      fetchStock();   // this dump may have just seeded the stock baseline
       note("full dump loaded — " + j.started, "okl");
     } catch (e) { note("⚠ full dump failed (" + e + ")", "badl"); }
     finally { b.disabled = false; updateEmptyState(); }

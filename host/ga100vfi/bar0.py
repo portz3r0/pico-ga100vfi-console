@@ -55,6 +55,33 @@ def restore(bdf: str = DEFAULT_BDF, wait_s: float = 0.25,
     finally:
         os.close(fd)
 
+def ensure_mem_decode(bdf: str,
+                      sysfs_root: str = "/sys/bus/pci/devices") -> bool:
+    """Set PCI COMMAND memory-enable (bit 1) if clear; True only when this
+    call wrote it (idempotent — a no-op once the bit is set).
+
+    Fresh cold boot with no driver bound leaves the kernel with BAR memory
+    decode DISABLED (lspci: "Region 0 ... [disabled]") — BAR0 reads then
+    return garbage (AI2, 2026-11-23; manual setpci fixed it instantly).
+    Raises OSError if config space cannot be opened/written or the bit
+    stays clear after the write (caller keeps its honest error path).
+    """
+    path = f"{sysfs_root}/{bdf}/config"
+    cfg = os.open(path, os.O_RDWR)
+    try:
+        cmd = struct.unpack("<H", os.pread(cfg, 2, 0x04))[0]
+        if cmd & 0x0002:
+            return False
+        os.pwrite(cfg, struct.pack("<H", cmd | 0x0002), 0x04)
+        back = struct.unpack("<H", os.pread(cfg, 2, 0x04))[0]
+        if not back & 0x0002:
+            raise OSError(f"{path}: COMMAND memory-enable still clear "
+                          f"after write (read back 0x{back:04x})")
+        return True
+    finally:
+        os.close(cfg)
+
+
 class Bar0:
     """mmap of /sys/bus/pci/devices/<bdf>/resource0."""
 
