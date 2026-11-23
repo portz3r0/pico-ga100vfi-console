@@ -45,9 +45,10 @@ sudo python3 -m ga100vfi.console --port 8790
 | **Drivers** | **GPU Info** |
 | ![Drivers tab](docs/images/console-drivers.png) | ![GPU Info tab](docs/images/console-gpu.png) |
 
-*Console screenshots were captured from the current console UI in mock
-mode on the latest code, including the brick-risk warning banner (representative fuse data); card serial, host name, IP addresses,
-username and home paths are masked.*
+*Console screenshots were captured from the live console on a bench rig
+(2026-11-23, `nvidia` bound — the paused banner and the driver-bound
+capture panel are visible); card serials and home paths are scrubbed at
+the network layer before render.*
 
 - Four tabs — **Fuse Explorer** (pure-read live poll with a change feed, full
   488-row dumps, GPC/FBP topology, FF-record decode), **Glitch & Burn**,

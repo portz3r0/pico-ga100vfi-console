@@ -601,6 +601,9 @@ every condition with its read value, expected value and fix hint, plus
 what the capture will do; the **Capture now** button is enabled only when
 every condition passes (`fix the failed conditions first` otherwise).
 
+![Driver-bound capture consent panel — preflight conditions with read
+values and the gated Capture now button](images/console-capture-consent.png)
+
 **Preflight conditions** (all read-only; the capture itself re-runs them
 and refuses with `preflight refused: <names>` + the failed conditions):
 
