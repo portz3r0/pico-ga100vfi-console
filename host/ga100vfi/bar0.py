@@ -96,9 +96,11 @@ BRD_MAGIC = b"\x02BRD"
 BRD_SERIAL = 0x10 + 0x28
 
 
-def brd_serial(bar: Bar0) -> str | None:
-    """Board serial from the InfoROM BRD object, or None if there is none."""
-    rom = bytes(bar.mm[PROM:PROM + PROM_SIZE])
+def brd_serial(mm) -> str | None:
+    """Board serial from the InfoROM BRD object, or None if there is none.
+    `mm` is a BAR0 mmap (Bar0.mm or any read-only mapping of resource0
+    covering the PROM shadow) so pure-read probes can use it too."""
+    rom = bytes(mm[PROM:PROM + PROM_SIZE])
     if rom[:4] != b"NVGI":
         return None
     i = rom.find(BRD_MAGIC, INFOROM_START, INFOROM_END)

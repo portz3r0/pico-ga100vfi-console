@@ -163,7 +163,8 @@ The live view of the selected card.
   glitch lands.
 - **⟳ Run full dump**: all fuse rows 0–487 via the fuse-macro `CMD_READ`
   path, plus the hex window and dmesg, archived to
-  `<state-dir>/dumps/<ts>/`. The page requests one automatically on
+  `<state-dir>/dumps/sn-<serial>/<ts>/` (serial-keyed; see "Dump
+  identity"). The page requests one automatically on
   load; while a campaign is running the server refuses it (`campaign
   running — full dump refused` — a mid-campaign sweep could push classify
   past the Goldilocks window).
@@ -328,7 +329,7 @@ The whole chase, in the order that actually works:
    (`DSOV = 1` = factory-locked, the normal state).
 2. Press **⟳ Run full dump**. After a few seconds the row explorer fills
    in; filter to `FF records` to see every chain/block/data triple.
-3. The dump is archived under `<state-dir>/dumps/<ts>/` — re-open it later
+3. The dump is archived under `<state-dir>/dumps/sn-<serial>/<ts>/` — re-open it later
    with `python3 -m ga100vfi.console.gui <dump_dir> out.html`.
 
 ### 2. Glitch to Goldilocks (observe only)
@@ -634,13 +635,50 @@ them as indicative until re-confirmed with the driver unbound. The saved
 dump lands in the normal dumps dir, so the Fuse Explorer, interpretation
 trace and support bundle all pick it up like any other dump.
 
+## Dump identity: serial, not BDF
+
+A PCIe address is a transport, not an identity: cards get swapped and
+slots change between boots. Dumps are therefore keyed by the card's
+**board serial**:
+
+- Every dump (full and guarded) records `serial` + `serial_source` in
+  `dump.json`. Source matrix: driver unbound → InfoROM BRD object read
+  through BAR0 (`inforom`); driver bound (guarded capture, paused live
+  view) → `nvidia-smi --query-gpu=serial --id=<bdf>` (`nvidia-smi`);
+  unreadable → `serial: null`, `serial_source: "unavailable"`.
+- Storage: `<state-dir>/dumps/sn-<SERIAL>/<timestamp>/dump.json`
+  (`bdf-<bdf>/<timestamp>/` when the serial is unreadable). Existing
+  dumps on disk are never moved: resolution walks the whole tree, so the
+  historical `dumps/<timestamp>/` and `dumps/<bdf>/<timestamp>/` layouts
+  keep working side by side with the new ones.
+- "Current card" resolution: the newest dump whose recorded serial
+  matches the serial of the card present now. When there is none, the
+  paused hint and bundle say **`no dump yet for this card (serial X)`**
+  instead of silently showing the previous card's dump; dumps recorded
+  under another serial stay listed but are labelled
+  `different card (serial Y)` (support-bundle manifest `dumps[].card`).
+- The GUI header shows the loaded dump's serial (`SN <serial>` or
+  `no serial`), and the last-dump age in the driver-bound panel counts
+  same-serial dumps only.
+
+Hard BDF validation goes with it: every BAR0-touching path first reads
+`/sys/bus/pci/devices/<bdf>/{vendor,device}` and requires
+`0x10de` + a GA100 device ID (`fusedump.require_ga100`) before any mmap
+or write. `--bdf` / `CFG["bdf"]` is only a *preference* among detected
+cards (`effective_bdf`), never a ghost address: when no GA100 is
+detected, the dump endpoints answer **409 `{"error": "no GA100 present
+on this host"}`** — the same words the poll loop uses — instead of
+resurrecting the pinned address. (A pinned BDF pointing at an AMD dummy
+function took fuse CMD_READ *writes* after a card swap and rebooted the
+host — owner, 2026-11-23.)
+
 ## HTTP API (reference)
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | the tabbed GUI (generated `live.html`) |
-| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE), and the provenance block `version` (`tool_version` / git sha / `fingerprint`). While the driver is bound it returns the `paused` snapshot (+ `paused_hint`, `manual_dump_available`, `last_dump_age_s`). `?bdf=` probes another GA100 on demand (same never-probe-while-bound rule) |
-| GET | `/api/full` | full row dump + hex window |
+| GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE), and the provenance block `version` (`tool_version` / git sha / `fingerprint`). While the driver is bound it returns the `paused` snapshot (+ `paused_hint`, `manual_dump_available`, `last_dump_age_s` — same-serial dumps only —, `serial`, `serial_source`, and `last_dump_note` `no dump yet for this card (serial X)` when none). `?bdf=` probes another GA100 on demand (same never-probe-while-bound rule) |
+| GET | `/api/full` | full row dump + hex window; `409 {"error": "no GA100 present on this host"}` (or `no GA100 at <bdf> (found …)`) when the target is absent or not GA100 silicon — no ghost-BDF fallback; saves `dump.json` under `dumps/sn-<serial>/<ts>/` (`bdf-<bdf>/<ts>/` when the serial is unreadable) and returns `serial`, `serial_source`, `dump_dir` |
 | GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/gpus/all` | every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF |
@@ -659,8 +697,8 @@ trace and support bundle all pick it up like any other dump.
 | GET | `/api/gpu` | nvidia-smi + lspci link state (`?bdf=` any GPU on the host) |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
 | GET | `/api/bound_dump/preflight` | driver-bound capture preflight (pure reads): `{conditions[], all_ok}`; each condition `{name, ok, value, expected, hint}`; `503 {"error": ...}` when BAR0 is unopenable; mock mode returns a synthetic `all_ok` block flagged `"mock": true` |
-| POST | `/api/bound_dump` | guarded capture with the driver **bound** (manual, consented): saves `dump.json` + `driver_bound` / `verified` markers into the dumps dir and returns the `tpc_summary` interpretation with `verified: false`; preflight refusal → `409` + `conditions` |
-| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace |
+| POST | `/api/bound_dump` | guarded capture with the driver **bound** (manual, consented): saves `dump.json` (with `serial` read via nvidia-smi) + `driver_bound` / `verified` markers under `dumps/sn-<serial>/<ts>-bound/` and returns the `tpc_summary` interpretation with `verified: false` + `serial`; preflight refusal → `409` + `conditions`; no GA100 present → `409` |
+| GET | `/api/support_bundle` | `tar.gz` download: logs + newest dumps + live snapshot + lspci/dmesg + nvidia-smi snapshot + interpretation trace (per-dump header names `serial` + source); manifest carries `current_card` (`bdf`/`serial`/`serial_source`) and `dumps[]` with per-dump `serial` + `card` label (`current card` / `different card (serial Y)` / `serial not recorded in this dump`) |
 
 POST bodies are JSON. Multi-GPU: burns target a specific GPU (`bdf`); the
 UI only enables the standalone burn while the burn-window verdict is open
@@ -668,9 +706,13 @@ UI only enables the standalone burn while the burn-window verdict is open
 regardless. GPU-list endpoints (`/api/gpus`, `/api/gpus/all`) return
 `default` = the **effective** BDF: the configured one when present, else
 the first detected GA100 (`null` when none is), with `default_note`
-explaining the fallback; `/api/live` and `/api/driver` carry the same
+`default_note` explaining the fallback; `/api/live` and `/api/driver` carry the same
 `default_note`. An empty/absent `bdf` in burn/glitch/dump requests
-resolves to the effective BDF, never to an absent configured one. The
+resolves to the effective BDF among **detected** GA100s — never to an
+absent configured one: every BAR0-touching endpoint first verifies
+sysfs vendor/device (`fusedump.require_ga100`) and answers
+`{"error": "no GA100 present on this host"}` (409 on the dump endpoints,
+`error` elsewhere) when nothing GA100 is on the bus. The
 pico port is a dropdown populated from the host's serial devices
 (`/dev/ttyACM*`, `/dev/ttyUSB*`, with `/dev/serial/by-id` names when
 available). Each entry carries `vid`/`vendor`/`product` read from sysfs
@@ -831,7 +873,7 @@ mock server):
 | Burn result `IMAGE VERIFY FAILED` | The multi-record image re-read wrong — the window is NOT held and success is not claimed; re-glitch and retry. |
 | `card busy (campaign or dump in progress)` on check/dump/live | A campaign or another dump holds the card; wait for it to finish. |
 | `campaign running — full dump refused` | The full-dump sweep could push classify past the Goldilocks window; stop the campaign first. |
-| Target card shows `no GA100 detected` / `no GA100 detected on this host` | Wrong `--bdf`, or the card dropped off the bus — check `lspci`. |
+| Target card shows `no GA100 detected` / live shows `no GA100 present on this host` | The card dropped off the bus or never enumerated — check `lspci`. The pinned `--bdf` is never used as a ghost: dumps and burns refuse until a GA100 is detected. |
 | Pico port dropdown shows `no pico detected` | Pico not connected / not enumerated; fix the cable, press **⟳ rescan**. A note appears when serial ports exist but none is a Raspberry Pi device. |
 | Campaign log fills with `nack` | The pico↔VRM I2C link is marginal; budget attempts per power-cycle and let the VRM cool, per the repo's safety notes. |
 | Bound capture refuses: `preflight refused: <conditions>` | Fix the named conditions (the panel shows each failed condition + hint); most common: PLM locked → run the PLM unlock first. |

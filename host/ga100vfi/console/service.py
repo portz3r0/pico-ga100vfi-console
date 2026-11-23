@@ -3,7 +3,15 @@
 Endpoints:
   GET  /                 tabbed GUI (Fuse Explorer / Glitch & Burn / Drivers / GPU)
   GET  /api/live         fast probe: status + shadow regs. PURE reads, safe any time.
-  GET  /api/full         full 488-row dump via CMD_READ + hex window (manual only).
+  GET  /api/full         full 488-row dump via CMD_READ + hex window (manual
+                         only). 409 {"error": "no GA100 present on this
+                         host"} when no GA100 is detected — the configured
+                         --bdf is a preference among DETECTED cards, never a
+                         ghost address; every BAR0-touching path first
+                         verifies sysfs vendor/device (fusedump.require_ga100).
+                         Dumps are stored serial-keyed: dumps/sn-<serial>/
+                         <stamp>/dump.json (bdf-<bdf> when the serial is
+                         unreadable); old layouts stay readable.
   GET  /api/glitch/status  campaign stats + log tail
   POST /api/glitch/start   {params..., mode, records[], token, no_revert, ack_uncertain}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open; ack_uncertain proceeds despite an unresolved burn journal)
   POST /api/glitch/stop
@@ -164,6 +172,99 @@ def driver_of(bdf):
         return None
 
 
+NO_GA100 = "no GA100 present on this host"
+
+
+def resolve_target(requested=None):
+    """BDF for every BAR0-touching call. A requested BDF must be GA100
+    silicon in sysfs; otherwise the effective card among the DETECTED
+    ones. CFG["bdf"] is only a preference among detected cards (see
+    effective_bdf) — never a ghost address: after a card swap or a boot
+    without the GPU, the pinned BDF can be another vendor's function, and
+    fuse CMD_READs there rebooted the host (owner, 2026-11-23). Returns
+    (bdf, error); error is None on success."""
+    if CFG["mock"]:
+        return CFG["bdf"], None
+    bdf = requested or effective_bdf(fd.find_ga100s())
+    if bdf is None:
+        return None, NO_GA100
+    try:
+        fd.require_ga100(bdf)
+    except ValueError as e:
+        return None, str(e)
+    return bdf, None
+
+
+def smi_serial(bdf):
+    """Board serial of a driver-bound GPU via nvidia-smi, or None."""
+    nvml_id = "00000000:" + bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
+    out = sh(["nvidia-smi", "--id=" + nvml_id, "--query-gpu=serial",
+              "--format=csv,noheader"], timeout=10) or ""
+    first = out.splitlines()[0].strip() if out else ""
+    return first if first.isdigit() else None
+
+
+def card_serial(bdf):
+    """(serial, source) for dump identity. Driver bound -> nvidia-smi;
+    unbound -> InfoROM BRD object through BAR0 (cached per BDF); unreadable
+    -> (None, "unavailable"). Mock: the mock json's "serial" key."""
+    if CFG["mock"]:
+        try:
+            with open(CFG["mock"]) as f:
+                s = json.load(f).get("serial")
+            return (str(s), "mock") if s else (None, "unavailable")
+        except Exception:
+            return None, "unavailable"
+    drv = driver_of(bdf)
+    if drv and "nvidia" in drv:
+        s = smi_serial(bdf)
+        return (s, "nvidia-smi") if s else (None, "unavailable")
+    if bdf in SERIAL_CACHE:
+        s = SERIAL_CACHE[bdf]
+        return (s, "inforom") if s else (None, "unavailable")
+    try:
+        with Bar0(bdf) as bar:
+            s = brd_serial(bar.mm)
+    except OSError:
+        s = None
+    SERIAL_CACHE[bdf] = s
+    return (s, "inforom") if s else (None, "unavailable")
+
+
+def dump_out_dir(serial, bdf, stamp):
+    """Dump storage is keyed by CARD, not by slot: dumps/sn-<serial>/<stamp>.
+    A card that moves slots keeps its history; a slot that gets a new card
+    does not inherit the old card's dumps. bdf-<bdf> when the serial could
+    not be read. Old layouts (dumps/<stamp>, dumps/<bdf>/<stamp>) stay
+    readable — _bundle_dump_dirs walks the whole tree."""
+    card = f"sn-{serial}" if serial else f"bdf-{bdf}"
+    return os.path.join(dumps_dir(), card, stamp)
+
+
+_DUMP_SERIAL_CACHE: dict = {}
+
+
+def dump_serial_of(dd):
+    """Serial recorded in a dump dir's dump.json, or None (old dump or
+    unreadable). Cached by (dir, mtime) — /api/live polls this path."""
+    path = os.path.join(dd, "dump.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    hit = _DUMP_SERIAL_CACHE.get(dd)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    serial = None
+    try:
+        with open(path) as f:
+            serial = json.load(f).get("serial")
+    except (OSError, ValueError):
+        serial = None
+    _DUMP_SERIAL_CACHE[dd] = (mtime, serial)
+    return serial
+
+
 # ---------------------------------------------------------------- probe
 def probe(bdf):
     """Pure-read probe: status + shadow + TPC registers. Zero register writes."""
@@ -185,8 +286,14 @@ def probe(bdf):
                 shadow[f"TPC_DISABLE_GPC{i}"] = rd(fd.TPC_DISABLE_BASE + 4 * i)
                 shadow[f"CTRL_TPC_GPC{i}"] = rd(fd.CTRL_TPC_BASE + 4 * i)
             window_ok, window_checks = burn_window(rd)   # read-only verdict
+            if bdf in SERIAL_CACHE:
+                serial = SERIAL_CACHE[bdf]
+            else:
+                serial = brd_serial(mm)   # PROM shadow read; cached per BDF
+                SERIAL_CACHE[bdf] = serial
             return {"status": status, "shadow": shadow,
                     "window_ok": window_ok, "window_checks": window_checks,
+                    "serial": serial, "serial_source": "inforom",
                     "tpc": fd.tpc_summary(shadow),
                     "driver": driver_of(bdf),
                     "bdf": bdf, "ts": datetime.now().isoformat(timespec="seconds")}
@@ -215,7 +322,7 @@ def poller(interval):
                 bdf = effective_bdf(fd.find_ga100s())
                 try:
                     if bdf is None:
-                        snap = {"error": "no GA100 detected on this host",
+                        snap = {"error": NO_GA100,
                                 "ts": datetime.now().isoformat(
                                     timespec="seconds")}
                     else:
@@ -269,10 +376,14 @@ PAUSED_HINT = ("live view paused: the nvidia driver is bound and raw BAR0 "
                "driver is loaded.")
 
 
-def last_dump_age_s():
+def last_dump_age_s(serial=None):
     """Age in seconds of the newest complete dump (a dir holding a
-    dump.json), or None when the state dir has none."""
+    dump.json), or None when the state dir has none. With `serial`,
+    only dumps recorded under that card serial count — after a card
+    swap the OLD card's dumps must not vouch for the NEW card."""
     dirs = _bundle_dump_dirs()
+    if serial is not None:
+        dirs = [dd for dd in dirs if dump_serial_of(dd) == serial]
     if not dirs:
         return None
     try:
@@ -282,13 +393,23 @@ def last_dump_age_s():
         return None
 
 
-def enrich_paused(snap):
+def enrich_paused(snap, bdf=None):
     """A paused /api/live snapshot must explain itself and point at the
-    manual guarded capture (the pause is not a dead end)."""
+    manual guarded capture (the pause is not a dead end). The last-dump
+    age refers to SAME-SERIAL dumps only."""
     if snap.get("paused"):
         snap["manual_dump_available"] = True
         snap["paused_hint"] = PAUSED_HINT
-        snap["last_dump_age_s"] = last_dump_age_s()
+        bdf = bdf or snap.get("bdf")
+        serial, src = card_serial(bdf) if bdf else (None, "unavailable")
+        snap["serial"] = serial
+        snap["serial_source"] = src
+        age = last_dump_age_s(serial)
+        snap["last_dump_age_s"] = age
+        if age is None:
+            snap["last_dump_note"] = (
+                f"no dump yet for this card (serial {serial})" if serial
+                else "no dump yet for this card (serial unavailable)")
     return snap
 
 
@@ -307,7 +428,9 @@ def bound_dump_preflight():
                 ("FUSECTRL idle", "0x00040000", "state 4 (idle)"),
                 ("EN_SW_OVERRIDE canonical", "0x00000000", "0x0 or 0x1"),
                 ("FUSEADDR canonical", "0x00000000", "< 512"))]}
-    bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    bdf, err = resolve_target()
+    if bdf is None:
+        return 409, {"error": err}
     try:
         with gd.Bar(bdf) as bar:
             conds = gd.preflight(bar)
@@ -337,7 +460,9 @@ def bound_dump_api():
     if CFG["mock"]:
         return 200, {"error": "bound dump needs a live card — run the "
                               "console without --mock"}
-    bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    bdf, err = resolve_target()
+    if bdf is None:
+        return 409, {"error": err}
     if not card_lock.acquire(timeout=1.0):
         return 200, {"error": "card busy (campaign or dump in progress)"}
     try:
@@ -351,7 +476,9 @@ def bound_dump_api():
         hexnonzero = [[a, v] for a, v in sorted(regs.items())
                       if v and gd.FUSE_BASE <= a < gd.FUSE_BASE + gd.FUSE_SIZE]
         tpc = fd.tpc_summary(shadow, hexnonzero)
-        d = {"bdf": bdf, "started": res["ts"],
+        serial, serial_src = card_serial(bdf)   # bound capture -> nvidia-smi
+        d = {"bdf": bdf, "serial": serial, "serial_source": serial_src,
+             "started": res["ts"],
              "finished": datetime.now().isoformat(),
              "driver": driver_of(bdf), "driver_bound": True,
              "verified": False,
@@ -376,12 +503,13 @@ def bound_dump_api():
                          ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
                           "NVLINK_DEFECTIVE")) + str((regs.get(fd.SBFE) or 0) & 1)
         d["fingerprint"] = hashlib.sha256(fp_src.encode()).hexdigest()[:16]
-        out = os.path.join(dumps_dir(), bdf if bdf != CFG["bdf"] else "",
+        out = dump_out_dir(serial, bdf,
                            datetime.now().strftime("%Y%m%d-%H%M%S-bound"))
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "dump.json"), "w") as f:
             json.dump(d, f, default=str)
-        return 200, {"saved": out, "bdf": bdf, "ts": res["ts"],
+        return 200, {"saved": out, "bdf": bdf, "serial": serial,
+                     "ts": res["ts"],
                      "driver_bound": True, "verified": False,
                      "passes_agree": res["passes_agree"],
                      "tpc": tpc, "totals": tpc["totals"],
@@ -391,26 +519,31 @@ def bound_dump_api():
 
 
 def full_dump(bdf=None):
-    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    if bdf != CFG["bdf"] and not valid_bdf(bdf):
-        return {"error": f"{bdf} is not a GA100 on this host"}
+    """GET /api/full — returns (http_code, payload). 409 when no GA100 is
+    present or the target is not GA100 silicon: never mmap/write a device
+    we have not verified. The dump is stored under its CARD serial
+    (dumps/sn-<serial>/<stamp>/dump.json; bdf-<bdf> when unreadable)."""
+    bdf, err = resolve_target(bdf)
+    if bdf is None:
+        return 409, {"error": err}
     with glitch_lock:
         if GLITCH["running"]:
             # the GUI auto-loads a dump on every page open; a dump grabs
             # card_lock for a full 488-row sweep and can push classify past
             # the Goldilocks window between shots
-            return {"error": "campaign running — full dump refused"}
+            return 409, {"error": "campaign running — full dump refused"}
     if not card_lock.acquire(timeout=1.0):
-        return {"error": "card busy — another full dump is running"}
+        return 409, {"error": "card busy — another full dump is running"}
     try:
-        if CFG["mock"] and bdf == CFG["bdf"]:
+        serial, serial_src = card_serial(bdf)
+        out = dump_out_dir(serial, bdf, datetime.now().strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(out, exist_ok=True)
+        if CFG["mock"]:
             with open(CFG["mock"]) as f:
                 d = json.load(f)
+            d["bdf"] = bdf
             hw = os.path.join(os.path.dirname(CFG["mock"]), "hex_window_0x820000.txt")
         else:
-            out = os.path.join(dumps_dir(), bdf if bdf != CFG["bdf"] else "",
-                               datetime.now().strftime("%Y%m%d-%H%M%S"))
-            os.makedirs(out, exist_ok=True)
             logs = []
             d = fd.dump_card(bdf, out, CFG["rows"], True,
                              lambda m, flush=True: logs.append(m))
@@ -418,7 +551,12 @@ def full_dump(bdf=None):
             hw = os.path.join(out, "hex_window_0x820000.txt")
         d.pop("hexnonzero", None)
         d["hexnonzero"] = parse_hexwindow(hw)
-        return d
+        d["serial"] = serial
+        d["serial_source"] = serial_src
+        with open(os.path.join(out, "dump.json"), "w") as f:
+            json.dump(d, f, default=str)
+        d["dump_dir"] = out
+        return 200, d
     finally:
         card_lock.release()
 
@@ -576,7 +714,7 @@ def arm_window(rd, wr):
     return plm == 0xFFFFFFFF, checks
 
 
-def burn_execute(rd, wr, row, value, old, bdf=None, journal=None,
+def burn_execute(rd, wr, row, value, old, bdf, journal=None,
                  ack_uncertain=False) -> dict:
     """Guarded single-row burn mirroring ga100_burn.program per row.
     Returns report dict. NEVER retries. Order: driver-unbound, journal
@@ -586,7 +724,6 @@ def burn_execute(rd, wr, row, value, old, bdf=None, journal=None,
     cleared, EN restore in finally. GPIO/TRIGGER/EN=1 writes exist ONLY
     here — never in probe / poller / burn_check / fusedump / mock."""
     rep = {"row": row, "value": value, "old": old}
-    bdf = bdf or CFG["bdf"]
     bound = driver_of(bdf)                    # ref bar.require_unbound
     if bound:
         rep["result"] = (f"ABORT — driver '{bound}' is bound to {bdf}; "
@@ -694,11 +831,11 @@ def ff_layout(bdf=None):
         attempts are finite
       * rows are reserved for re-disabling SMs that turn out actually bad.
     """
-    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    if bdf != CFG["bdf"] and not valid_bdf(bdf):
+    bdf, err = resolve_target(bdf)
+    if bdf is None:
         # ff_layout writes EN_SW_OVERRIDE + FUSECTRL CMD_READs through
         # fd.Bar — never point those at an arbitrary PCI device
-        return {"error": f"{bdf} is not a GA100 on this host"}
+        return {"error": err}
     occupied = []
     if CFG["mock"]:
         try:
@@ -1161,7 +1298,9 @@ def burn_preview_api(body):
     READ-ONLY: works outside any window, on a cold card, and in mock mode
     (read-only over the mock rows). Stores the preview as last-preview.json
     so the UI can show predicted-vs-actual after a real burn."""
-    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    bdf, err = resolve_target(body.get("bdf"))
+    if bdf is None:
+        return {"error": err}
     try:
         row = int(body["row"])
         value = int(str(body["value"]), 0)
@@ -1182,8 +1321,6 @@ def burn_preview_api(body):
         rep["bdf"] = bdf
         _save_state("last-preview.json", rep)
         return rep
-    if not valid_bdf(bdf):
-        return {"error": f"{bdf} is not a GA100 on this host"}
     if not card_lock.acquire(timeout=1.0):
         return {"error": "card busy"}
     try:
@@ -1204,9 +1341,9 @@ def burn_check(row, value, mirror, bdf=None):
     they open at burn time via arm_window and must not block the check."""
     if CFG["mock"]:
         return {"error": "burn check needs a live card — run the console without --mock"}
-    bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    if not valid_bdf(bdf):
-        return {"error": f"{bdf} is not a GA100 on this host"}
+    bdf, err = resolve_target(bdf)
+    if bdf is None:
+        return {"error": err}
     layout = ff_layout(bdf)          # own card_lock pass — scan the FF region
     if "error" in layout:
         return {"error": "FF region scan failed: " + layout["error"]}
@@ -1267,9 +1404,9 @@ def burn_api(body):
     Goldilocks state (guards enforce this; /api/gpus reports it)."""
     if CFG["mock"]:
         return {"error": "burn not available in mock mode"}
-    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    if not valid_bdf(bdf):
-        return {"error": f"{bdf} is not a GA100 on this host"}
+    bdf, err = resolve_target(body.get("bdf"))
+    if bdf is None:
+        return {"error": err}
     try:
         row = int(body["row"])
         value = int(str(body["value"]), 0)
@@ -1372,7 +1509,9 @@ def failing_checks(st):
 def arm_api(body):
     if str(body.get("phrase", "")).strip().upper() != "BURN":
         return {"error": 'phrase must be "BURN"'}
-    bdf = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    bdf, err = resolve_target(body.get("bdf"))
+    if bdf is None:
+        return {"error": err}
     st = arm_gate_state(bdf)
     if not st.get("goldilocks"):
         # The Arm button promises Goldilocks gating: refuse the token HERE,
@@ -1656,9 +1795,9 @@ def glitch_start(body):
     with glitch_lock:
         if GLITCH["running"]:
             return {"error": "campaign already running"}
-    if body.get("bdf") and not valid_bdf(body["bdf"]):
-        return {"error": f"{body['bdf']} is not a GA100 on this host"}
-    target = body.get("bdf") or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
+    target, err = resolve_target(body.get("bdf"))
+    if target is None:
+        return {"error": err}
     if CFG["mock"]:
         # Refuse up front: without this the campaign "starts", then dies
         # asynchronously on the serial open (running -> error flip in the UI).
@@ -1942,7 +2081,8 @@ def gpu_list():
                 d = json.load(f)
         except Exception:
             d = {}
-        e = {"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock", "serial": None}
+        e = {"bdf": d.get("bdf", CFG["bdf"]), "driver": "mock"}
+        e["serial"], e["serial_source"] = card_serial(CFG["bdf"])
         e.update(mock_gpu_state(d))
         return {"gpus": [e], "default": CFG["bdf"]}
     # detected cards only — never probe a configured BDF that isn't there
@@ -1965,15 +2105,7 @@ def gpu_list():
                     except Exception as ex:
                         e.update({"error": str(ex), "goldilocks": False,
                                   "dsov": None})
-                if bdf not in SERIAL_CACHE:
-                    SERIAL_CACHE[bdf] = None
-                    if not bound:
-                        try:
-                            with Bar0(bdf) as bar:
-                                SERIAL_CACHE[bdf] = brd_serial(bar)
-                        except Exception:
-                            pass
-                e["serial"] = SERIAL_CACHE.get(bdf)
+                e["serial"], e["serial_source"] = card_serial(bdf)
                 out.append(e)
         finally:
             card_lock.release()
@@ -1985,7 +2117,10 @@ def gpu_list():
 
 
 def valid_bdf(bdf):
-    return bdf == CFG["bdf"] or bdf in fd.find_ga100s()
+    """A BDF the console may act on: GA100 silicon DETECTED on this host.
+    CFG["bdf"] alone never qualifies — a pinned BDF whose card is gone can
+    belong to any other function (ghost-BDF incident, 2026-11-23)."""
+    return CFG["mock"] or bdf in fd.find_ga100s()
 
 
 def effective_bdf(detected):
@@ -2075,9 +2210,9 @@ def driver_op_api(body):
     if op == "unload":
         if not confirm:
             return {"error": "confirm required"}
-        bdf = effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-        bound = driver_of(bdf)
-        if bound:
+        bdf, _ = resolve_target()   # never unbind a ghost BDF: after a card
+        bound = driver_of(bdf) if bdf else None   # swap the pinned slot can
+        if bdf and bound:                         # hold another vendor's fn
             try:      # sysfs unbind — plain write, no shell
                 Path(f"/sys/bus/pci/drivers/{bound}/unbind").write_text(bdf)
             except OSError:
@@ -2104,7 +2239,7 @@ GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
 
 def gpu_info(bdf=None):
     bdf = bdf or effective_bdf(fd.find_ga100s()) or CFG["bdf"]
-    if bdf != CFG["bdf"] and not valid_bdf(bdf) \
+    if not valid_bdf(bdf) \
             and bdf not in {g["bdf"] for g in nvidia_gpu_bdfs()}:
         return {"nvidia": {"error": f"{bdf} is not a GPU on this host"},
                 "link": [], "apps": [], "bdf": bdf,
@@ -2170,6 +2305,10 @@ def live_snapshot():
         if snap.get("default_note"):
             err["default_note"] = snap["default_note"]
         return err
+    if "serial_source" not in snap:  # mock snapshots carry no probe serial
+        bdf = snap.get("bdf") or effective_bdf(fd.find_ga100s())
+        snap["serial"], snap["serial_source"] = (
+            card_serial(bdf) if bdf else (None, "unavailable"))
     return snap
 
 
@@ -2190,8 +2329,9 @@ def _tail_bytes(path, cap):
 
 def _bundle_dump_dirs():
     """Dump dirs under dumps_dir() that hold a dump.json, oldest mtime first.
-    os.walk covers both layouts full_dump writes: dumps/<ts> for the default
-    BDF and dumps/<bdf>/<ts> for the others."""
+    os.walk covers every layout ever written: dumps/sn-<serial>/<ts> and
+    dumps/bdf-<bdf>/<ts> (serial-keyed, current), plus the historical
+    dumps/<ts> for the default BDF and dumps/<bdf>/<ts> for the others."""
     dirs = [dp for dp, _, files in os.walk(dumps_dir())
             if "dump.json" in files]
     return sorted(dirs, key=os.path.getmtime)
@@ -2221,7 +2361,9 @@ def interpretation_txt(dumps):
         t = fd.tpc_summary(shadow, hexwin)
         tot = t["totals"]
         L.append(f"=== {member} ===")
-        L.append(f"bdf: {d.get('bdf')}  started: {d.get('started')}")
+        L.append(f"bdf: {d.get('bdf')}  serial: {d.get('serial')} "
+                 f"(source: {d.get('serial_source', 'not recorded in this dump')})"
+                 f"  started: {d.get('started')}")
         if d.get("driver_bound"):
             L.append("driver_bound: True — UNVERIFIED (driver-bound guarded "
                      "capture; passes_agree: "
@@ -2378,6 +2520,18 @@ def support_bundle():
         if d.get("bdf"):
             bdfs.add(d["bdf"])
 
+    # identity of the card in the slot right now, for per-dump labels
+    cur_bdf = effective_bdf(fd.find_ga100s())
+    cur_serial, cur_src = card_serial(cur_bdf) if cur_bdf else (None, "no-card")
+
+    def dump_label(d):
+        s = d.get("serial")
+        if s is None:
+            return "serial not recorded in this dump"
+        if cur_serial and s == cur_serial:
+            return "current card"
+        return f"different card (serial {s})"
+
     members["live_snapshot.json"] = json.dumps(live_snapshot(),
                                                default=str).encode()
     members["system.txt"] = system_txt()
@@ -2401,6 +2555,13 @@ def support_bundle():
                  "kernel": os.uname().release,
                  "python": sys.version.split()[0]},
         "bdfs": sorted(bdfs),
+        "current_card": {"bdf": cur_bdf, "serial": cur_serial,
+                         "serial_source": cur_src},
+        "dumps": [{"path": f"dumps/{rel}/dump.json",
+                   "serial": d.get("serial"),
+                   "serial_source": d.get("serial_source"),
+                   "card": dump_label(d)}
+                  for rel, _, d in groups],
         "members": [{"path": p, "bytes": len(b)}
                     for p, b in sorted(members.items())],
         "truncated": truncated,
@@ -2501,7 +2662,7 @@ class Handler(BaseHTTPRequestHandler):
                                     f"Unload nvidia stack to resume)",
                                     "driver": drv, "bdf": bdf,
                                     "ts": datetime.now().isoformat(timespec="seconds")}
-                            enrich_paused(snap)
+                            enrich_paused(snap, bdf)
                         else:
                             snap = probe(bdf)
                     except Exception as e:
@@ -2513,8 +2674,9 @@ class Handler(BaseHTTPRequestHandler):
                 snap["version"] = version_info()
                 self._send(200, json.dumps(snap), "application/json")
             elif path == "/api/full":
-                self._send(200, json.dumps(full_dump(qs.get("bdf")),
-                                           default=str), "application/json")
+                code, payload = full_dump(qs.get("bdf"))
+                self._send(code, json.dumps(payload, default=str),
+                           "application/json")
             elif path == "/api/glitch/status":
                 self._send(200, json.dumps(glitch_status(), default=str),
                            "application/json")
@@ -2543,10 +2705,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(gpus_all(), default=str),
                            "application/json")
             elif path == "/api/ff/layout":
-                self._send(200, json.dumps(
-                    ff_layout(qs.get("bdf") or effective_bdf(fd.find_ga100s())
-                              or CFG["bdf"]), default=str),
-                    "application/json")
+                self._send(200, json.dumps(ff_layout(qs.get("bdf")),
+                                           default=str),
+                           "application/json")
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
@@ -2647,12 +2808,14 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------- startup
 def latest_seed():
-    """Newest full-dump JSON in the state dir, for instant paint on boot."""
-    candidates = sorted(glob.glob(os.path.join(dumps_dir(), "*", "dump.json")))
-    if not candidates:
+    """Newest full-dump JSON in the state dir, for instant paint on boot.
+    _bundle_dump_dirs walks every layout: the serial-keyed sn-<serial>/<ts>
+    and bdf-<bdf>/<ts> plus the historical <ts> and <bdf>/<ts> dirs."""
+    dirs = _bundle_dump_dirs()
+    if not dirs:
         return dict(STUB)
     try:
-        return load_dump(os.path.dirname(candidates[-1]))
+        return load_dump(dirs[-1])
     except Exception:
         return dict(STUB)
 

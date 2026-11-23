@@ -214,11 +214,14 @@ def sh(argv, timeout=15):
         return f"<<{argv}: {e}>>"
 
 
-def find_ga100s():
+GA100_DEVICE_IDS = ("0x20c2", "0x2082", "0x20b5")
+
+
+def find_ga100s(sysfs_root="/sys/bus/pci/devices"):
     """Auto-detect GA100 silicon: CMP 170HX (10de:20c2 / 10de:2082) and
     A100 PCIe 80GB (10de:20b5) — same GA100 die, same fuse block."""
     primary = []
-    for d in sorted(glob.glob("/sys/bus/pci/devices/*")):
+    for d in sorted(glob.glob(os.path.join(sysfs_root, "*"))):
         try:
             ven = open(os.path.join(d, "vendor")).read().strip()
             dev = open(os.path.join(d, "device")).read().strip()
@@ -226,9 +229,27 @@ def find_ga100s():
             continue
         if ven != "0x10de":
             continue
-        if dev.lower() in ("0x20c2", "0x2082", "0x20b5"):
+        if dev.lower() in GA100_DEVICE_IDS:
             primary.append(os.path.basename(d))
     return primary
+
+
+def require_ga100(bdf, sysfs_root="/sys/bus/pci/devices"):
+    """Hard identity gate before ANY BAR0 mmap or write on `bdf`: sysfs
+    vendor/device must read as GA100 silicon. Raises ValueError naming
+    what was actually found — a stale unit-file BDF can land on any other
+    function (an AMD dummy function took fuse CMD_READ writes this way,
+    host rebooted, owner 2026-11-23). sysfs_root is a parameter so tests
+    can point it at a fake sysfs tree."""
+    d = os.path.join(sysfs_root, bdf)
+    try:
+        ven = open(os.path.join(d, "vendor")).read().strip().lower()
+        dev = open(os.path.join(d, "device")).read().strip().lower()
+    except OSError:
+        raise ValueError(f"no GA100 at {bdf} (found nothing at {d})") from None
+    if ven != "0x10de" or dev not in GA100_DEVICE_IDS:
+        raise ValueError(f"no GA100 at {bdf} (found {ven}:{dev})")
+    return dev
 
 
 class Bar:
@@ -463,6 +484,13 @@ def main(argv=None) -> int:
     bdfs = [a.bdf] if a.bdf else find_ga100s()
     if not bdfs:
         print("No GA100 CMP 170HX found. Pass --bdf explicitly.", file=sys.stderr)
+        return 1
+
+    try:
+        for bdf in bdfs:
+            require_ga100(bdf)      # never mmap BAR0 of non-GA100 silicon
+    except ValueError as e:
+        print(f"refusing to dump: {e}", file=sys.stderr)
         return 1
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

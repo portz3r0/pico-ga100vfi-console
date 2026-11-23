@@ -21,7 +21,7 @@ STUB = {
     "revision": "?", "driver": "?", "fingerprint": "—", "row_count": 0,
     "nonblank_rows": {}, "status": {}, "shadow": {}, "rows": {},
     "interpretation": [], "dmesg_tail": "", "nvidia_smi": "", "hexnonzero": [],
-    "ceilings": {},
+    "ceilings": {}, "serial": None, "serial_source": "unavailable",
 }
 
 
@@ -591,8 +591,10 @@ const regionOf = r => REGIONS.find(x => r >= x.min && r <= x.max) ||
 // ---------------------------------------------------------------- renderers
 function renderMeta() {
   const nb = Object.keys(D.nonblank_rows || {}).length;
+  const sn = D.serial ? "SN " + D.serial
+    : "no serial" + (D.serial_source === "unavailable" ? " (unreadable)" : "");
   document.getElementById("meta").textContent =
-    `${D.bdf}  ·  ${D.vendor}:${D.device} rev ${D.revision}  ·  driver=${D.driver}  ·  ` +
+    `${D.bdf}  ·  ${sn}  ·  ${D.vendor}:${D.device} rev ${D.revision}  ·  driver=${D.driver}  ·  ` +
     `dumped ${D.started}  ·  fingerprint ${D.fingerprint}  ·  ${D.row_count} rows, ${nb} non-blank`;
 }
 
@@ -1597,9 +1599,9 @@ LIVEBOOT = r"""
     if (el) { el.style.display = "none"; el.dataset.bound = "0"; }
     const bar = document.getElementById("boundbar");
     if (!bar) return;
-    const age = (j.last_dump_age_s === null || j.last_dump_age_s === undefined)
-      ? "no complete dump saved yet"
-      : "last dump " + fmtAge(j.last_dump_age_s) + " ago";
+    const age = j.last_dump_note || ((j.last_dump_age_s === null || j.last_dump_age_s === undefined)
+      ? "no complete dump saved yet for this card"
+      : "last dump for this card " + fmtAge(j.last_dump_age_s) + " ago");
     bar.innerHTML = `<span class="pill warnl">Fuse capture available (driver bound)</span> ` +
       `<span class="note">${esc(age)}.</span> ` +
       `<button class="btn" id="boundexpand">Expand ▾</button>`;
@@ -1619,9 +1621,9 @@ LIVEBOOT = r"""
     if (bar) bar.style.display = "none";
     if (el.dataset.bound === "1") return;   // keep an open panel across polls
     el.dataset.bound = "1";
-    const age = (j.last_dump_age_s === null || j.last_dump_age_s === undefined)
-      ? "no complete dump saved yet"
-      : "last complete dump " + fmtAge(j.last_dump_age_s) + " ago";
+    const age = j.last_dump_note || ((j.last_dump_age_s === null || j.last_dump_age_s === undefined)
+      ? "no complete dump saved yet for this card"
+      : "last complete dump for this card " + fmtAge(j.last_dump_age_s) + " ago");
     el.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">` +
       `<b>${esc(j.paused || "")}</b>` +
       `<button class="btn" id="boundcollapse">Collapse ▴</button></div>` +
@@ -1687,7 +1689,9 @@ LIVEBOOT = r"""
         `<span class="pill">SM now: <b>${tot.sm_now}</b></span>` +
         `<span class="pill okl">fuse ceiling: <b>${tot.sm_max}</b> SM</span>` +
         `<div class="mono" style="margin-top:6px">${gpcs}</div>` +
-        `<div class="note">saved ${esc(j.saved || "")} · double-pass agree: ` +
+        `<div class="note">saved ${esc(j.saved || "")} · card ` +
+        (j.serial ? "SN " + esc(j.serial) : "serial unreadable") +
+        ` · double-pass agree: ` +
         (j.passes_agree ? "yes" : "NO") + `</div>`;
     } catch (e) { r.innerHTML = "⚠ capture failed: " + esc(String(e)); }
     finally { b.disabled = false; }

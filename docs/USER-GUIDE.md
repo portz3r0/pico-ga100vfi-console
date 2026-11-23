@@ -39,6 +39,15 @@ winning — so a new record overrides the factory floorsweep without
 touching earlier rows. A **power cycle** then replays the new FF chain:
 only after that do the `STATUS_OPT_*` shadows show the unlock.
 
+Dump identity: dumps belong to the **card**, not the slot. Every dump
+records the board serial (read from the InfoROM when the driver is
+unbound, from `nvidia-smi` when it is bound) and is stored under
+`dumps/sn-<serial>/`. The PCIe address is only the transport — after a
+card swap the console says `no dump yet for this card (serial X)`
+instead of showing the previous card's dump, and the support bundle
+labels each dump `current card` or `different card (serial Y)`. Old
+dump folders on disk keep working untouched.
+
 ## 2. Requirements & launch
 
 - Linux host with the CMP 170HX installed and the Pico on the **same
@@ -82,7 +91,7 @@ Live pure-read view of the target card. Controls and indicators:
 | live pill | `● live — <time>` · `⏸ driver bound` (server poller pauses — raw BAR0 reads under GSP can wedge it; unload on Drivers to resume) · `⚠ BAR0 unreadable` (normal mid-glitch) |
 | GPU selector | lists **detected** GA100s only (multi-GPU hosts); the effective default carries a `(default)` suffix; an amber banner appears when the configured BDF is absent and the console follows another card |
 | page poll | heavy register-grid redraw rate; default **off** — the interpretation feed, dmesg tail, campaign log and GPU monitor refresh regardless, and all pollers pause when the browser tab is hidden |
-| ⟳ Run full dump | rows 0–487 via fuse `CMD_READ` + hex window, archived to `<state-dir>/dumps/<ts>/`; refused while a campaign runs |
+| ⟳ Run full dump | rows 0–487 via fuse `CMD_READ` + hex window, archived to `<state-dir>/dumps/sn-<serial>/<ts>/` (board-serial-keyed; `bdf-<bdf>/<ts>/` when the serial is unreadable); refused while a campaign runs; when no GA100 is present the button reports `no GA100 present on this host` — it never dumps the pinned `--bdf` of an absent card |
 | interpretation feed | register-change diff (`DSOV: 0x1 → 0x0` the moment a glitch lands) |
 | topology + state buttons | GPC/FBP floorsweep vs defective masks; `Pre-glitch reference` / `Intended (this card's defects)` / `NOW (live)`; dead-but-enabled silicon drawn red-hatched; click any unit for a full register audit dialog |
 | TPC map | per-GPC SM availability: green enabled, yellow disabled-healthy (unlock headroom), red defective; "after unlock" is the fuse ceiling |
@@ -295,6 +304,8 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 | Mock refusals | trusting mock as hardware | server (burn, burn check, glitch start, driver ops refuse; preview is the deliberate exception) |
 | v_dip range 200–500 mV | a typo commanding ~3.5 V onto a ~0.7 V rail | server (`glitch_start` refuses outside range) |
 | card_lock / campaign-running refusals | concurrent card access (dump vs burn vs campaign) racing each other | server (busy errors instead of interleaved fuse commands) |
+| sysfs GA100 identity gate before any BAR0 mmap/write | fuse `CMD_READ` writes landing on whatever function occupies a pinned BDF after a card swap (an AMD dummy function took writes and rebooted the host, 2026-11-23) | server (`fusedump.require_ga100` via `resolve_target` on every BAR0-touching path: full dump, guarded capture + preflight, burn / check / preview, arm, glitch start, FF layout; `valid_bdf` accepts detected cards only; dump endpoints answer 409 `no GA100 present on this host` when none is) |
+| serial-keyed dump identity | a new card silently inheriting the old card's dump history because it sits in the same slot | server + UI (dumps stored and matched under `sn-<serial>`; last-dump age filtered by serial; bundle manifest labels each dump `current card` / `different card (serial Y)`) |
 
 ## 6. Deciding a successful unlock — assistance features
 

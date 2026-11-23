@@ -102,7 +102,7 @@ def cmd_campaign(args) -> int:
                     with Bar0(args.bdf) as bar:
                         if bar.rd32(0x00) != 0xFFFFFFFF:
                             pre = classify(bar).as_dict()
-                            serial_ = brd_serial(bar)
+                            serial_ = brd_serial(bar.mm)
             except OSError:
                 pass  # BAR0 may not be up yet; per-attempt records carry the state
             tele.write({
@@ -266,7 +266,7 @@ def cmd_campaign(args) -> int:
     if verdict is None:
         return 1
     with Bar0(args.bdf) as bar:
-        serial = brd_serial(bar)
+        serial = brd_serial(bar.mm)
     entry = {
         "time": datetime.now().astimezone().isoformat(timespec="seconds"),
         "serial": serial,
