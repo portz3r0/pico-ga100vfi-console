@@ -12,6 +12,14 @@ Endpoints:
                          Dumps are stored serial-keyed: dumps/sn-<serial>/
                          <stamp>/dump.json (bdf-<bdf> when the serial is
                          unreadable); old layouts stay readable.
+  GET  /api/dumps        saved-dump history listing, newest first: [{dir,
+                         serial, dumped, driver_bound, verified, row_count,
+                         current}] over every stored layout; a dir whose
+                         dump.json can't be read or parsed lists as
+                         {dir, unreadable} instead of failing the listing.
+  GET  /api/dumps/get?dir=<rel>  one dump.json by dumps_dir-relative path;
+                         404 unless the path resolves inside the dumps
+                         store (no ../ escape, no absolute path).
   GET  /api/glitch/status  campaign stats + log tail
   POST /api/glitch/start   {params..., mode, records[], token, no_revert, ack_uncertain}  (token needed to burn; no_revert defaults TRUE — a Goldilocks result keeps the glitch window open; ack_uncertain proceeds despite an unresolved burn journal)
   POST /api/glitch/stop
@@ -2342,6 +2350,65 @@ def _bundle_dump_dirs():
     return sorted(dirs, key=os.path.getmtime)
 
 
+def present_card_serial():
+    """Serial of the card physically present now (the default-target card),
+    or None when no GA100 is detected or the serial can't be read."""
+    bdf = effective_bdf(fd.find_ga100s())
+    if not bdf:
+        return None
+    serial, _src = card_serial(bdf)
+    return serial
+
+
+def dumps_list():
+    """GET /api/dumps — every saved dump, newest first, for the history
+    browser. `current` marks dumps of the card present now. An unreadable
+    dump dir becomes an {dir, unreadable} entry — one bad dir never 500s
+    the listing."""
+    cur = present_card_serial()
+    out = []
+    for dd in reversed(_bundle_dump_dirs()):
+        rel = os.path.relpath(dd, dumps_dir())
+        try:
+            with open(os.path.join(dd, "dump.json")) as f:
+                d = json.load(f)
+        except (OSError, ValueError) as e:
+            out.append({"dir": rel, "unreadable": str(e)})
+            continue
+        serial = d.get("serial")
+        out.append({"dir": rel, "serial": serial,
+                    "dumped": d.get("started"),
+                    "driver_bound": bool(d.get("driver_bound")),
+                    "verified": d.get("verified"),
+                    "row_count": d.get("row_count"),
+                    "current": bool(serial) and serial == cur})
+    return out
+
+
+def dumps_get(rel):
+    """GET /api/dumps/get?dir=<rel> — one dump.json by dumps_dir-relative
+    path. The path must resolve INSIDE dumps_dir (no ../ escape, no
+    absolute path, symlink targets included); anything else is 404.
+    Returns (http_code, payload)."""
+    if not rel:
+        return 404, {"error": "dir required"}
+    root = os.path.realpath(dumps_dir())
+    cand = os.path.realpath(os.path.join(root, rel))
+    if not cand.startswith(root + os.sep):
+        return 404, {"error": "dir outside dumps store"}
+    try:
+        with open(os.path.join(cand, "dump.json")) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        return 404, {"error": f"no dump.json under {rel}"}
+    except OSError as e:
+        return 404, {"error": f"dump unreadable: {e}"}
+    except ValueError as e:
+        return 422, {"error": f"dump.json invalid JSON: {e}"}
+    d["dump_dir"] = cand
+    return 200, d
+
+
 def interpretation_txt(dumps):
     """Re-run fusedump.tpc_summary(shadow, hexnonzero) on every bundled dump
     so a developer can replay the interpretation offline against the very
@@ -2682,6 +2749,13 @@ class Handler(BaseHTTPRequestHandler):
                 code, payload = full_dump(qs.get("bdf"))
                 self._send(code, json.dumps(payload, default=str),
                            "application/json")
+            elif path == "/api/dumps":
+                self._send(200, json.dumps(dumps_list(), default=str),
+                           "application/json")
+            elif path == "/api/dumps/get":
+                code, payload = dumps_get(qs.get("dir"))
+                self._send(code, json.dumps(payload, default=str),
+                           "application/json")
             elif path == "/api/glitch/status":
                 self._send(200, json.dumps(glitch_status(), default=str),
                            "application/json")
@@ -2813,16 +2887,23 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------- startup
 def latest_seed():
-    """Newest full-dump JSON in the state dir, for instant paint on boot.
-    _bundle_dump_dirs walks every layout: the serial-keyed sn-<serial>/<ts>
-    and bdf-<bdf>/<ts> plus the historical <ts> and <bdf>/<ts> dirs."""
+    """Seed the live page with the CURRENT card's own newest dump only —
+    another card's dump must never be the page's default face. Card-less,
+    or no dump saved under the present card's serial: empty STUB, and the
+    UI offers the saved-dumps browser instead. _bundle_dump_dirs walks
+    every layout: sn-<serial>/<ts>, bdf-<bdf>/<ts>, plus the historical
+    <ts> and <bdf>/<ts> dirs (legacy dumps carry no serial, so they never
+    seed — they stay reachable through the browser)."""
     dirs = _bundle_dump_dirs()
-    if not dirs:
-        return dict(STUB)
-    try:
-        return load_dump(dirs[-1])
-    except Exception:
-        return dict(STUB)
+    serial = present_card_serial()
+    if serial:
+        own = [dd for dd in dirs if dump_serial_of(dd) == serial]
+        if own:
+            try:
+                return load_dump(own[-1])
+            except Exception:
+                pass
+    return dict(STUB)
 
 
 def prepare_html():

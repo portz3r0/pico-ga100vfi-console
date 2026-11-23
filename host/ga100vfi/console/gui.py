@@ -166,6 +166,12 @@ HTML = r"""<!DOCTYPE html>
   #dumpwrap.stale { opacity: .75; border-left: 3px solid var(--warn);
              padding-left: 12px; }
 
+  /* Saved-dumps history picker: one row per dump, click to browse. */
+  #dumplist .dumptrow { padding: 7px 12px; border-bottom: 1px solid var(--border-soft);
+             cursor: pointer; }
+  #dumplist .dumptrow:hover { background: var(--card-hi); }
+  #dumplist .dumptrow.unreadable { cursor: default; color: var(--fg-subtle); }
+
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border-soft); }
   th { font-size: 10px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: .08em;
@@ -481,6 +487,8 @@ HTML = r"""<!DOCTYPE html>
       <div class="sub mono" id="meta"></div>
     </div>
     <div style="display:flex; align-items:center; gap:10px">
+      <a class="topbadge" href="#" id="dumpsbtn" style="text-decoration:none"
+         title="Browse saved dumps of this or any other card — never shown by default">Saved dumps</a>
       <a class="topbadge" href="/api/support_bundle" style="text-decoration:none"
          title="Download console logs + dumps + interpretation trace as one tar.gz — attach it when reporting an issue">Support bundle</a>
       <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
@@ -502,6 +510,14 @@ HTML = r"""<!DOCTYPE html>
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <div class="card verdict" id="cardless" style="display:none"></div>
   <div class="card verdict warnv" id="dumpsrc" style="display:none"></div>
+  <div class="card" id="dumppicker" style="display:none">
+    <div class="flexline" style="justify-content:space-between; align-items:center">
+      <b>Saved dumps — newest first</b>
+      <button class="btn" id="dumppicker-close">Close ✕</button>
+    </div>
+    <div class="scroll" id="dumplist" style="margin-top:8px"></div>
+  </div>
+  <div class="card verdict warnv" id="nodata" style="display:none"></div>
   <div id="dumpwrap">
   <h2>Status</h2>
   <div class="grid" id="status"></div>
@@ -578,6 +594,9 @@ HTML = r"""<!DOCTYPE html>
 <script>
 "use strict";
 let D = JSON.parse(document.getElementById("dumpdata").textContent);
+// pristine copy of the server seed (the current card's own dump, or the
+// empty STUB) — "Back to current" restores the default face from it.
+const SEED = JSON.parse(document.getElementById("dumpdata").textContent);
 
 const fmt = v => "0x" + ((v ?? 0) >>> 0).toString(16).toUpperCase().padStart(8, "0");
 const bitsOf = v => { const b = []; v = (v ?? 0) >>> 0;
@@ -607,6 +626,7 @@ let STALE = null;
 function staleSuffix() {
   if (!STALE) return "";
   return STALE.reason === "absent" ? "  —  card not present"
+    : STALE.reason === "history" ? "  —  browsing saved dump"
     : "  —  different card present (serial " + (STALE.curSerial || "unknown") + ")";
 }
 function renderMeta() {
@@ -1503,6 +1523,13 @@ LIVEBOOT = r"""
   const feedEl = document.getElementById("feed");
   const feedLines = [];
   let prev = null, timer = null;
+  // History browser state (task 23): HIST = {dir} while an explicitly
+  // picked saved dump is on screen. The DEFAULT face is the present card's
+  // own data only — another card's dump never renders unless the user
+  // opens the picker. liveCard tracks the last /api/live verdict so the
+  // empty state can name the card's serial.
+  let HIST = null;
+  let liveCard = null;
 
   function note(msg, cls) { ind.textContent = msg; ind.className = "pill " + (cls || ""); }
   function cardlessBanner(msg) {
@@ -1547,6 +1574,109 @@ LIVEBOOT = r"""
     const w = document.getElementById("dumpwrap");
     if (w) w.classList.remove("stale");
     renderMeta();
+  }
+  // ---- empty state + saved-dumps history browser ----
+  function updateEmptyState() {
+    // no dump data on screen and not browsing history -> clean empty face:
+    // hide the dump-derived panels, show the reason + a browse affordance.
+    const el = document.getElementById("nodata");
+    if (!el) return;
+    const empty = !(D.row_count > 0) && !HIST;
+    el.style.display = empty ? "" : "none";
+    const w = document.getElementById("dumpwrap");
+    if (w) w.style.display = empty ? "none" : "";
+    if (!empty) return;
+    const who = liveCard && liveCard.present
+      ? `No dump yet for this card (serial ${esc(liveCard.serial || "unknown")}).`
+      : "No GA100 present — nothing live to show.";
+    el.innerHTML = `<b class="warn">${who}</b> ` +
+      `<button class="btn" id="nodata-browse">Browse saved dumps</button>`;
+    document.getElementById("nodata-browse").onclick = openPicker;
+  }
+  function closePicker() {
+    document.getElementById("dumppicker").style.display = "none";
+  }
+  async function openPicker() {
+    const p = document.getElementById("dumppicker");
+    p.style.display = "";
+    const list = document.getElementById("dumplist");
+    list.innerHTML = '<span class="note">loading saved dumps…</span>';
+    let arr;
+    try { arr = await jget("/api/dumps"); }
+    catch (e) { list.innerHTML = '<span class="bad">⚠ ' + esc(String(e)) + "</span>"; return; }
+    if (!arr.length) { list.innerHTML = '<span class="note">no saved dumps yet.</span>'; return; }
+    list.innerHTML = arr.map(e => {
+      if (e.unreadable) return `<div class="dumptrow unreadable mono">${esc(e.dir)} — ` +
+        `unreadable (${esc(String(e.unreadable))})</div>`;
+      const flags = [];
+      if (e.driver_bound) flags.push("driver-bound");
+      if (e.verified === false) flags.push("UNVERIFIED");
+      return `<div class="dumptrow" data-dir="${esc(e.dir)}">` +
+        `<b class="mono">${esc(e.serial || "no serial")}</b> · ` +
+        `<span class="mono">${esc(e.dumped || "?")}</span>` +
+        (flags.length ? ` · <span class="warn">${flags.join(" · ")}</span>` : "") +
+        ` · ${e.row_count} rows` +
+        (e.current ? ' <span class="tag ok-tag">(current card)</span>' : "") +
+        `</div>`;
+    }).join("");
+    list.querySelectorAll(".dumptrow[data-dir]").forEach(el =>
+      el.onclick = () => pickDump(el.dataset.dir));
+  }
+  function applyDumpData(j) {
+    const hex = j.hexnonzero; delete j.hexnonzero;
+    Object.assign(D, j); D.hexnonzero = hex || [];
+    renderAll(); renderPlan(); renderQueue();
+  }
+  async function pickDump(dir) {
+    try {
+      const j = await jget("/api/dumps/get?dir=" + encodeURIComponent(dir));
+      if (j.error) { note("⚠ " + j.error, "badl"); return; }
+      HIST = { dir: dir };
+      applyDumpData(j);
+      showHistStrip(j);
+      closePicker();
+      note("browsing saved dump — " + dir, "warnl");
+    } catch (e) { note("⚠ saved dump failed (" + e + ")", "badl"); }
+  }
+  function showHistStrip(j) {
+    // task 22's stale chrome, repurposed for explicit history: dim +
+    // label the panels, name the exact dump, offer the way back.
+    STALE = { reason: "history", curSerial: null };
+    const w = document.getElementById("dumpwrap");
+    w.style.display = "";
+    w.classList.add("stale");
+    const strip = document.getElementById("dumpsrc");
+    strip.innerHTML = `<b class="warn">Browsing saved dump — serial ` +
+      `${esc(j.serial || "unknown")}, dumped ${esc(j.started || "?")}</b> ` +
+      `<button class="btn" id="histback">← Back to current</button>`;
+    strip.style.display = "";
+    document.getElementById("histback").onclick = backToCurrent;
+    renderMeta();
+    updateEmptyState();
+  }
+  async function backToCurrent() {
+    // leave history mode: restore the default resolution — the present
+    // card's own newest saved dump read back from disk (no new sweep),
+    // else the pristine seed (empty state when the card has no dump).
+    HIST = null;
+    STALE = null;
+    document.getElementById("dumpsrc").style.display = "none";
+    document.getElementById("dumpwrap").classList.remove("stale");
+    try {
+      const arr = await jget("/api/dumps");
+      const cur = (arr || []).find(e => e.current && !e.unreadable);
+      if (cur) {
+        const j = await jget("/api/dumps/get?dir=" + encodeURIComponent(cur.dir));
+        if (j.error) throw new Error(j.error);
+        applyDumpData(j);
+        note("showing this card's newest saved dump — " + j.started, "okl");
+      } else {
+        D = JSON.parse(JSON.stringify(SEED));
+        renderAll(); renderPlan(); renderQueue();
+      }
+    } catch (e) { note("⚠ back-to-current failed (" + e + ")", "badl"); }
+    updateEmptyState();
+    fetchLive(false);
   }
   function followNote(id, n) {
     // amber honesty banner: console follows a card other than the configured BDF
@@ -1612,26 +1742,36 @@ LIVEBOOT = r"""
       const j = await r.json();
       followNote("live-follow", j.default_note);
       if (j.paused) { note("⏸ " + j.paused, "warnl"); hideCardless();
-        if (STALE && STALE.reason === "absent") clearStale();  // card is back (serial unknown while bound: no comparison, no alarm)
-        boundPanel(j); return; }
+        liveCard = { present: true, serial: j.serial || null };
+        if (!HIST && STALE && STALE.reason === "absent") clearStale();  // card is back (serial unknown while bound: no comparison, no alarm)
+        boundPanel(j); updateEmptyState(); return; }
       boundHide();
       if (j.error) { note("⚠ " + j.error, "badl"); cardlessBanner(j.error);
-        if (/no GA100/i.test(j.error)) setStale("absent", null); return; }
+        if (/no GA100/i.test(j.error)) {
+          liveCard = { present: false, serial: null };
+          if (!HIST) setStale("absent", null);   // history strip already labels the view
+        }
+        updateEmptyState(); return; }
       hideCardless();
       // /api/live carries the PRESENT card's serial (task 20): compare it
       // with the displayed dump's serial — a mismatch must never render
-      // the saved dump as present-tense live data.
+      // the saved dump as present-tense live data. While browsing history
+      // the strip already names the source; only the live bits refresh.
       const curSerial = j.serial || null;
-      const staleNow = !!(curSerial && D.serial && curSerial !== D.serial);
+      liveCard = { present: true, serial: curSerial };
       D.status = j.status; D.shadow = j.shadow;
       if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
-      if (!staleNow) D.started = j.ts;   // keep the SAVED dump's ts visible while labelled
+      if (!HIST) {
+        const staleNow = !!(curSerial && D.serial && curSerial !== D.serial);
+        if (!staleNow) D.started = j.ts;   // keep the SAVED dump's ts visible while labelled
+        if (staleNow) setStale("different", curSerial); else clearStale();
+      }
       diff(j);
-      if (staleNow) setStale("different", curSerial); else clearStale();
       renderLive();  // cheap cards refresh on the light poll too; rows/hex stay heavy-only
       renderPlan(); renderQueue();
+      updateEmptyState();
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
   }
@@ -1644,13 +1784,16 @@ LIVEBOOT = r"""
       if (j.error) { note("⚠ " + j.error, "badl"); return; }
       const hex = j.hexnonzero; delete j.hexnonzero;
       Object.assign(D, j); D.hexnonzero = hex || [];
+      if (HIST) { HIST = null; clearStale(); }  // a fresh dump of the present card replaces any browsed one
       renderAll();
       renderPlan(); renderQueue();
       note("full dump loaded — " + j.started, "okl");
     } catch (e) { note("⚠ full dump failed (" + e + ")", "badl"); }
-    finally { b.disabled = false; }
+    finally { b.disabled = false; updateEmptyState(); }
   }
   document.getElementById("fulldump").onclick = fullDump;
+  document.getElementById("dumpsbtn").onclick = e => { e.preventDefault(); openPicker(); };
+  document.getElementById("dumppicker-close").onclick = closePicker;
 
   // ---- driver-bound guarded capture (paused live view is not a dead end) ----
   const BOUND_ACTIONS = "Issues 512 fuse CMD_READs x2 passes; writes ONLY " +

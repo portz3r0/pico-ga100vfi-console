@@ -172,6 +172,24 @@ The live view of the selected card.
   load; while a campaign is running the server refuses it (`campaign
   running — full dump refused` — a mid-campaign sweep could push classify
   past the Goldilocks window).
+- **Current-card-only default**: the page's default face is the present
+  card's own data and nothing else — the seed is the newest dump whose
+  serial matches the card in the slot, plus the automatic full dump of
+  that card. Card-less, or no same-serial dump saved, the dump-derived
+  panels stay hidden behind an empty state (`No GA100 present — nothing
+  live to show.` / `No dump yet for this card (serial X).`) with a
+  **Browse saved dumps** button; another card's dump is never rendered by
+  default.
+- **Saved dumps (header button)**: explicit history browser. The picker
+  lists every saved dump newest-first (`serial · timestamp ·
+  driver-bound/UNVERIFIED flags · rows`, `(current card)` tag; unreadable
+  dirs shown as such). Selecting one loads it into the explorer panels
+  under the stale chrome: dimmed panels + strip `Browsing saved dump —
+  serial X, dumped <ts>` with a **← Back to current** button that leaves
+  history mode and restores the default resolution (the present card's
+  newest saved dump read back from disk, else the empty state). History
+  is client-side state only; the live polls keep refreshing the live
+  bits while browsing.
 - **Diagnosis**: the brick-signature verdict — floorsweep masks fully
   cleared with dead silicon enabled is drawn red; otherwise *masks-cleared
   brick signature absent*.
@@ -455,6 +473,8 @@ row field shows the zone verdict for whatever row you type.
 | target GPU pill (Glitch & Burn) | `● Goldilocks — glitch window` (4-check read-only approximation) · `locked (DSOV=<n>) — glitch first` · `⚠ <error>` · `no GA100 detected` |
 | burn window pill | `● burn window open` · `burn window closed (<failed checks>)` · `window: n/a` — read-only verdict from `/api/live` (`window_ok` + `window_checks`) |
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
+| empty state (Fuse Explorer) | `No GA100 present — nothing live to show.` · `No dump yet for this card (serial X).` — dump-derived panels hidden until the card's own dump exists or the picker is used; carries the **Browse saved dumps** button |
+| Browsing saved dump strip | `Browsing saved dump — serial X, dumped <ts>` + **← Back to current** — shown while a dump picked from the Saved dumps list is on screen; panels dimmed, header meta prefixed `SAVED DUMP OF … — browsing saved dump` |
 | row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve (keep free)` · `✗ revert tail (keep free)` · `✗ outside FF region` |
 | value source decode | `dump row N → 0x…` + decoded FF ch·blk·data (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | Preview burn button | enabled whenever row+value are set — **no window/arm/token requirement** (read-only works on a cold card and in mock); panel: verdict banner `SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`, before→Δ→after with delta bits highlighted, FF decode table, LAST-WINS collision badge (green win / red lose), amber hazard list, predicted effect, window/arm/journal strip |
@@ -666,16 +686,21 @@ slots change between boots. Dumps are therefore keyed by the card's
   same-serial dumps only.
 
 Saved-dump views are labelled by serial and presence state, never left
-masquerading as live: the Fuse Explorer compares the displayed dump's
-serial with the card `/api/live` reports present now. When no GA100 is
-present, or a *different* card is (serial mismatch), the header meta line
-is prefixed `SAVED DUMP OF` and suffixed `— card not present` /
-`— different card present (serial Y)`; an amber strip above the
-dump-derived panels reads `showing saved dump of card serial X (dumped
-<ts>)`, and those panels are dimmed with an amber left rule. Browsing
-saved dumps card-less stays fully functional — the panels keep their
-data, they just say whose data it is. When the displayed dump's serial
-matches the present card, nothing changes (present-tense is honest).
+masquerading as live. The default face resolves current-card-only (task
+23): the page seeds the present card's own newest dump — card-less or
+without a same-serial dump it shows the empty state with a Browse saved
+dumps affordance instead of auto-rendering another card's dump. History
+is explicit: the header **Saved dumps** picker (`/api/dumps`,
+`/api/dumps/get`) loads a chosen dump under the stale chrome — dimmed
+panels and the strip `Browsing saved dump — serial X, dumped <ts>` plus
+**← Back to current**, which restores the default resolution. The
+auto-labels from task 22 still guard anything else that ends up on screen
+mismatched: the header meta line is prefixed `SAVED DUMP OF` and suffixed
+`— card not present` / `— different card present (serial Y)` /
+`— browsing saved dump`; the amber strip above the dump-derived panels
+names the source, and those panels are dimmed with an amber left rule.
+When the displayed dump's serial matches the present card, nothing
+changes (present-tense is honest).
 
 Hard BDF validation goes with it: every BAR0-touching path first reads
 `/sys/bus/pci/devices/<bdf>/{vendor,device}` and requires
@@ -695,6 +720,8 @@ host — owner, 2026-11-23.)
 | GET | `/` | the tabbed GUI (generated `live.html`) |
 | GET | `/api/live` | fast probe (pure reads); JSON includes `tpc` — per-GPC TPC/SM summary (`gpcs[]` + `totals`) — the read-only burn-window verdict `window_ok` + `window_checks` (check-dict list, no writes, no SENSE), and the provenance block `version` (`tool_version` / git sha / `fingerprint`). While the driver is bound it returns the `paused` snapshot (+ `paused_hint`, `manual_dump_available`, `last_dump_age_s` — same-serial dumps only —, `serial`, `serial_source`, and `last_dump_note` `no dump yet for this card (serial X)` when none). `?bdf=` probes another GA100 on demand (same never-probe-while-bound rule) |
 | GET | `/api/full` | full row dump + hex window; `409 {"error": "no GA100 present on this host"}` (or `no GA100 at <bdf> (found …)`) when the target is absent or not GA100 silicon — no ghost-BDF fallback; saves `dump.json` under `dumps/sn-<serial>/<ts>/` (`bdf-<bdf>/<ts>/` when the serial is unreadable) and returns `serial`, `serial_source`, `dump_dir` |
+| GET | `/api/dumps` | saved-dump history listing, newest first: `[{dir, serial, dumped, driver_bound, verified, row_count, current}]` over every stored layout; `current` = dump of the card present now; a dir whose `dump.json` can't be read or parsed lists as `{dir, unreadable}` instead of failing the listing |
+| GET | `/api/dumps/get?dir=<rel>` | one `dump.json` by `dumps_dir`-relative path (+ `dump_dir`); `404` unless the path resolves inside the dumps store (no `../` escape, no absolute path), `422` when the JSON is corrupt |
 | GET | `/api/ports` | serial ports present on the host (pico selector), each with `vid`/`vendor`/`product`/`pico`; `default` = first Pico, else first device, else `null` (no phantom) + `note` when no Pico among them |
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/gpus/all` | every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF |
