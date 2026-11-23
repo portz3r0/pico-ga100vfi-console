@@ -10,7 +10,7 @@
 > consequence of using this tool. You are modifying your own hardware at your
 > own risk.
 
-Operational guide for the Fuse Console (`ga100vfi console`): what every
+Operational guide for the Fuse Console (`python3 -m ga100vfi.console`): what every
 control does, the end-to-end unlock workflow, and the complete guard
 chain. Reference detail (HTTP API, systemd unit, flags) lives in
 [CONSOLE.md](CONSOLE.md); this document tells you how to *drive* the tool.
@@ -50,7 +50,7 @@ only after that do the `STATUS_OPT_*` shadows show the unlock.
   `/etc/modprobe.d`). No auth — trusted network only.
 
 ```sh
-sudo python3 -m ga100vfi console --port 8790     # card auto-detected
+sudo python3 -m ga100vfi.console --port 8790     # card auto-detected
 ```
 
 Open `http://<host>:8790`. Flags (`--bdf`, `--state-dir`, `--listen`,
