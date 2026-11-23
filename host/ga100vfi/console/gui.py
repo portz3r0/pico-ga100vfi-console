@@ -103,17 +103,28 @@ HTML = r"""<!DOCTYPE html>
   /* Frozen header: the topbar stays selectable at every scroll position.
      ONE sticky element so no magic pixel offsets are needed when the topbar
      wraps taller on narrow screens. --sticktop (default 0px) is maintained
-     by a ResizeObserver in the boot section so the sticky #livebar and the
-     sticky tab rail park below it, never over it.
+     by a ResizeObserver in the boot section so the sticky side rails (tabs,
+     siderail) park below it, never over it.
      No overflow here: it must not clip the :focus-visible ring. */
   .sticktop { position: sticky; top: 0; z-index: 30; background: var(--bg); }
 
-  /* Two-column page: vertical tab rail on the left, panes on the right.
-     align-items:flex-start so the rail's sticky offset is measured against
-     the row, not a stretched full-height column. */
+  /* Three-column cockpit: vertical tab rail left, panes center, status rail
+     right. align-items:flex-start so each rail's sticky offset is measured
+     against the row, not a stretched full-height column. */
   .layout { display: flex; align-items: flex-start; gap: 18px; }
   .content { flex: 1 1 auto; min-width: 0; } /* min-width:0: wide tables/pre
      blocks must not blow out the flex row */
+  /* Right status rail: the livebar card lives here and stays put while the
+     center column scrolls. :empty covers static (non-live) builds, where
+     the placeholder substitutes nothing. */
+  .siderail { flex: 0 0 380px; width: 380px; position: sticky;
+              top: calc(var(--sticktop, 0px) + 8px); align-self: flex-start;
+              max-height: calc(100vh - var(--sticktop, 0px) - 16px);
+              overflow-y: auto; z-index: 15; }
+  .siderail:empty { display: none; }
+  @media (max-width: 1200px) { /* mid-width: shrink the rail so the center
+     column isn't squeezed */
+    .siderail { flex-basis: 320px; width: 320px; } }
 
   /* top bar */
   .topbar { display: flex; justify-content: space-between; align-items: flex-end;
@@ -320,7 +331,8 @@ HTML = r"""<!DOCTYPE html>
   @keyframes flashbg { 0% { background: rgba(210,153,34,.4); }
                        100% { background: var(--card); } }
 
-  #livebar { margin-bottom: 14px; position: sticky; top: var(--sticktop, 0px); z-index: 20;
+  /* Not sticky itself — .siderail is the sticky element now. */
+  #livebar { margin-bottom: 14px;
              background: rgba(13,17,23,.92); backdrop-filter: blur(6px);
              border-color: var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.35); }
   #feed { font-size: 11px; color: var(--muted-foreground); margin-top: 9px;
@@ -373,14 +385,17 @@ HTML = r"""<!DOCTYPE html>
   .tabpane.on { display: block; }
 
   /* Narrow screens: rail collapses back to a horizontal sticky tab row with
-     the bottom-border active indicator. */
+     the bottom-border active indicator; the status rail un-sticks and moves
+     up right after the tabs (tabs stay first). */
   @media (max-width: 860px) {
     .layout { flex-direction: column; }
-    .tabs { flex-direction: row; width: auto; flex: none;
+    .tabs { flex-direction: row; width: auto; flex: none; order: -2;
             position: sticky; top: var(--sticktop, 0px); z-index: 15;
             overflow-x: auto; background: var(--bg);
             border-bottom: 1px solid var(--border); margin-bottom: 14px;
             max-height: none; padding: 0; }
+    .siderail { flex: none; width: auto; position: static; max-height: none;
+                order: -1; }
     .tab { text-align: center; padding: 9px 15px 8px; min-height: 0;
            border-left: none; border-bottom: 2px solid transparent;
            margin-bottom: -1px; border-radius: 6px 6px 0 0; }
@@ -466,7 +481,6 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </header>
   </div>
-__LIVEBAR__
   <div class="layout">
   <nav class="tabs" role="tablist" aria-label="console views">
     <button class="tab on" role="tab" id="tabbtn-explorer" aria-controls="tab-explorer"
@@ -538,6 +552,7 @@ __LIVEBAR__
     <div class="card"><div class="note">GPU info is available in live mode.</div></div>
   </section>
   </main>
+  <aside class="siderail" id="siderail">__LIVEBAR__</aside>
   </div>
 
   <div id="auditbg" role="dialog" aria-modal="true" aria-label="unit audit"><div id="audit"></div></div>
@@ -1413,7 +1428,7 @@ const initialTab = (location.hash || "").replace("#", "");
 if (["glitch", "drivers", "gpu"].includes(initialTab)) switchTab(initialTab);
 
 // Frozen tab bar: publish the sticky container's height as --sticktop so the
-// sticky #livebar parks below it instead of overlapping. Feature-checked —
+// sticky side rails park below it instead of overlapping. Feature-checked —
 // without ResizeObserver the livebar just sticks at 0 (previous behaviour).
 const sticktopEl = document.querySelector(".sticktop");
 if (sticktopEl && window.ResizeObserver) {
