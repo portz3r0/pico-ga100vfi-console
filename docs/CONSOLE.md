@@ -213,6 +213,21 @@ The live view of the selected card.
   first sight (the provenance line in the note names the baseline). When
   no baseline exists yet, the stock view shows the now state with
   `No stock baseline recorded yet — this dump is the first record`.
+- **Proposed burns to reach INTENDED**: while the unit/TPC view is in the
+  `INTENDED` state, a panel below the TPC map lists the burn records that
+  would achieve it — one row per planner record with target row, current
+  word → proposed word (hex), the units each word re-enables, and the
+  mirror-row note. Every row carries a `PROPOSED` badge and the header
+  states `PROPOSED — not burned; irreversible OTP writes pending a
+  Goldilocks campaign`: these are proposals, not accomplished facts, and
+  they never render in the `STOCK` or `NOW` views. The rows come from the
+  SAME planner that feeds the Glitch & Burn tab's `Suggested burns` card
+  (one source, no divergence), and `Queue these burns` pushes exactly
+  those records into the burn queue and switches to that tab — queueable
+  in one click. When the planner yields nothing the panel says
+  `no burns proposed — card already at intended state`; after a real burn
+  changes `NOW`, the panel recomputes on the next dump (fewer or no
+  proposals).
 - **TPC map — SM availability per GPC**: one row per GPC, 8 TPC cells
   each (2 SM per TPC). Cell colours: **green** = `enabled now`, **yellow**
   = `disabled · healthy (unlock headroom)`, **red** =

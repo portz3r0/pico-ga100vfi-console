@@ -282,6 +282,8 @@ HTML = r"""<!DOCTYPE html>
   .qrow.qexists { background: rgba(63,185,80,.07); border-color: rgba(63,185,80,.35); }
   .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
             border-color: rgba(63,185,80,.4); }
+  .prop-tag { background: rgba(210,153,34,.16); color: var(--warn);
+              border-color: rgba(210,153,34,.55); letter-spacing: .08em; }
   /* record timeline */
   .tl { margin: 6px 0 2px; padding-left: 4px; }
   .tlstep { position: relative; padding: 5px 0 5px 24px; }
@@ -542,6 +544,7 @@ HTML = r"""<!DOCTYPE html>
     <span><i class="sw dead"></i>defective silicon (never usable)</span>
   </div>
   <div class="card" id="tpcmap"></div>
+  <div class="card" id="proposed-burns" style="display:none"></div>
   </div><!-- /#dumpwrap: dimmed + labelled when the shown dump is not the present card -->
 
   <h2>Shadow registers</h2>
@@ -713,6 +716,7 @@ function renderStateBtns() {
     sb.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
     renderTopo();
     renderTpc();
+    renderProposedBurns();
   });
 }
 function unit(cls, name, sub, audit) {
@@ -923,6 +927,61 @@ function renderTpc() {
     `floorswept/dead GPC are dimmed: their health is shown, but they only run once the GPC ` +
     `itself is enabled.</div>`;
   el.innerHTML = html;
+}
+
+// Proposed burns for the INTENDED state (task 26): the burn records that
+// would bring the live disable masks to this card's defective masks. Rows
+// come from window.__suggestPlan — the SAME planner function that feeds the
+// "Suggested burns" card on the Glitch & Burn tab — and the queue button
+// goes through window.__queueProposedBurns, the same queue path; nothing
+// here re-derives encodings. Recompute triggers: every state switch and
+// every dump change (renderLive runs on each poll tick and after each new
+// dump), so after a real burn moves NOW, the next dump shows fewer or no
+// proposals. Renders ONLY in the intended state — never in NOW or STOCK.
+function renderProposedBurns() {
+  const el = document.getElementById("proposed-burns");
+  if (!el) return;
+  if (curState !== "intended" || !(D.row_count > 0) || !D.shadow ||
+      typeof window.__suggestPlan !== "function") {
+    el.style.display = "none"; el.innerHTML = ""; return;
+  }
+  el.style.display = "";
+  const plan = window.__suggestPlan();
+  let html = `<h3>Proposed burns to reach INTENDED</h3>` +
+    `<div class="note"><b class="warn">PROPOSED — not burned; irreversible ` +
+    `OTP writes pending a Goldilocks campaign.</b> These records would set ` +
+    `the disable masks to the card's defective masks; nothing is written ` +
+    `until a burn campaign runs.</div>`;
+  if (!plan.length) {
+    html += `<div class="note">no burns proposed — card already at intended state</div>`;
+  }
+  for (const p of plan) {
+    const words = p.pair ? p.words : [p.word];
+    html += `<div class="planrow"><div><b>${esc(p.label)}</b> ` +
+      `<span class="tag prop-tag">PROPOSED</span> ` +
+      `<span class="note">${esc(p.recs)}</span></div>` +
+      words.map(w => {
+        const f = window.__ffEffect(w);
+        const ex = window.__existingRecordFor(w);
+        return `<div class="planword">` +
+          `<span class="tag prop-tag">PROPOSED</span>` +
+          (ex !== null
+            ? `<span class="mono">row ${ex}: 0x${w.toString(16).toUpperCase().padStart(8, "0")} — already in dump</span>`
+            : `<span class="mono">0x00000000 → 0x${w.toString(16).toUpperCase().padStart(8, "0")}</span>`) +
+          `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+          `<span class="note">target row: ` +
+            (ex !== null ? `row ${ex} (record already present)`
+              : `auto-assigned in the safe FF zone at burn time; mirror row (even/odd pair) burned alongside when mirror is on`) +
+          `</span></div>`;
+      }).join("") + `</div>`;
+  }
+  if (plan.length) {
+    html += `<div style="margin-top:8px"><button class="btn go" id="proposed-queue">` +
+      `⤓ Queue these burns</button></div>`;
+  }
+  el.innerHTML = html;
+  const qb = document.getElementById("proposed-queue");
+  if (qb) qb.onclick = () => window.__queueProposedBurns();
 }
 
 // stock baseline fetch (task 24): the present card's first-saved dump.
@@ -1458,6 +1517,7 @@ function renderHex() {
 
 function renderLive() {  // cheap: everything except rows/dmesg/hex/interp
   renderMeta(); renderStatus(); renderVerdict(); renderTopo(); renderTpc();
+  renderProposedBurns();
   renderShadow();
 }
 function renderAll() {
@@ -2311,11 +2371,21 @@ LIVEBOOT = r"""
     }
     return recs;
   }
-  document.getElementById("plan-queue-all").onclick = () => {
+  function queuePlanRecords() {
+    // single queue path for the planner's records: used by "Queue all needed
+    // records" here AND by the INTENDED-state "Queue these burns" button
+    // (task 26) — same records, no divergence.
     for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
       queueAdd(w, p.label);
     note("all suggested records queued — review the queue, then start the campaign in burn mode", "okl");
-  };
+  }
+  document.getElementById("plan-queue-all").onclick = queuePlanRecords;
+  // task 26: the INTENDED-state panel (top-level scope) renders from this
+  // exact planner and queues through this exact path — single source.
+  window.__suggestPlan = suggestPlan;
+  window.__ffEffect = ffEffect;
+  window.__existingRecordFor = existingRecordFor;
+  window.__queueProposedBurns = () => { queuePlanRecords(); switchTab("glitch"); };
   document.getElementById("queue-clear").onclick = () => { burnQueue = []; renderQueue(); };
   document.getElementById("cq-row").oninput = document.getElementById("cq-value").oninput = () => {
     const v = parseInt($("cq-value").value, 16);
