@@ -2384,7 +2384,14 @@ LIVEBOOT = r"""
   function assignRows(entries) {
     const L = burnLayout();
     if (!L) return null;
-    const used = new Set(Object.keys(D.rows || {}).map(Number));
+    // Occupancy is judged by VALUE, not key presence: real dumps contain
+    // every row key 0..487, blanks included, with value 0x0/0xFFFFFFFF
+    // (same blank rule as the row table and the server's ff_layout_from_rows).
+    const dumpRows = D.rows || {};
+    const used = new Set(Object.keys(dumpRows).map(Number).filter(r => {
+      const v = dumpRows[r];
+      return typeof v === "number" && v !== 0 && v !== 0xFFFFFFFF;
+    }));
     let cur = Math.max(L.burn_zone[0], L.last_occupied + 1);
     const alloc = (mirror) => {
       if (mirror && (cur & 1)) {
