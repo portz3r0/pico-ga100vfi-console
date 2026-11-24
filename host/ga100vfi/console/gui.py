@@ -287,6 +287,13 @@ HTML = r"""<!DOCTYPE html>
               flex-wrap: wrap; width: 100%; }
   .qrow.qwarn { background: rgba(210,153,34,.07); border-color: rgba(210,153,34,.4); }
   .planword .psel { accent-color: var(--accent, #58a6ff); margin-right: 2px; }
+  /* task 35e: proposed-burns table */
+  .pbtable { margin-top: 8px; }
+  .pbtable th { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--fg-subtle); border-bottom: 1px solid var(--border); }
+  .pbtable td { vertical-align: top; }
+  .pbrow .psel { accent-color: var(--accent, #58a6ff); }
+  .pbrow.pboff td { opacity: .45; }
   .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
             border-color: rgba(63,185,80,.4); }
   .prop-tag { background: rgba(210,153,34,.16); color: var(--warn);
@@ -1031,43 +1038,41 @@ function renderProposedBurns() {
     html += `<div class="note">no burns proposed — card already at intended state</div>`;
   }
   let ai = 0;   // index into asg.rows — selected words only, same order as __planRowAssignment
+  html += `<table class="pbtable"><thead><tr><th></th><th>Burn</th><th>Word</th>` +
+    `<th>Target row</th><th>Field</th><th>Effect</th><th>Status</th></tr></thead><tbody>`;
   for (const p of plan) {
     const words = p.pair ? p.words : [p.word];
-    html += `<div class="planrow"><div><b>${esc(p.label)}</b> ` +
-      `<span class="tag prop-tag">PROPOSED</span> ` +
-      `<span class="note">${esc(p.recs)}</span></div>` +
-      words.map(w => {
-        const f = window.__ffEffect(w);
-        const st = lastWinsStatus(w);
-        const on = window.__planWordSelected(w);
-        // task 35c: a word already in the burn queue shows the queue's row,
-        // not a fresh allocation — one word, one row.
-        const inQ = burnQueue.some(q => q.word === w);
-        const a = on && !inQ ? (asg ? asg.rows[ai++] : null) : null;
-        return `<div class="planword">` +
-          `<input type="checkbox" class="psel" data-sel-word="${w}"${on ? " checked" : ""} ` +
-            `title="include this word in the queue">` +
-          `<span class="tag prop-tag">PROPOSED</span>` +
-          (st && st.state === "present"
-            ? `<span class="mono">row ${st.row}: ${hex(w)} — already in dump</span>`
-            : `<span class="mono">0x00000000 → ${hex(w)}</span>`) +
-          `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
-          (st && st.state === "present"
-            ? ` <span class="tag ok-tag">ALREADY PRESENT (row ${st.row}) — no burn needed</span>`
-            : st && st.state === "superseded"
-              ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
-              : "") +
-          `<span class="note">target row: ` +
-            (!on ? `not selected — not queued`
-              : inQ ? `already in burn queue — row shown there`
-              : !asg ? `FF layout not loaded — rows pending`
-              : a === null ? `<b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(w).blk} — free space first</b>`
-              : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(w)}</b>` +
-                (a.mirror ? ` + mirror row ${a.row + 1}` : "") +
-                (st && st.state === "present" ? ` (record already present at row ${st.row})` : "")) +
-          `</span></div>`;
-      }).join("") + `</div>`;
+    html += words.map((w, wi) => {
+      const f = window.__ffEffect(w);
+      const st = lastWinsStatus(w);
+      const on = window.__planWordSelected(w);
+      // task 35c: a word already in the burn queue shows the queue's row,
+      // not a fresh allocation — one word, one row.
+      const inQ = burnQueue.some(q => q.word === w);
+      const a = on && !inQ ? (asg ? asg.rows[ai++] : null) : null;
+      const rowCell =
+        !on ? `<span class="note">not selected</span>`
+        : inQ ? `<span class="note">in queue — row shown there</span>`
+        : !asg ? `<span class="note">rows pending</span>`
+        : a === null ? `<b class="bad">NO FREE ROW (block ${ffDecode(w).blk})</b>`
+        : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</b>`;
+      const statusCell =
+        st && st.state === "present" ? `<span class="tag ok-tag">ALREADY PRESENT (row ${st.row})</span>`
+        : st && st.state === "superseded" ? `<span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
+        : `<span class="note">—</span>`;
+      return `<tr class="pbrow${on ? "" : " pboff"}">` +
+        `<td><input type="checkbox" class="psel" data-sel-word="${w}"${on ? " checked" : ""} ` +
+          `title="include this word in the queue"></td>` +
+        (wi === 0 ? `<td rowspan="${words.length}"><b>${esc(p.label)}</b><br>` +
+          `<span class="note">${esc(p.recs)}</span></td>` : "") +
+        `<td class="mono">${hex(w)}</td>` +
+        `<td>${rowCell}</td>` +
+        `<td class="note">${esc(f.key)}</td>` +
+        (wi === 0 ? `<td rowspan="${words.length}" class="note">${esc(p.effect)}</td>` : "") +
+        `<td>${statusCell}</td></tr>`;
+    }).join("");
   }
+  html += `</tbody></table>`;
   if (plan.length) {
     html += `<div class="frow" style="margin-top:8px">` +
       `<button class="btn" data-sel-all="1">select all</button>` +
