@@ -168,7 +168,11 @@ HTML = r"""<!DOCTYPE html>
   #dumpwrap.stale { opacity: .75; border-left: 3px solid var(--warn);
              padding-left: 12px; }
 
-  /* Saved-dumps history picker: one row per dump, click to browse. */
+  /* Saved-dumps history picker: one row per dump, click to browse.
+     scroll-margin-top keeps the picker heading below the frozen topbar
+     when openPicker() scrolls it into view (--sticktop is the topbar
+     height, published by the ResizeObserver in the boot section). */
+  #dumppicker { scroll-margin-top: calc(var(--sticktop, 0px) + 8px); }
   #dumplist .dumptrow { padding: 7px 12px; border-bottom: 1px solid var(--border-soft);
              cursor: pointer; }
   #dumplist .dumptrow:hover { background: var(--card-hi); }
@@ -1780,6 +1784,11 @@ LIVEBOOT = r"""
   async function openPicker() {
     const p = document.getElementById("dumppicker");
     p.style.display = "";
+    // The picker renders near the top of the content column: when the page
+    // is scrolled down, showing it alone looks like nothing happened.
+    // scrollIntoView honours #dumppicker's scroll-margin-top, so the
+    // heading lands below the sticky topbar, not under it.
+    p.scrollIntoView({ behavior: "smooth", block: "start" });
     const list = document.getElementById("dumplist");
     list.innerHTML = '<span class="note">loading saved dumps…</span>';
     let arr;

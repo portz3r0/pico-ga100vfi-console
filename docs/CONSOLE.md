@@ -183,7 +183,11 @@ The live view of the selected card.
 - **Saved dumps (header button)**: explicit history browser. The picker
   lists every saved dump newest-first (`serial · timestamp ·
   driver-bound/UNVERIFIED flags · rows`, `(current card)` tag; unreadable
-  dirs shown as such). Selecting one loads it into the explorer panels
+  dirs shown as such); opening it scrolls the picker into view just below
+  the sticky header (so it is never opened off-screen when the page is
+  scrolled down) and the list scrolls internally (max-height 430px) so
+  hundreds of saved dumps stay usable; closing it never scrolls the page.
+  Selecting one loads it into the explorer panels
   under the stale chrome: dimmed panels + strip `Browsing saved dump —
   serial X, dumped <ts>` with a **← Back to current** button that leaves
   history mode and restores the default resolution (the present card's
