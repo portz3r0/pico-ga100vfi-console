@@ -609,6 +609,10 @@ let D = JSON.parse(document.getElementById("dumpdata").textContent);
 // signed plans — single source host/ga100vfi/advanced_unlocks.py, embedded
 // by build_html (see the Advanced unlocks card in the Glitch & Burn tab).
 const ADVANCED = JSON.parse(document.getElementById("advanceddata").textContent);
+// task 35c: the burn queue is declared HERE (page script, var → global) so
+// the proposed-burns panel can read it during first paint, before the
+// live-boot script loads; the live-boot script uses this same binding.
+var burnQueue = [];
 // pristine copy of the server seed (the current card's own dump, or the
 // empty STUB) — "Back to current" restores the default face from it.
 const SEED = JSON.parse(document.getElementById("dumpdata").textContent);
@@ -1035,7 +1039,10 @@ function renderProposedBurns() {
         const f = window.__ffEffect(w);
         const st = lastWinsStatus(w);
         const on = window.__planWordSelected(w);
-        const a = on ? (asg ? asg.rows[ai++] : null) : null;
+        // task 35c: a word already in the burn queue shows the queue's row,
+        // not a fresh allocation — one word, one row.
+        const inQ = burnQueue.some(q => q.word === w);
+        const a = on && !inQ ? (asg ? asg.rows[ai++] : null) : null;
         return `<div class="planword">` +
           `<input type="checkbox" class="psel" data-sel-word="${w}"${on ? " checked" : ""} ` +
             `title="include this word in the queue">` +
@@ -1051,6 +1058,7 @@ function renderProposedBurns() {
               : "") +
           `<span class="note">target row: ` +
             (!on ? `not selected — not queued`
+              : inQ ? `already in burn queue — row shown there`
               : !asg ? `FF layout not loaded — rows pending`
               : a === null ? `<b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(w).blk} — free space first</b>`
               : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(w)}</b>` +
@@ -2237,12 +2245,13 @@ LIVEBOOT = r"""
       </div>
     </div>
     <div class="card" id="gb-advanced" style="margin-top:12px">
-      <h3>Advanced unlocks — optional, from reference burn history</h3>
-      <div class="note" style="margin-bottom:8px">Permanent unlocks
-      <b>actually burned on reference cards A/B</b> (decoded from their
-      signed plans). <b class="warn">Irreversible OTP writes — NOT derived
-      from this card's defect masks:</b> the data words carry the reference
-      cards' defect masks; check them against this card before burning.
+      <h3>Advanced unlocks — optional, tested permanent unlocks</h3>
+      <div class="note" style="margin-bottom:8px">Permanent unlocks with a
+      <b>TESTED</b> badge (scope: EXTERNAL = proven on cards outside this
+      fleet, INTERNAL = confirmed on our own cards). <b class="warn">
+      Irreversible OTP writes — NOT derived from this card's defect
+      masks:</b> the data words carry the tested cards' defect masks; check
+      them against this card before burning.
       PROPOSED rows are placement candidates from the same allocator the
       queue uses. DIRECT rows (&lt;222) and IFF words (bit 5 set) are
       outside the queue's FF-record path (burn accepts FF records at rows
@@ -2339,7 +2348,8 @@ LIVEBOOT = r"""
 
   // ---- burn queue (suggested + custom records) ----
   // All queued records burn in ONE campaign pass (service supports records[]).
-  let burnQueue = [];
+  // burnQueue itself is declared as `var` in the page script (task 35c) so
+  // the proposed panel and this script share one binding.
   const encFF = (ch, off, data) => ((ch & 0x3F) | ((off & 0x3FF) << 6) |
     ((data & 0xFFFF) << 16)) >>> 0;
   // Decode a record's effect for humans: which units it acts on, disable→what.
@@ -2556,8 +2566,9 @@ LIVEBOOT = r"""
     burnQueue.push({ word, src, customRow, mirror: !!mirror });
     renderQueue();
   }
-  // ---- task 30: Advanced unlocks (reference burn history) ----
-  // Optional permanent unlocks burned on reference cards A/B. FF-record steps
+  // ---- task 30: Advanced unlocks (tested permanent unlocks) ----
+  // Optional permanent unlocks carrying a TESTED badge (scope external or
+  // internal). FF-record steps
   // are queueable and show their concrete target rows through the SAME
   // assignRows allocator over (current queue + this item's steps) — the
   // rows shown ARE the rows "+ queue" will assign. DIRECT (row < 222) and
@@ -2587,9 +2598,13 @@ LIVEBOOT = r"""
           : "";
       const selFf = ffSteps.filter(s => advStepSelected(it.id, s));
       const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
-      selFf.forEach(s => entries.push({word: s.value, mirror}));
+      // task 35c: a step whose word is already in the queue shows the QUEUE's
+      // row — one word, one row; no second allocation for the same word.
+      const qIdx = {};
+      burnQueue.forEach((q, i) => { if (!(q.word in qIdx)) qIdx[q.word] = i; });
+      const extra = {};
+      selFf.forEach(s => { if (!(s.value in qIdx) && !(s.value in extra)) { extra[s.value] = entries.length; entries.push({word: s.value, mirror}); } });
       const asg = assignRows(entries);
-      let ai = burnQueue.length;
       const stepsHtml = it.steps.map((s, si) => {
         const st = stOf(s);
         const badge = st && st.state === "present"
@@ -2599,10 +2614,7 @@ LIVEBOOT = r"""
             : "";
         if (s.kind === "ff") {
           const on = advStepSelected(it.id, s);
-          const a = on ? (asg ? asg.rows[ai++] : null) : null;
-          const bench = [s.bench_rows && s.bench_rows.refA ? `ref A row ${s.bench_rows.refA}` : "",
-                         s.bench_rows && s.bench_rows.refB ? `ref B row ${s.bench_rows.refB}` : ""]
-                        .filter(Boolean).join(" · ");
+          const a = on && asg ? asg.rows[s.value in qIdx ? qIdx[s.value] : extra[s.value]] : null;
           return `<div class="planword">` +
             `<input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
               `title="include this word in the queue">` +
@@ -2617,8 +2629,7 @@ LIVEBOOT = r"""
                 : `<b data-advrow="${it.id}:${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(s.value)}</b>` +
                   (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
             `</span>` +
-            `<span class="note">bench: ${esc(bench)}</span>` +
-            (s.ref_a_data !== undefined ? ` <span class="note"><b class="warn">ref A burned ${hex((s.value & 0xFFFF) | ((s.ref_a_data & 0xFFFF) << 16))} (per-die defect)</b></span>` : "") +
+            (s.other_burn !== undefined ? ` <span class="note"><b class="warn">per-die variant: another tested card burned ${hex((s.value & 0xFFFF) | ((s.other_burn & 0xFFFF) << 16))} (defect-driven)</b></span>` : "") +
             (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
             `</div>`;
         }
@@ -2634,12 +2645,13 @@ LIVEBOOT = r"""
       }).join("");
       return `<div class="planrow" data-adv-item="${it.id}" style="margin-top:10px">` +
         `<div><b>${esc(it.name)}</b> <span class="tag prop-tag">PROPOSED</span> ` +
-        conf(it.confidence) + itemBadge +
+        conf(it.confidence) +
+        (it.badge ? ` <span class="tag ${it.badge.scope === "INTERNAL" ? "ok-tag" : "prop-tag"}" title="burn proven by executed cards — scope: ${esc(it.badge.scope.toLowerCase())}">${esc(it.badge.label)} · ${esc(it.badge.scope)}</span>` : "") +
+        itemBadge +
         (ffSteps.length
           ? ` <button class="btn" data-adv-add="${it.id}">+ queue</button>`
           : ` <span class="note">no queueable FF records — manual burn path only</span>`) +
         `</div>` +
-        `<div class="note">provenance: ${esc(it.provenance)}</div>` +
         `<div class="note">${esc(it.notes)}</div>` +
         stepsHtml + `</div>`;
     }).join("");
@@ -2663,7 +2675,8 @@ LIVEBOOT = r"""
   function renderQueue() {
     // task 30: proposed rows (suggested card + advanced card) are computed
     // over the CURRENT queue — keep them in step with every queue change.
-    renderPlan(); renderAdvanced();
+    // task 35c: the INTENDED-state panel too (its rows now offset the queue).
+    renderPlan(); renderAdvanced(); renderProposedBurns();
     const el = document.getElementById("queue-rows");
     if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
     // task 27: show each entry's assigned row through the SAME allocator the
@@ -2731,6 +2744,17 @@ LIVEBOOT = r"""
       const v = dumpRows[r];
       return typeof v === "number" && v !== 0 && v !== 0xFFFFFFFF;
     }));
+    // task 35c: explicitly typed rows are reserved BEFORE auto-allocation —
+    // two burns must never share a row (fuses only OR; a second record on
+    // an occupied row corrupts the first). A custom row that collides with
+    // the dump or with another custom row is reported, not silently shared.
+    const customClash = [];
+    for (const q of entries) if (q.customRow) {
+      const r = +q.customRow;
+      if (used.has(r)) customClash.push(r);
+      used.add(r);
+      if (q.mirror) used.add(r + 1);
+    }
     const blockLast = {};
     const raw = L.last_row_for_block || {};
     Object.keys(raw).forEach(k => { blockLast[+k] = raw[k]; });
@@ -2763,7 +2787,7 @@ LIVEBOOT = r"""
       }
       rows.push({row, mirror: !!q.mirror});
     });
-    return {rows, exhaustedAt, noFree};
+    return {rows, exhaustedAt, noFree, customClash};
   }
   function queueRecords() {
     if (!burnLayout()) {
@@ -2774,6 +2798,11 @@ LIVEBOOT = r"""
     if (res.exhaustedAt >= 0) {
       alert(`no free row after the last record for ${res.noFree} queued ` +
             `word(s)' block — shrink the queue`);
+      return null;
+    }
+    if (res.customClash && res.customClash.length) {
+      alert(`row(s) ${[...new Set(res.customClash)].join(", ")} claimed by two records — ` +
+            `remove the duplicate custom row before burning (fuses OR; sharing a row corrupts both)`);
       return null;
     }
     return res.rows.map((r, i) => ({row: r.row, value: burnQueue[i].word,
@@ -2792,8 +2821,9 @@ LIVEBOOT = r"""
     const mirror = document.getElementById("gb-mirror").checked;
     let n = 0;
     for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
-      if (planWordSelected(w)) { queueAdd(w, p.label, undefined, mirror); n++; }
-    if (!n) { note("no burn words selected — nothing queued", "warnl"); return; }
+      // task 35c: skip words already in the queue — one word, one row.
+      if (planWordSelected(w) && !burnQueue.some(q => q.word === w)) { queueAdd(w, p.label, undefined, mirror); n++; }
+    if (!n) { note("nothing new to queue — selected words already queued or none selected", "warnl"); return; }
     note(`${n} selected record(s) queued — review the queue, then start the campaign in burn mode`, "okl");
   }
   document.getElementById("plan-queue-all").onclick = queuePlanRecords;
@@ -2816,11 +2846,20 @@ LIVEBOOT = r"""
   // will assign.
   window.__planRowAssignment = () => {
     const mirror = document.getElementById("gb-mirror").checked;
-    const entries = [];
+    // task 35c: allocate over (queue + selected proposed words NOT already
+    // queued) so proposed rows never collide with rows the queue already
+    // took; the panel indexes rows from 0 = its own words only.
+    const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
+    const queued = new Set(burnQueue.map(q => q.word));
     for (const p of suggestPlan())
       for (const w of (p.pair ? p.words : [p.word]))
-        if (planWordSelected(w)) entries.push({word: w, mirror});
-    return assignRows(entries);
+        if (planWordSelected(w) && !queued.has(w)) entries.push({word: w, mirror});
+    const asg = assignRows(entries);
+    if (asg) {
+      asg.rows = asg.rows.slice(burnQueue.length);
+      if (asg.exhaustedAt >= 0) asg.exhaustedAt -= burnQueue.length;
+    }
+    return asg;
   };
   window.__queueProposedBurns = () => { queuePlanRecords(); switchTab("glitch"); };
   document.getElementById("queue-clear").onclick = () => { burnQueue = []; renderQueue(); };
@@ -2932,7 +2971,7 @@ LIVEBOOT = r"""
   // ---- FF placement policy (row map + budget + live row hint) ----
   let ffLayout = null;
   // task 30: paint the advanced-unlock card at setup (works with no dump
-  // loaded — bench rows + provenance show, target rows say "pending").
+  // loaded — TESTED badge shows, target rows say "pending").
   // Must run AFTER the ffLayout declaration: renderAdvanced → assignRows →
   // burnLayout reads it, and `let` is in TDZ before its declaration.
   renderAdvanced();
