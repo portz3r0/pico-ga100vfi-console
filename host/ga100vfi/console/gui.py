@@ -2354,6 +2354,22 @@ LIVEBOOT = r"""
         return { key: `chain1·off${f.blk}`, field: f.name, mask, bits, width: f.w };
       }
     }
+    if (ch === 1 && off >= 11 && off <= 15) {
+      // chain1 offs 11–15: OPT_TPC_GPC{g}_DISABLE live at GLOBAL bit
+      // 187+8g (ray schema, plane FF) — word = bit//16, so one 16-bit word
+      // can straddle two or three GPC fields. Name every field it touches;
+      // full field → "GPCg", partial → "TPC_GPCg(lo-hi)" (TPC indices).
+      const names = [];
+      for (let g = 0; g < 8; g++) {
+        const lo = 187 + 8 * g, wlo = off * 16, whi = wlo + 15;
+        if (lo + 7 < wlo || lo > whi) continue;
+        const t0 = Math.max(lo, wlo) - lo, t1 = Math.min(lo + 7, whi) - lo;
+        names.push(t0 === 0 && t1 === 7 ? "GPC" + g : `TPC_GPC${g}(${t0}-${t1})`);
+      }
+      if (off === 15) names.push("PES(0-4)");  // OPT_PES_DISABLE bit 251 spills in
+      return { key: `chain1·off${off} ${names.join("·")}`, field: "TPC",
+               mask: data, bits: [] };
+    }
     if (ch === 1 && (off === 5 || off === 6)) {
       return { key: `chain1·off5+6 (FBPA split)`, field: "FBPA", mask, bits: [], two: off };
     }
@@ -2414,6 +2430,45 @@ LIVEBOOT = r"""
         effect: `GPC_DISABLE ${fmt(gpcDis & 0xFF)} → ${fmt(gpcDef & 0xFF)}` +
           (bits.length ? ` — re-enables ${bits.join(", ")}` : " — masks already equal"),
         recs: gpcDef ? "re-enables every non-defective GPC" : "no defective GPCs — record would disable all (skip)" });
+    }
+    // TPC unlock — chain1 offs 11–15 carry OPT_TPC_GPC{g}_DISABLE at global
+    // bit 187+8g (ray schema plane FF, word = bit//16). CURRENT values come
+    // from the DUMP's last-wins chain1 records (NOT shadow registers);
+    // TARGET per GPC = TPC_DEFECTIVE_GPC{g} shadow. Only words that actually
+    // change are proposed; every non-TPC bit of a word (PES in word 15,
+    // FBPA/GPC spill in words 5–8) is preserved from the current word.
+    const tpcCur = {};
+    for (const k of Object.keys(D.rows || {})) {
+      const r = +k, v = D.rows[k];
+      if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
+      const f = ffDecode(v);
+      if (f.ch === 1 && f.blk >= 11 && f.blk <= 15) tpcCur[f.blk] = f.data;  // rows ascend → last wins
+    }
+    for (let off = 11; off <= 15; off++) {
+      const cur = tpcCur[off] ?? 0;
+      let tgt = cur;
+      const on = [], masked = [], unknown = [];
+      for (let g = 0; g < 8; g++) {
+        const def = sh["TPC_DEFECTIVE_GPC" + g];
+        if (def == null) { unknown.push(g); continue; }  // defects unknown — leave bits untouched
+        for (let t = 0; t < 8; t++) {
+          const bit = 187 + 8 * g + t;
+          if ((bit >> 4) !== off) continue;
+          const b = bit & 15, want = (def >> t) & 1;
+          if (((cur >> b) & 1) && !want) on.push(`GPC${g} TPC${t}`);
+          if (!(((cur >> b) & 1)) && want) masked.push(`GPC${g} TPC${t}`);
+          tgt = ((tgt & ~(1 << b)) | (want << b)) & 0xFFFF;
+        }
+      }
+      if (tgt === cur) continue;  // word already matches target (incl. absent=0) — no proposal
+      const delta = on.length ? `re-enables ${on.join(", ")}` :
+                    masked.length ? `masks ${masked.join(", ")} (defective)` : "no field change";
+      out.push({ label: "TPC unlock", word: encFF(1, off, tgt),
+        effect: `off${off} word ${fmt(cur)} → ${fmt(tgt)}` +
+          (on.length ? ` — ${on.length} TPC(s) re-enabled` : "") +
+          (masked.length ? ` — ${masked.length} defective stay masked` : "") +
+          (off === 15 ? " — PES bits preserved" : ""),
+        recs: delta + (unknown.length ? ` (GPC${unknown.join(",GPC")} defect words unknown — untouched)` : "") });
     }
     if ((fbpDis & 0xFFF) !== (fbpDef & 0xFFF)) {
       const bits = [];
