@@ -161,7 +161,8 @@ def test_decode_row_304_known_record():
     assert e["before"] == 0 and e["delta"] == FBP_VAL and e["after"] == FBP_VAL
     d = e["decode_after"]
     assert d["chain"] == 1 and d["block"] == 19 and d["data"] == 0x4200
-    assert d["name"] == "FBP_DISABLE"
+    # block 19 carries FBP bits 3-14 AND ROP_L2 bit 0 (global 319)
+    assert d["name"] == "FBP_DISABLE + ROP_L2_DISABLE"
     assert e["decode_before"] is None      # blank row decodes to nothing
 
 
@@ -213,8 +214,10 @@ def test_hazards_known_fbp_case_exactly_three():
     assert sorted(h["word"] for h in hz["hazards"]) == \
         [0x000004C1, 0x020004C1, 0x400004C1]
     assert all("FBP_DISABLE" in h["effect"] for h in hz["hazards"])
-    # predicted effect line from the live winner
-    assert rep["predicted"].startswith("FBP_DISABLE data 0x4290 → 0x4200")
+    # predicted effect line from the live winner (block 19 = FBP + ROP_L2
+    # bit 0 — the label names every field the data word feeds)
+    assert rep["predicted"].startswith(
+        "FBP_DISABLE + ROP_L2_DISABLE data 0x4290 → 0x4200")
     assert "STATUS_OPT_*" in rep["predicted"]
 
 
@@ -306,6 +309,58 @@ def test_preview_works_in_mock():
         assert "error" not in rep, rep
         assert rep["verdict"] == "SAFE TO BURN"
         assert rep["collisions"]["last_wins"] == "WILL WIN"
-        assert rep["rows"][0]["decode_after"]["name"] == "FBP_DISABLE"
-        assert rep["predicted"].startswith("FBP_DISABLE data 0x4290 → 0x4200")
+        assert rep["rows"][0]["decode_after"]["name"] == \
+            "FBP_DISABLE + ROP_L2_DISABLE"
+        assert rep["predicted"].startswith(
+            "FBP_DISABLE + ROP_L2_DISABLE data 0x4290 → 0x4200")
         assert os.path.exists(os.path.join(td, "last-preview.json"))
+
+
+# ------------------------------------------- (i) plane gate (Nov-24 brick)
+# Live incident SN 1322621127930: factory block-8 record 0xF89E0201 carries
+# the FBPA_DISABLE tail (global 128-130 = FBPA bits 21-23; bits 22/23 SET =
+# the two dead FBPA partitions of FBPA_DEFECTIVE=0xC03000 stay masked).
+# Burning 0x00000201 to zero GPC_DISABLE ALSO cleared that tail → dead
+# partitions enabled → GFW stall, PCIe stuck Gen1 x4, probe -EIO.
+def _incident_bar():
+    bar = PrevBar()
+    bar.rows[295] = 0x66010181             # factory ch1 blk6 (FBPA bits 0-4)
+    bar.rows[304] = 0x019801C1             # factory ch1 blk7 (FBPA bits 5-20)
+    bar.rows[305] = 0xF89E0201             # factory ch1 blk8 (FBPA tail + GPC)
+    bar.rows[312] = 0x429004C1             # factory ch1 blk19 (FBP 0x852)
+    bar.r[0x8205D0] = 0xC03000             # FBPA_DEFECTIVE
+    bar.r[0x8205C4] = 0x000000             # GPC_DEFECTIVE (all GPC healthy)
+    bar.r[0x8205CC] = 0x000840             # FBP_DEFECTIVE
+    return bar
+
+
+def test_plane_gate_refuses_fbpa_tail_brick():
+    bar = _incident_bar()
+    rep, _ = preview(bar, row=330, value=0x00000201)
+    assert rep["verdict"] == "REFUSED"
+    assert rep["plane"]["blocking"]
+    fbpa = next(f for f in rep["plane"]["fields"]
+                if f["name"] == "FBPA_DISABLE")
+    assert fbpa["before"] == 0xC0330C and fbpa["after"] == 0x00330C
+    assert fbpa["newly_enabled"] == 0xC00000          # FBPA bits 22+23
+    assert "FBPA22" in rep["plane"]["reason"]
+    assert "FBPA23" in rep["plane"]["reason"]
+    assert "PLANE GATE" in rep["predicted"]
+
+
+def test_plane_gate_allows_corrective_record():
+    bar = _incident_bar()
+    rep, _ = preview(bar, row=330, value=0x00060201)  # FBPA tail restored
+    assert rep["verdict"] == "SAFE TO BURN"
+    assert not rep["plane"]["blocking"]
+    fbpa = next(f for f in rep["plane"]["fields"]
+                if f["name"] == "FBPA_DISABLE")
+    assert fbpa["after"] == 0xC0330C                  # ⊇ defective
+
+
+def test_plane_gate_inert_when_record_loses():
+    bar = _incident_bar()
+    bar.rows[400] = 0xF89E0201            # same key (1,8), LATER row
+    rep, _ = preview(bar, row=330, value=0x00000201)
+    assert rep["verdict"] == "WILL BE INERT"
+    assert not rep["plane"]["blocking"]   # loser changes no plane

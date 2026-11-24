@@ -1105,6 +1105,58 @@ FF_UNIT_PREFIX = {8: "GPC", 19: "FBP"}
 FF_UNIT_WIDTH = {8: 8, 19: 12}     # GPC count / FBP count (fusedump live_fbp)
 FF_SUBSET_CAP = 12                 # hazard enumeration cap (2^12 subsets)
 
+# FF bitstream field catalog (170HX-RAY logical_field_catalog, verified vs
+# batch1/batch2 and live shadow planes). Global bit g lives in block g//16,
+# data bit g%16 — so a 16-bit data word can carry bits of MULTIPLE logical
+# fields. Block 8 carries the FBPA_DISABLE tail (global 128-130 = FBPA bits
+# 21-23) ALONGSIDE GPC_DISABLE (131-138): a data=0x0000 record that zeroes
+# GPC_DISABLE also clears the FBPA tail. Live incident 2026-11-24
+# (SN 1322621127930): 0x00000201 at row 330 enabled FBPA bits 22/23 which
+# FBPA_DEFECTIVE=0xC03000 says are DEAD → GFW boot stalls, PCIe stuck at
+# Gen1 x4, driver "GPU failed probe-time init, open returning -EIO".
+FF_FIELDS = {
+    1: [("FBIO_DISABLE", 83, 24), ("FBPA_DISABLE", 107, 24),
+        ("GPC_DISABLE", 131, 8),
+        ("TPC_GPC0_DISABLE", 187, 8), ("TPC_GPC1_DISABLE", 195, 8),
+        ("TPC_GPC2_DISABLE", 203, 8), ("TPC_GPC3_DISABLE", 211, 8),
+        ("TPC_GPC4_DISABLE", 219, 8), ("TPC_GPC5_DISABLE", 227, 8),
+        ("TPC_GPC6_DISABLE", 235, 8), ("TPC_GPC7_DISABLE", 243, 8),
+        ("PES_DISABLE", 251, 24), ("FBP_DISABLE", 307, 12),
+        ("ROP_L2_DISABLE", 319, 24), ("NVLINK_DISABLE", 368, 3),
+        ("SYS_PIPE_DISABLE", 372, 8)],
+    2: [("PCIE_DEVIDA", 593, 16), ("PCIE_DEVIDB", 609, 16)],
+}
+# Dead-silicon readout per disable plane (BAR0, readable at DSOV=1 too).
+FF_FIELD_DEFECT = {
+    "GPC_DISABLE": 0x8205C4, "FBP_DISABLE": 0x8205CC,
+    "FBPA_DISABLE": 0x8205D0, "FBIO_DISABLE": 0x8205D4,
+    "ROP_L2_DISABLE": 0x8205E8, "PES_DISABLE": 0x820698,
+    "NVLINK_DISABLE": 0x82068C, "SYS_PIPE_DISABLE": 0x8203AC,
+}
+FF_FIELD_DEFECT.update({f"TPC_GPC{i}_DISABLE": off
+                        for i, off in fd.TPC_DEFECT_FF.items()})
+
+
+def ff_fields_for(chain, block):
+    """Logical fields overlapping a block's 16-bit data window.
+    [{name, g, w, dlo, n, fbit0}]: field spans global bits [g, g+w);
+    the overlap sits at data bits [dlo, dlo+n) and field bits
+    [fbit0, fbit0+n). A block may carry several fields."""
+    lo = block * 16
+    out = []
+    for name, g, w in FF_FIELDS.get(chain, ()):
+        a, b = max(g, lo), min(g + w, lo + 16)
+        if a < b:
+            out.append({"name": name, "g": g, "w": w, "dlo": a - lo,
+                        "n": b - a, "fbit0": a - g})
+    return out
+
+
+def ff_block_label(chain, block):
+    """Display name for a (chain, block) key — ALL fields it carries."""
+    names = [f["name"] for f in ff_fields_for(chain, block)]
+    return " + ".join(names) if names else None
+
 
 def ff_decode(word):
     """Decode an FF record word with the verified field map."""
@@ -1124,26 +1176,51 @@ def ff_decode_if(row, word):
             or (word >> 5) & 1:
         return None
     d = ff_decode(word)
-    d["name"] = FF_BLOCK_NAMES.get((d["chain"], d["block"]))
+    d["name"] = ff_block_label(d["chain"], d["block"]) or \
+        FF_BLOCK_NAMES.get((d["chain"], d["block"]))
+    d["fields"] = ff_field_values(d["chain"], d["block"], d["data"])
     return d
 
 
+def ff_field_values(chain, block, data):
+    """Per-field decoded values carried by one data word:
+    [{name, value, bits}] — value = the field bits this block contributes,
+    bits = the field-bit indices it contributes."""
+    out = []
+    for f in ff_fields_for(chain, block):
+        v = (data >> f["dlo"]) & ((1 << f["n"]) - 1)
+        bits = [f["fbit0"] + i for i in range(f["n"]) if (v >> i) & 1]
+        out.append({"name": f["name"], "value": v, "bits": bits,
+                    "fbit0": f["fbit0"], "n": f["n"]})
+    return out
+
+
 def ff_mask_effect(key, data_from, data_to):
-    """Human line describing the decoded-mask change (mask = data >> 3,
-    the Explorer tab's verified OPT_* decode) for a known block; None for
-    unknown keys."""
-    if key not in FF_BLOCK_NAMES:
-        return None
-    unit = FF_UNIT_PREFIX[key[1]]
-    m0, m1 = data_from >> 3, data_to >> 3
-    un = [i for i in range(FF_UNIT_WIDTH[key[1]]) if (m0 >> i) & 1 and not (m1 >> i) & 1]
-    mk = [i for i in range(FF_UNIT_WIDTH[key[1]]) if (m1 >> i) & 1 and not (m0 >> i) & 1]
+    """Human line describing the decoded-mask change for EVERY logical
+    field the block's data word carries (the Nov-24 brick was the FBPA
+    tail bits riding in a 'GPC_DISABLE' word); None for unknown keys."""
     parts = []
-    if un:
-        parts.append("unmasks " + "/".join(f"{unit}{i}" for i in un))
-    if mk:
-        parts.append("masks " + "/".join(f"{unit}{i}" for i in mk))
-    return ", ".join(parts) or "no mask change"
+    for f in ff_fields_for(key[0], key[1]):
+        m = (1 << f["n"]) - 1
+        m0 = (data_from >> f["dlo"]) & m
+        m1 = (data_to >> f["dlo"]) & m
+        name = f["name"]
+        if not name.endswith("_DISABLE"):           # DEVID-style raw field
+            if m0 != m1:
+                parts.append(f"{name} 0x{m0:X} → 0x{m1:X}")
+            continue
+        unit = name[:-len("_DISABLE")]
+        un = [f["fbit0"] + i for i in range(f["n"])
+              if (m0 >> i) & 1 and not (m1 >> i) & 1]
+        mk = [f["fbit0"] + i for i in range(f["n"])
+              if (m1 >> i) & 1 and not (m0 >> i) & 1]
+        if un:
+            parts.append(f"{name}: unmasks "
+                         + "/".join(f"{unit}{i}" for i in un))
+        if mk:
+            parts.append(f"{name}: masks "
+                         + "/".join(f"{unit}{i}" for i in mk))
+    return ", ".join(parts) or None
 
 
 class ReadOnlyFuse:
@@ -1176,6 +1253,12 @@ class MockFuseReader:
         self.rows = {int(k): v for k, v in rows.items() if isinstance(v, int)}
         self.r = {off: status.get(name, 0)
                   for name, off in fd.STATUS_REGS.items()}
+        # shadow/defect mirrors too — the plane gate reads the DEFECTIVE
+        # registers off the same handle
+        for name, off in fd.SHADOW_REGS.items():
+            self.r.setdefault(off, status.get(name, 0))
+        for i, off in fd.TPC_DEFECT_FF.items():
+            self.r.setdefault(off, status.get(f"TPC_DEFECTIVE_GPC{i}", 0))
         self.r[FUSECTRL] = self.r.get(FUSECTRL) or (4 << 16)   # idle
         self.wr_calls = []
 
@@ -1229,9 +1312,104 @@ def _ff_collisions(pool, key, exclude_rows):
     lose = [c["row"] for c in recs if c["row"] > top]
     verdict = f"LOSE to row {max(lose)}" if lose else "WILL WIN"
     return {"key": {"chain": key[0], "block": key[1]},
-            "name": FF_BLOCK_NAMES.get(key),
+            "name": ff_block_label(*key) or FF_BLOCK_NAMES.get(key),
             "records": recs, "preview_row": top, "last_wins": verdict,
             "own_row": own[0] if own else None}
+
+
+def _ff_field_plane(pool, chain, name, override=None):
+    """Winning FF plane value for one logical field: for every block the
+    field spans, the LAST pool record with key (chain, block) wins; the
+    assembled field bits form the plane. override=(row, value) applies an
+    about-to-burn record (it wins its block at its row). Returns
+    (plane, {block: (row, data)})."""
+    spec = next(((g, w) for n, g, w in FF_FIELDS.get(chain, ())
+                 if n == name), None)
+    if spec is None:
+        return 0, {}
+    g, w = spec
+    winners = {}
+    for r, word in pool.items():
+        if (word & 0x1F) != chain:
+            continue
+        blk = (word >> 6) & 0x3FF
+        if blk * 16 >= g + w or blk * 16 + 16 <= g:
+            continue
+        cur = winners.get(blk)
+        if cur is None or r > cur[0]:
+            winners[blk] = (r, (word >> 16) & 0xFFFF)
+    if override:
+        row, value = override
+        blk = (value >> 6) & 0x3FF
+        if (value & 0x1F) == chain and blk * 16 < g + w \
+                and blk * 16 + 16 > g:
+            cur = winners.get(blk)
+            if cur is None or row >= cur[0]:
+                winners[blk] = (row, (value >> 16) & 0xFFFF)
+    plane = 0
+    for blk, (_r, data) in winners.items():
+        for fb in range(w):
+            gb = g + fb
+            if blk * 16 <= gb < blk * 16 + 16 and (data >> (gb - blk * 16)) & 1:
+                plane |= 1 << fb
+    return plane, winners
+
+
+def _ff_plane_gate(pool, burn_rows, value, rd):
+    """THE BRICK GATE. A record does not only write its headline field:
+    its 16-bit data word feeds EVERY logical field overlapping its block,
+    and last-wins makes the record authoritative for the whole plane
+    those blocks assemble. Reconstruct each touched plane with the record
+    applied and compare against the card's own DEFECTIVE readout: a bit
+    that is defective but no longer disabled = dead silicon ENABLED =
+    GFW boot stall / -EIO (Nov-24 brick: block-8 data=0 cleared the FBPA
+    tail and enabled two dead FBPA partitions). blocking=True when the
+    record newly enables defective units. rd reads are plain BAR0 reads
+    (defect mirrors answer at DSOV=1 and DSOV=0 alike)."""
+    chain, block = value & 0x1F, (value >> 6) & 0x3FF
+    row = max(burn_rows)
+    fields, blocking, newly_bits = [], [], []
+    for f in ff_fields_for(chain, block):
+        name = f["name"]
+        if not name.endswith("_DISABLE") or name not in FF_FIELD_DEFECT:
+            continue
+        try:
+            defect = rd(FF_FIELD_DEFECT[name]) & 0xFFFFFF
+        except Exception:
+            defect = 0
+        before, _ = _ff_field_plane(pool, chain, name)
+        after, _ = _ff_field_plane(pool, chain, name,
+                                   override=(row, value))
+        newly = defect & before & ~after          # dead units this record
+        enabled = defect & ~after                 # dead units left enabled
+        newly &= (1 << f["w"]) - 1
+        enabled &= (1 << f["w"]) - 1
+        unit = name[:-len("_DISABLE")]
+        fields.append({"name": name, "before": before, "after": after,
+                       "defective": defect, "enabled_defective": enabled,
+                       "newly_enabled": newly,
+                       "newly_units": [i for i in range(f["w"])
+                                       if (newly >> i) & 1]})
+        if newly:
+            blocking = True
+            newly_bits.append(f"{name} "
+                              + "/".join(f"{unit}{i}" for i in
+                                         [b for b in range(f["w"])
+                                          if (newly >> b) & 1]))
+    reason = ("enables DEFECTIVE silicon: " + "; ".join(newly_bits)
+              if blocking else None)
+    return {"fields": fields, "blocking": blocking, "reason": reason}
+
+
+def _haz_effect(key, base, cdata, tag):
+    """Hazard effect line: label + per-field decode for EVERY field the
+    partial's block carries (not just the headline one)."""
+    label = ff_block_label(*key) or FF_BLOCK_NAMES.get(key)
+    eff = ff_mask_effect(key, base, cdata)
+    head = (f"{label} data 0x{base:04X} → 0x{cdata:04X}" if label
+            else f"chain{key[0]}·block{key[1]} data "
+                 f"0x{base:04X} → 0x{cdata:04X}")
+    return head + (f" ({eff})" if eff else "") + f" · {tag}"
 
 
 def _ff_hazards(pool, row, before, delta, value):
@@ -1286,17 +1464,12 @@ def _ff_hazards(pool, row, before, delta, value):
             else:
                 brow = earlier[-1] if earlier else None
                 base = (pool[brow] >> 16) & 0xFFFF if brow is not None else 0
-                eff = ff_mask_effect(key, base, cdata)
                 tag = f"baseline winner row {brow}" if brow is not None \
                     else "baseline blank (no earlier record)"
                 hazards.append({
                     "row": row, "subset": sub, "word": cand,
                     "decode": ff_decode(cand),
-                    "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{base:04X}"
-                               f" → 0x{cdata:04X} ({eff}) · {tag}"
-                               if key in FF_BLOCK_NAMES else
-                               f"chain{key[0]}·block{key[1]} data "
-                               f"0x{base:04X} → 0x{cdata:04X} · {tag}")})
+                    "effect": _haz_effect(key, base, cdata, tag)})
         else:
             # the partial decodes to a DIFFERENT key: inert unless it
             # would win that key's slot and change its effective data
@@ -1310,16 +1483,11 @@ def _ff_hazards(pool, row, before, delta, value):
                 if cdata == base:
                     benign += 1             # same data for that key anyway
                     continue
-                eff = ff_mask_effect(key, base, cdata)
                 tag = f"baseline winner row {brow}"
                 hazards.append({
                     "row": row, "subset": sub, "word": cand,
                     "decode": ff_decode(cand),
-                    "effect": (f"{FF_BLOCK_NAMES[key]} data 0x{base:04X}"
-                               f" → 0x{cdata:04X} ({eff}) · {tag}"
-                               if key in FF_BLOCK_NAMES else
-                               f"chain{key[0]}·block{key[1]} data "
-                               f"0x{base:04X} → 0x{cdata:04X} · {tag}")})
+                    "effect": _haz_effect(key, base, cdata, tag)})
     return {"skipped": None, "row": row, "hazards": hazards,
             "benign": benign, "inert": inert}
 
@@ -1379,6 +1547,15 @@ def burn_preview(rd, row, value, mirror):
         verdict = "ALREADY BURNED"
     else:
         verdict = "SAFE TO BURN"
+    # PLANE GATE: the record's data word feeds EVERY logical field that
+    # overlaps its block (block 8 = GPC_DISABLE + FBPA tail). Rebuild each
+    # touched plane with the record applied and refuse when it newly
+    # enables a unit the card's own DEFECTIVE readout calls dead — the
+    # Nov-24 -EIO brick mechanism. An inert record (loses last-wins) has
+    # no effect on any plane, so the gate only bites when the record wins.
+    plane = _ff_plane_gate(pool, set(rows), value, rd)
+    if plane["blocking"] and verdict == "SAFE TO BURN":
+        verdict = "REFUSED"
     # V11-G5: hazard-analyze EVERY burn row (the mirror's own before,
     # hence its own delta, can differ) and merge worst-of: the union of
     # each row's hazards feeds the panel banner.
@@ -1391,24 +1568,31 @@ def burn_preview(rd, row, value, mirror):
         hazards["benign"] += hz["benign"]
         hazards["inert"] += hz["inert"]
     predicted = None
-    if key in FF_BLOCK_NAMES:
+    label = ff_block_label(*key) or FF_BLOCK_NAMES.get(key)
+    if label:
         winners = [r for r in pool if ff_key(pool[r]) == key and r not in rows]
         if winners:
             cur = pool[max(winners)] >> 16
             eff = ff_mask_effect(key, cur, value >> 16)
-            predicted = (f"{FF_BLOCK_NAMES[key]} data 0x{cur:04X} → "
-                         f"0x{(value >> 16) & 0xFFFF:04X} ({eff})")
+            predicted = (f"{label} data 0x{cur:04X} → "
+                         f"0x{(value >> 16) & 0xFFFF:04X}"
+                         + (f" ({eff})" if eff else ""))
         else:
             eff = ff_mask_effect(key, 0, value >> 16)
-            predicted = (f"{FF_BLOCK_NAMES[key]}: new record — data "
-                         f"0x{(value >> 16) & 0xFFFF:04X} ({eff})")
+            predicted = (f"{label}: new record — data "
+                         f"0x{(value >> 16) & 0xFFFF:04X}"
+                         + (f" ({eff})" if eff else ""))
         predicted += " · STATUS_OPT_* shadows update only after power cycle"
+    if plane["blocking"]:
+        predicted = ((predicted + " · ") if predicted else "") \
+            + "⚠ PLANE GATE: " + plane["reason"]
     window_ok, window_checks = burn_window(rd)
     arm_pending = [{"name": n, "value": rd(o), "want": w, "ok": None,
                     "note": "auto-armed at burn via SENSE_CTRL"}
                    for n, o, w in ARM_PENDING]
     return {"verdict": verdict, "rows": row_entries,
             "collisions": collisions, "hazards": hazards,
+            "plane": plane,
             "predicted": predicted,
             "window_ok": window_ok, "window_checks": window_checks,
             "arm_pending": arm_pending,
@@ -1513,6 +1697,7 @@ def burn_check(row, value, mirror, bdf=None):
                 time.sleep(0.05)
             try:
                 cur = read_row_via(rd, wr, row)
+                pool = _ff_pool(rd, wr)
             finally:
                 if en_sw != 0:
                     wr(EN_SW_OVERRIDE, en_sw)
@@ -1527,12 +1712,15 @@ def burn_check(row, value, mirror, bdf=None):
                 rows.append(row + 1 if row % 2 == 0 else row - 1)
             issues = ff_policy(layout, row, mirror, value)
             policy = {"ok": not issues, "issues": issues, "layout": layout}
+            plane = _ff_plane_gate(pool, set(rows), value, rd)
             note = "burn window closed (see red checks); " \
                    "use the campaign burn-on-goldilocks mode"
             if ok:
                 note = "burn window OPEN — EFP/WDATA_PLM read 0 statically but " \
                        "are auto-armed at burn via SENSE_CTRL (amber rows)"
-            if policy["issues"]:
+            if plane["blocking"]:
+                note = "PLANE GATE: " + plane["reason"] + " — " + note
+            elif policy["issues"]:
                 note = "PLACEMENT POLICY: " + "; ".join(policy["issues"])
             elif not (222 <= row <= 487):
                 note = ("⚠ row outside the FF record region (222–487) — "
@@ -1542,7 +1730,7 @@ def burn_check(row, value, mirror, bdf=None):
                     "pure_0to1": pure, "window_ok": ok,
                     "guards_ok": ok, "guards": checks,
                     "arm_pending": arm_pending,
-                    "policy": policy,
+                    "policy": policy, "plane": plane,
                     "rows_to_burn": rows, "note": note}
         finally:
             bar.close()
@@ -1591,6 +1779,29 @@ def burn_api(body):
     ack = bool(body.get("ack_uncertain"))
     try:
         with Bar0(bdf) as bar:
+            # PLANE GATE re-check at burn time (server-side, never trust
+            # the panel's earlier preview): the record's data word feeds
+            # every logical field overlapping its block; refuse when it
+            # newly enables a unit the card's DEFECTIVE readout calls
+            # dead. ack_plane=true is the explicit operator override.
+            rows_set = {row}
+            if body.get("mirror"):
+                rows_set.add(row + 1 if row % 2 == 0 else row - 1)
+            ro = ReadOnlyFuse(bar.rd32, bar.wr32)
+            en_sw = ro(EN_SW_OVERRIDE)
+            if en_sw != 0:
+                ro.wr(EN_SW_OVERRIDE, 0)
+                time.sleep(0.05)
+            try:
+                gate = _ff_plane_gate(_ff_pool(ro, ro.wr), rows_set,
+                                      value, ro)
+            finally:
+                if en_sw != 0:
+                    ro.wr(EN_SW_OVERRIDE, en_sw)
+                    time.sleep(0.05)
+            if gate["blocking"] and not body.get("ack_plane"):
+                return {"error": "plane gate: " + gate["reason"],
+                        "plane": gate}
             rep = burn_execute(bar.rd32, bar.wr32, row, value, old, bdf=bdf,
                                journal=journal, ack_uncertain=ack)
             if rep.get("journal_uncertain"):

@@ -225,7 +225,9 @@ def test_c2_iff_marker_not_a_live_record():
     assert S.ff_decode_if(304, 0) is None
     assert S.ff_decode_if(304, 0xFFFFFFFF) is None
     d = S.ff_decode_if(304, GPC_VAL)
-    assert d["name"] == "GPC_DISABLE"
+    # block 8 feeds GPC_DISABLE (bits 3-10) AND the FBPA_DISABLE tail
+    # (bits 0-2) — the label names every field the data word drives
+    assert d["name"] == "FBPA_DISABLE + GPC_DISABLE"
 
 
 def test_c2_preview_decodes_gpc_record():
@@ -233,7 +235,7 @@ def test_c2_preview_decodes_gpc_record():
     rep, _ = preview(bar, value=GPC_VAL)
     d = rep["rows"][0]["decode_after"]
     assert (d["chain"], d["block"], d["data"]) == (1, 8, 0x0010)
-    assert d["name"] == "GPC_DISABLE"
+    assert d["name"] == "FBPA_DISABLE + GPC_DISABLE"
 
 
 # ============================ CLAIM 3 — collisions =========================
@@ -321,9 +323,11 @@ def test_c4_effects_are_relative_to_effective_winner():
     assert sorted(h["word"] for h in hz["hazards"]) == [0x020004C1,
                                                         0x400004C1]
     by_word = {h["word"]: h["effect"] for h in hz["hazards"]}
-    assert by_word[0x020004C1].startswith("FBP_DISABLE data 0x4290 → 0x0200")
+    assert by_word[0x020004C1].startswith(
+        "FBP_DISABLE + ROP_L2_DISABLE data 0x4290 → 0x0200")
     assert "baseline winner row 224" in by_word[0x020004C1]
-    assert by_word[0x400004C1].startswith("FBP_DISABLE data 0x4290 → 0x4000")
+    assert by_word[0x400004C1].startswith(
+        "FBP_DISABLE + ROP_L2_DISABLE data 0x4290 → 0x4000")
     assert "baseline winner row 224" in by_word[0x400004C1]
 
 
@@ -606,7 +610,8 @@ def test_c7_mock_preview_end_to_end():
         assert rep["verdict"] == "SAFE TO BURN"
         assert [e["row"] for e in rep["rows"]] == [304, 305]
         assert rep["collisions"]["last_wins"] == "WILL WIN"
-        assert rep["predicted"].startswith("FBP_DISABLE data 0x4290")
+        assert rep["predicted"].startswith(
+            "FBP_DISABLE + ROP_L2_DISABLE data 0x4290")
 
 
 def test_c7_api_rejects_bad_bodies():

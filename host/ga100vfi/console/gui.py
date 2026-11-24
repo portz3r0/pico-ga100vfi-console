@@ -3339,6 +3339,28 @@ LIVEBOOT = r"""
         ? `<div class="note">record already present at this row (row ${c.own_row}) — re-burn is a no-op/ALREADY path</div>`
         : `<div class="note">no existing record with this key — the burn defines it</div>`) + `</div>`;
     const hz = j.hazards || {};
+    const pl = j.plane || {};
+    const plHtml = (pl.fields || []).length
+      ? `<div style="margin-top:10px"><b>field-plane gate</b> ` +
+        (pl.blocking
+          ? `<span class="pill badl">REFUSED — ${esc(pl.reason || "")}</span>`
+          : `<span class="pill okl">defective units stay masked</span>`) +
+        `<table><tr><th>field</th><th>plane before</th><th>plane after</th>` +
+        `<th>defective</th><th>dead units enabled after</th></tr>` +
+        pl.fields.map(f =>
+          `<tr><td>${esc(f.name)}</td>` +
+          `<td class="mono">0x${f.before.toString(16).toUpperCase()}</td>` +
+          `<td class="mono">0x${f.after.toString(16).toUpperCase()}</td>` +
+          `<td class="mono">0x${f.defective.toString(16).toUpperCase()}</td>` +
+          `<td class="mono${f.newly_enabled ? " bad" : f.enabled_defective ? " warn" : ""}">` +
+          `0x${f.enabled_defective.toString(16).toUpperCase()}` +
+          (f.newly_enabled ? ` <b class="bad">NEW</b>` : "") + `</td></tr>`).join("") +
+        `</table><div class="note">a record's data word feeds EVERY logical field ` +
+        `overlapping its block (last-wins per block) — e.g. block 8 carries the ` +
+        `FBPA_DISABLE tail alongside GPC_DISABLE. The resulting plane must keep ` +
+        `every DEFECTIVE bit disabled, or the card boots with dead silicon ` +
+        `enabled (GFW stall, probe -EIO).</div></div>`
+      : "";
     const hzHtml = hz.skipped
       ? `<div class="note" style="margin-top:8px">partial-landing hazards: skipped — ${esc(hz.skipped)}</div>`
       : `<div style="margin-top:8px"><b>partial-landing hazards</b> ` +
@@ -3353,7 +3375,7 @@ LIVEBOOT = r"""
     return `<div class="verdict ${vcls}" style="padding:8px 12px;margin-top:8px">` +
       `<b>${esc(j.verdict)} (preview)</b> — read-only, zero latching writes (row reads use the read command) · ` +
       `${esc(j.bdf || "")} · ${esc(j.ts || "")}</div>` +
-      rowsHtml + colHtml + hzHtml +
+      rowsHtml + colHtml + plHtml + hzHtml +
       (j.predicted ? `<div style="margin-top:8px"><b>predicted effect:</b> ${esc(j.predicted)}</div>` : "") +
       strip;
   }
@@ -3431,13 +3453,20 @@ LIVEBOOT = r"""
     const polBlock = pol ? `<div class="${pol.ok ? "ok" : "bad"}" style="margin-top:6px">` +
       `<b>placement policy: ${pol.ok ? "OK — row is in the safe burn zone" : "VIOLATION"}</b>` +
       (pol.issues || []).map(i => `<div>• ${esc(i)}</div>`).join("") + `</div>` : "";
+    const pln = j.plane;
+    const plnBlock = pln && (pln.fields || []).length
+      ? `<div class="${pln.blocking ? "bad" : "ok"}" style="margin-top:6px">` +
+        `<b>plane gate: ${pln.blocking
+          ? "REFUSED — " + esc(pln.reason || "")
+          : "OK — every touched plane keeps its defective units masked"}</b>` +
+        `</div>` : "";
     res.innerHTML =
       `<div><b class="${j.window_ok ? "ok" : "bad"}">${j.window_ok ? "SAFE TO BURN" : "REFUSED"}</b> — ` +
       `burn window ${j.window_ok ? "open" : "not open"} (verdict keys off the window checks, not EFP/WDATA_PLM)</div>` +
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
-      polBlock +
+      plnBlock + polBlock +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
       (pending ? `<div class="guardlist">${pending}</div>` : "") +
@@ -3472,6 +3501,17 @@ LIVEBOOT = r"""
                  "GPU permanently. Verify with Preview first. No responsibility " +
                  "is accepted by the developer.")) return;
     let j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
+    // plane gate refusal: the record newly enables DEFECTIVE silicon in
+    // some plane it touches (block 8 = GPC + FBPA tail). Explicit,
+    // scary, per-burn override — same pattern as ack_uncertain.
+    if (j.error && j.plane && j.plane.blocking) {
+      if (confirm("PLANE GATE: " + j.plane.reason + "\nThis record newly " +
+                  "ENABLES dead silicon — the boot-stall / probe -EIO brick " +
+                  "mechanism. Burn anyway (ack_plane)?")) {
+        j = await jpost("/api/burn", {...payloadChecked, confirm: true,
+                                      token: armToken, ack_plane: true});
+      }
+    }
     // journal uncertainty: an unresolved command_may_be_issued means a
     // previous CMD_WRITE may have latched without readback — explicit
     // user confirm required before proceeding (ack_uncertain).
