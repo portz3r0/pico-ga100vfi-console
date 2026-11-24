@@ -294,6 +294,7 @@ HTML = r"""<!DOCTYPE html>
   .pbtable td { vertical-align: top; }
   .pbrow .psel { accent-color: var(--accent, #58a6ff); }
   .pbrow.pboff td { opacity: .45; }
+  .pbtable tr.qwarn td { background: rgba(210,153,34,.07); }
   .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
             border-color: rgba(63,185,80,.4); }
   .prop-tag { background: rgba(210,153,34,.16); color: var(--warn);
@@ -2546,7 +2547,7 @@ LIVEBOOT = r"""
     for (const p of plan) for (const w of (p.pair ? p.words : [p.word]))
       if (planWordSelected(w)) selWords.push(w);
     const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
-    for (const w of selWords) entries.push({word: w, mirror});
+    for (const w of selWords) if (!burnQueue.some(q => q.word === w)) entries.push({word: w, mirror});  // task 35e: one word, one row
     const asg = assignRows(entries);
     let ai = burnQueue.length;   // index of the plan's first SELECTED word
     const needed = plan.length;
@@ -2554,36 +2555,44 @@ LIVEBOOT = r"""
       ? `<b>${selWords.length} of ${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s) selected</b>` +
         ` in ${needed} record group(s)`
       : `<b class="ok">masks already equal to defective — this card needs no unlock burns</b>`;
-    el.innerHTML = plan.map(p => {
+    // task 35e: same table shape as the INTENDED-state proposed panel.
+    let ph = `<table class="pbtable"><thead><tr><th></th><th>Burn</th><th>Word</th>` +
+      `<th>Target row</th><th>Field</th><th>Effect</th><th>Status</th><th></th></tr></thead><tbody>`;
+    for (const p of plan) {
       const words = p.pair ? p.words : [p.word];
-      const rows = words.map(w => ({ w, st: lastWinsStatus(w), on: planWordSelected(w) }));
-      return `<div class="planrow">` +
-        `<div><b>${p.label}</b> <span class="tag prop-tag">PROPOSED</span> <span class="note">${esc(p.recs)}</span></div>` +
-        rows.map(r => {
-          const f = ffEffect(r.w);
-          const a = r.on ? (asg ? asg.rows[ai++] : null) : null;
-          return `<div class="planword">` +
-            `<input type="checkbox" class="psel" data-sel-word="${r.w}"${r.on ? " checked" : ""} ` +
-              `title="include this word in the queue">` +
-            `<span class="tag prop-tag">PROPOSED</span>` +
-            `<span class="mono">0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</span>` +
-            `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
-            (r.st && r.st.state === "present"
-              ? ` <span class="tag ok-tag">ALREADY PRESENT (row ${r.st.row}) — no burn needed</span>`
-              : r.st && r.st.state === "superseded"
-                ? ` <span class="tag prop-tag">SUPERSEDED at row ${r.st.byRow} — needs re-burn</span>`
-                : "") +
-            `<span class="note">target row: ` +
-              (!r.on ? `not selected — not queued`
-                : !asg ? `FF layout not loaded — rows pending`
-                : a === null ? `<b class="bad">no free row after block ${ffDecode(r.w).blk}'s last record</b>`
-                : `<b data-planrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → 0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</b>` +
-                  (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
-            `</span>` +
-            `<button class="btn" data-plan-add="${r.w}">+ queue</button>` +
-            `</div>`;
-        }).join("") + `</div>`;
-    }).join("") || `<span class="note">no records needed — disable masks already match the card's defects</span>`;
+      words.forEach((w, wi) => {
+        const f = ffEffect(w);
+        const st = lastWinsStatus(w);
+        const on = planWordSelected(w);
+        const inQ = burnQueue.some(q => q.word === w);
+        const a = on && !inQ ? (asg ? asg.rows[ai++] : null) : null;
+        const hexw = "0x" + w.toString(16).toUpperCase().padStart(8, "0");
+        const rowCell =
+          !on ? `<span class="note">not selected</span>`
+          : inQ ? `<span class="note">in queue — row shown there</span>`
+          : !asg ? `<span class="note">rows pending</span>`
+          : a === null ? `<b class="bad">NO FREE ROW (block ${ffDecode(w).blk})</b>`
+          : `<b data-planrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</b>`;
+        const statusCell =
+          st && st.state === "present" ? `<span class="tag ok-tag">ALREADY PRESENT (row ${st.row})</span>`
+          : st && st.state === "superseded" ? `<span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
+          : `<span class="note">—</span>`;
+        ph += `<tr class="pbrow${on ? "" : " pboff"}">` +
+          `<td><input type="checkbox" class="psel" data-sel-word="${w}"${on ? " checked" : ""} ` +
+            `title="include this word in the queue"></td>` +
+          (wi === 0 ? `<td rowspan="${words.length}"><b>${esc(p.label)}</b><br>` +
+            `<span class="note">${esc(p.recs)}</span></td>` : "") +
+          `<td class="mono">${hexw}</td>` +
+          `<td>${rowCell}</td>` +
+          `<td class="note">${esc(f.key)}</td>` +
+          (wi === 0 ? `<td rowspan="${words.length}" class="note">${esc(p.effect)}</td>` : "") +
+          `<td>${statusCell}</td>` +
+          `<td><button class="btn" data-plan-add="${w}">+ queue</button></td></tr>`;
+      });
+    }
+    ph += `</tbody></table>`;
+    el.innerHTML = ph + (plan.length ? "" :
+      `<span class="note">no records needed — disable masks already match the card's defects</span>`);
     el.querySelectorAll("[data-sel-word]").forEach(c => c.onchange = () => {
       setPlanWordSelected(+c.dataset.selWord, c.checked);
     });
@@ -2711,26 +2720,30 @@ LIVEBOOT = r"""
     // task 27: show each entry's assigned row through the SAME allocator the
     // burn payload uses — what the queue displays IS what it will burn.
     const asg = assignRows(burnQueue);
-    el.innerHTML = burnQueue.map((q, i) => {
-      const f = ffEffect(q.word);
-      const st = lastWinsStatus(q.word);
-      const a = asg ? asg.rows[i] : null;
-      return `<div class="qrow${st && st.state === "present" ? " qwarn" : ""}">` +
-        `<span class="mono">#${i + 1}</span>` +
-        `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
-        (asg ? (a !== null
-            ? `<span class="mono" data-qrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">→ row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</span>`
-            : `<span class="mono"><b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(q.word).blk}</b></span>`) : "") +
-        `<span class="note">${esc(f.key)}</span>` +
-        (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
-        (st && st.state === "present"
-          ? ` <span class="tag prop-tag">⚠ already present — likely no-op (row ${st.row})</span>`
-          : st && st.state === "superseded"
-            ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
-            : "") +
-        `<span class="note">via ${esc(q.src)}</span>` +
-        `<button class="btn" data-q-del="${i}">✕</button></div>`;
-    }).join("");
+    // task 35e: same table shape as the proposed-burns panel.
+    el.innerHTML = `<table class="pbtable"><thead><tr><th>#</th><th>Word</th>` +
+      `<th>Target row</th><th>Field</th><th>Status</th><th>Via</th><th></th></tr></thead><tbody>` +
+      burnQueue.map((q, i) => {
+        const f = ffEffect(q.word);
+        const st = lastWinsStatus(q.word);
+        const a = asg ? asg.rows[i] : null;
+        const rowCell = asg ? (a !== null
+            ? `<span class="mono" data-qrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</span>`
+            : `<b class="bad">NO FREE ROW (block ${ffDecode(q.word).blk})</b>`) : "";
+        const statusCell = st && st.state === "present"
+            ? `<span class="tag prop-tag">⚠ already present — likely no-op (row ${st.row})</span>`
+            : st && st.state === "superseded"
+              ? `<span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
+              : `<span class="note">—</span>`;
+        return `<tr class="pbrow${st && st.state === "present" ? " qwarn" : ""}">` +
+          `<td class="mono">#${i + 1}</td>` +
+          `<td class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</td>` +
+          `<td>${rowCell}</td>` +
+          `<td class="note">${esc(f.key)}${f.field === "DEVID" ? ` → 0x${f.devid.toString(16).toUpperCase()}` : ""}</td>` +
+          `<td>${statusCell}</td>` +
+          `<td class="note">${esc(q.src)}</td>` +
+          `<td><button class="btn" data-q-del="${i}">✕</button></td></tr>`;
+      }).join("") + `</tbody></table>`;
     el.querySelectorAll("[data-q-del]").forEach(b => b.onclick = () => {
       burnQueue.splice(+b.dataset.qDel, 1); renderQueue(); });
   }
