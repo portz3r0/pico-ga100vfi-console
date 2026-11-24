@@ -2643,44 +2643,47 @@ LIVEBOOT = r"""
       const extra = {};
       selFf.forEach(s => { if (!(s.value in qIdx) && !(s.value in extra)) { extra[s.value] = entries.length; entries.push({word: s.value, mirror}); } });
       const asg = assignRows(entries);
-      const stepsHtml = it.steps.map((s, si) => {
+      // task 35g: steps render as the same table shape as the burn cards;
+      // PROPOSED / VERIFIED / TESTED tags are kept per row.
+      let stepsHtml = `<table class="pbtable"><thead><tr><th></th><th>Word</th>` +
+        `<th>Target row</th><th>Field</th><th>Tags</th><th>Notes</th></tr></thead><tbody>`;
+      it.steps.forEach((s, si) => {
         const st = stOf(s);
         const badge = st && st.state === "present"
-          ? ` <span class="tag ok-tag">ALREADY PRESENT${st.row !== undefined ? ` (row ${st.row})` : ""} — no burn needed</span>`
+          ? ` <span class="tag ok-tag">ALREADY PRESENT${st.row !== undefined ? ` (row ${st.row})` : ""}</span>`
           : st && st.state === "superseded"
-            ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
+            ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
             : "";
         if (s.kind === "ff") {
           const on = advStepSelected(it.id, s);
           const a = on && asg ? asg.rows[s.value in qIdx ? qIdx[s.value] : extra[s.value]] : null;
-          return `<div class="planword">` +
-            `<input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
-              `title="include this word in the queue">` +
-            `<span class="tag prop-tag">PROPOSED</span>` +
-            `<span class="mono">${hex(s.value)}</span>` +
-            `<span class="note">chain ${s.chain} · block ${s.block} · ${esc(s.field)}</span>` +
-            conf(s.confidence) + badge +
-            `<span class="note">target row: ` +
-              (!on ? `not selected — not queued`
-                : !asg ? `FF layout not loaded — rows pending`
-                : a === null ? `<b class="bad">no free row in burn zone</b>`
-                : `<b data-advrow="${it.id}:${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(s.value)}</b>` +
-                  (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
-            `</span>` +
-            (s.other_burn !== undefined ? ` <span class="note"><b class="warn">per-die variant: another tested card burned ${hex((s.value & 0xFFFF) | ((s.other_burn & 0xFFFF) << 16))} (defect-driven)</b></span>` : "") +
-            (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
-            `</div>`;
+          const rowCell =
+            !on ? `<span class="note">not selected</span>`
+            : !asg ? `<span class="note">rows pending</span>`
+            : a === null ? `<b class="bad">NO FREE ROW (block ${s.block})</b>`
+            : `<b data-advrow="${it.id}:${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row}${a.mirror ? ` + mirror ${a.row + 1}` : ""}</b>`;
+          stepsHtml += `<tr class="pbrow${on ? "" : " pboff"}">` +
+            `<td><input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
+              `title="include this word in the queue"></td>` +
+            `<td class="mono">${hex(s.value)}</td>` +
+            `<td>${rowCell}</td>` +
+            `<td class="note">chain ${s.chain} · block ${s.block} · ${esc(s.field)}</td>` +
+            `<td><span class="tag prop-tag">PROPOSED</span> ${conf(s.confidence)}${badge}</td>` +
+            `<td class="note">` +
+              (s.other_burn !== undefined ? `<b class="warn">per-die variant: another tested card burned ${hex((s.value & 0xFFFF) | ((s.other_burn & 0xFFFF) << 16))} (defect-driven)</b><br>` : "") +
+              (s.note ? esc(s.note) : "") + `</td></tr>`;
+          return;
         }
         const isDirect = s.kind === "direct";
-        return `<div class="planword">` +
-          `<span class="tag">MANUAL</span>` +
-          `<span class="mono">rows ${s.rows.join(" / ")}${isDirect ? " Δ " + hex(s.delta) : " = " + s.words.map(hex).join(" + ")}</span>` +
-          `<span class="note">${esc(isDirect ? s.field : s.decode)}</span>` +
-          conf(s.confidence) + badge +
-          `<span class="note">${isDirect ? "DIRECT row — manual burn path (queue burns FF records only)" : "IFF word — manual burn path (ff_policy refuses bit 5)"}</span>` +
-          (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
-          `</div>`;
-      }).join("");
+        stepsHtml += `<tr class="pbrow">` +
+          `<td><span class="note">—</span></td>` +
+          `<td class="mono">rows ${s.rows.join(" / ")}${isDirect ? " Δ " + hex(s.delta) : " = " + s.words.map(hex).join(" + ")}</td>` +
+          `<td><span class="note">manual</span></td>` +
+          `<td class="note">${esc(isDirect ? s.field : s.decode)}</td>` +
+          `<td><span class="tag">MANUAL</span> ${conf(s.confidence)}${badge}</td>` +
+          `<td class="note">${isDirect ? "DIRECT row — manual burn path (queue burns FF records only)" : "IFF word — manual burn path (ff_policy refuses bit 5)"}${s.note ? " · " + esc(s.note) : ""}</td></tr>`;
+      });
+      stepsHtml += `</tbody></table>`;
       return `<div class="planrow" data-adv-item="${it.id}" style="margin-top:10px">` +
         `<div><b>${esc(it.name)}</b> <span class="tag prop-tag">PROPOSED</span> ` +
         conf(it.confidence) +
@@ -2707,7 +2710,7 @@ LIVEBOOT = r"""
         if (s.kind === "ff" && advStepSelected(it.id, s)) { queueAdd(s.value, it.name, undefined, mir); n++; }
       });
       if (!n) { note(`advanced unlock “${it.name}”: no FF word selected — nothing queued`, "warnl"); return; }
-      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the reference card's defect masks, verify against this card before burning`, "warnl");
+      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the tested card's defect masks, verify against this card before burning`, "warnl");
     });
   }
   function renderQueue() {
