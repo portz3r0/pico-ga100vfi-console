@@ -1016,6 +1016,7 @@ function renderProposedBurns() {
   const words = plan.flatMap(p => (p.pair ? p.words : [p.word]));
   const sel = words.filter(w => window.__planWordSelected(w)).length;
   let html = `<h3>Proposed burns to reach INTENDED</h3>` +
+    `<div class="note">badge meanings: see the <b>Tag legend</b> on the Glitch &amp; Burn tab.</div>` +
     `<div class="note"><b class="warn">PROPOSED — not burned; irreversible ` +
     `OTP writes pending a Goldilocks campaign.</b> These records would set ` +
     `the disable masks to the card's defective masks; nothing is written ` +
@@ -2243,6 +2244,29 @@ LIVEBOOT = r"""
         <button class="btn" id="plan-devid-add">+ Queue DEVID A/B pair</button>
         <span class="note" id="plan-devid-note"></span>
       </div>
+    </div>
+    <div class="card" id="tag-legend" style="margin-top:12px">
+      <details>
+        <summary style="cursor:pointer"><h3 style="display:inline">Tag legend — what every badge means</h3></summary>
+        <div class="note" style="margin-top:8px">Two independent axes: a
+        <b>TESTED</b> badge says the burn was <b>executed and the cards came
+        back working</b> (empirical safety). <b>VERIFIED/UNVERIFIED</b> says
+        whether we know <b>what the word does</b> (bit-level attribution).
+        A word can be TESTED but UNVERIFIED: proven to copy, not yet
+        understood.</div>
+        <div style="margin-top:8px">
+          <span class="tag prop-tag">PROPOSED</span> <span class="note">candidate only — nothing written; the shown row is the allocator's placement if you queue it.</span><br>
+          <span class="tag ok-tag">VERIFIED</span> <span class="note">field mapping documented (repo evidence / GA100 hwref) — the word can be recomputed from THIS card's defect masks.</span><br>
+          <span class="tag prop-tag">UNVERIFIED</span> <span class="note">bit attribution inferred, unresolved — copy the tested value as-is or skip; do NOT recompute it.</span><br>
+          <span class="tag prop-tag">TESTED · EXTERNAL</span> <span class="note">burn executed and confirmed working on cards outside this fleet.</span><br>
+          <span class="tag ok-tag">TESTED · INTERNAL</span> <span class="note">confirmed on our own cards.</span><br>
+          <span class="tag ok-tag">ALREADY PRESENT</span> <span class="note">the last record of that block already equals this word — burning it would be a no-op.</span><br>
+          <span class="tag prop-tag">PARTIALLY PRESENT</span> <span class="note">some selected words of this item are already effective; only the rest would burn.</span><br>
+          <span class="tag prop-tag">SUPERSEDED at row N</span> <span class="note">a later record of the same block overrides this word at boot (last-wins) — needs re-burn after row N.</span><br>
+          <span class="tag">MANUAL</span> <span class="note">outside the FF queue path (direct rows &lt;222 or IFF bit-5 words) — burn via the manual path, never queued.</span><br>
+          <span class="note"><b class="bad">NO FREE ROW FOR BLOCK N</b> — no blank row exists after that block's last record; free space or shrink the queue.</span>
+        </div>
+      </details>
     </div>
     <div class="card" id="gb-advanced" style="margin-top:12px">
       <h3>Advanced unlocks — optional, tested permanent unlocks</h3>
