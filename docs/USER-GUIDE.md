@@ -132,12 +132,18 @@ disable-mask interpretations of the same defective masks:
 **Proposed burns to reach INTENDED.** While the unit/TPC view is in the
 INTENDED state, a panel below the TPC map lists the burn records that
 would close the gap between the live disable masks and the card's
-defective masks. Every word carries a `PROPOSED` badge and a selection
+defective masks — as a **table** (`✓ | Burn | Word | Target row | Field |
+Effect | Status`; multi-word entries share their Burn/Effect cells).
+Every word carries a `PROPOSED` badge and a selection
 **checkbox**; the banner states `PROPOSED — not burned; irreversible
-OTP writes pending a Goldilocks campaign`. Each word shows its
+OTP writes pending a Goldilocks campaign` and points to the **Tag
+legend** on the Glitch & Burn tab for badge meanings. Each word shows its
 concrete target row from the same allocator the burn queue uses
-(`row N → 0x… + mirror row N+1`) — the proposed row **is**
-the row the queue will assign. Presence is judged by the replay rule,
+(`row N`, `+ mirror N+1` when the mirror checkbox is on — it is OFF by
+default) — the proposed row **is**
+the row the queue will assign; a word already in the burn queue shows
+`in queue — row shown there` instead of a second allocation (one word,
+one row). Presence is judged by the replay rule,
 not a string match: a word whose block's last live record already
 equals it is tagged `ALREADY PRESENT (row N) — no burn needed` and
 defaults **unticked**; a word overridden by a later record of its
@@ -147,13 +153,13 @@ block is `SUPERSEDED at row N — needs re-burn` and stays ticked.
 selected words through the same path as the Suggested burns card
 (shared selection state — both lists always show the same checkboxes).
 If a selected word's block has no blank row after its last record the
-panel says `NO FREE ROW FOR BLOCK b — free space first` and the queue
+table says `NO FREE ROW (block b)` and the queue
 refuses to start until space frees up. The panel renders only in the
 INTENDED state and recomputes on every dump — after a real burn moves
 NOW, the next dump shows fewer or no proposals (`no burns proposed —
 card already at intended state`).
 
-![INTENDED state — Proposed burns panel: PROPOSED badges, selection checkboxes, ALREADY PRESENT badge, concrete target rows, Queue these burns](images/console-proposed-burns.png)
+![INTENDED state — Proposed burns table: PROPOSED badges, selection checkboxes, Target row column, ALREADY PRESENT badge, Queue these burns](images/console-proposed-burns.png)
 
 *Captured from the current console UI in mock mode on the latest code (representative fuse data with one word seeded as already present);
 card serial, host name, IP addresses, username and home paths are masked.*
@@ -182,15 +188,16 @@ card serial, host name, IP addresses, username and home paths are masked.*
 |---|---|
 | Target | GPU picker + state pill (`● Goldilocks — glitch window` / `locked (DSOV=1) — glitch first` / `⚠ unreadable`) + serial pill identifying the physical card |
 | Burn placement policy | live row map of the FF region (boot FFs · buffer · **burn zone** · SM re-disable reserve · revert tail), budget pill, and a per-row ✓/✗ hint as you type a row. Placement is **per-block last-wins**: each record lands after its own block's last record; the global burn zone is a display heuristic — on an already-burned card it may collapse (`global burn zone empty — last boot FF row N; placement is per-block`) while every blank row after each block's own last record stays usable |
-| Burn payload | target row; value **typed hex** or **from dump row** (grabs the value from the loaded dump and shows it decoded for verification — IFF values flagged as refused); `burn mirror row too` checkbox |
+| Burn payload | target row; value **typed hex** or **from dump row** (grabs the value from the loaded dump and shows it decoded for verification — IFF values flagged as refused); `burn mirror row too` checkbox — **OFF by default** (the proven reference recipes burned ONE row per FF record; enable only if you specifically want the redundant pair) |
 | Preview burn (read-only) | see below — enabled on row+value alone, no window/arm/token |
 | Check row & guards | dry check: current row value, 0→1 purity, placement-policy verdict, window checks, arm-pending bits; enables Burn (with arm + open window) |
 | arm phrase + Arm (120 s) | type `BURN`, click Arm → countdown pill `● armed Ns`; wrong phrase → sticky red refusal until you edit the phrase; button disabled while the selected GPU is not Goldilocks (`selected GPU not Goldilocks — glitch first`) |
 | Burn now | enabled only when checked + armed + window open; double confirm; journal-uncertain → explicit ack dialog |
 | window pill | read-only burn-window verdict from the poller: `● burn window open` / `burn window closed (<failed bits>)` / `window: n/a` |
-| Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / FBP / FBPA-pair), each word decoded, with its concrete `target row:` (`row N → 0x… + mirror row N+1`, mirror optional) from the same allocator the queue uses; per-word selection checkboxes with LAST-WINS-aware `ALREADY PRESENT` / `SUPERSEDED` marking (already-present words default unticked, shared with the Proposed burns panel); `⤓ Queue all needed records` queues the selected words, `+ queue` a single word, or queue a DEVID A/B pair |
-| Advanced unlocks | optional permanent unlocks **actually burned on the bench cards** — see below |
-| Burn queue | records that all burn in **one** Goldilocks window; rows assigned per-block last-wins in the safe zone (mirror consumes an even/odd pair) and shown per entry (`→ row N + mirror N+1`); a word whose block has no free row shows `NO FREE ROW FOR BLOCK b`; a force-queued already-present word carries the amber tag `already present — likely no-op (row N)`; server re-validates every row |
+| Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / TPC unlock words — chain1 offs 11–15 that differ from the per-GPC defective masks / FBP / FBPA-pair), rendered as the same table as the Proposed burns panel (`✓ \| Burn \| Word \| Target row \| Field \| Effect \| Status \| + queue`), each word decoded, with its concrete `Target row` (`row N`, `+ mirror N+1` when mirroring is on) from the same allocator the queue uses — queue-aware, and a word already queued shows `in queue — row shown there` (one word, one row); per-word selection checkboxes with LAST-WINS-aware `ALREADY PRESENT` / `SUPERSEDED` marking (already-present words default unticked, shared with the Proposed burns panel); `⤓ Queue all needed records` queues the selected words, `+ queue` a single word, or queue a DEVID A/B pair |
+| Advanced unlocks | optional permanent unlocks proven by executed burns with a `TESTED · EXTERNAL` / `TESTED · INTERNAL` badge — see below |
+| Tag legend | collapsible card explaining every badge (`PROPOSED`, `VERIFIED`/`UNVERIFIED`, `TESTED · EXTERNAL`/`INTERNAL`, `ALREADY PRESENT`, `PARTIALLY PRESENT`, `SUPERSEDED`, `MANUAL`, `NO FREE ROW`) and the two axes: TESTED = the burn was executed and cards worked; VERIFIED = we know what the word does |
+| Burn queue | records that all burn in **one** Goldilocks window, rendered as a table (`# \| Word \| Target row \| Field \| Status \| Via \| action`); rows assigned per-block last-wins in the safe zone (mirror consumes an even/odd pair) and shown per entry (`row N + mirror N+1`); a typed custom row is reserved before auto-allocation and a row claimed twice blocks the queue (`row(s) N claimed by two records`); a word whose block has no free row shows `NO FREE ROW (block b)`; a force-queued already-present word carries the amber tag `already present — likely no-op (row N)`; server re-validates every row |
 | Glitch campaign | v_dip/pulses/pw/gap/delay/max attempts; strategy `fixed` or `adaptive` (3D CRC-guided search over v_dip/delay/pw — the fixed v_dip is ignored); pico port + rescan; mode `classify only` or `burn payload on first Goldilocks`; window dropdown `hold open — no revert` (default) / `auto-revert` |
 | ▶ Start / ■ Stop / ⟲ Revert VRM | Revert hands PMBus back, closing a held window (refused while a campaign owns the Pico) |
 | stats chips + log | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / `IMAGE VERIFY FAILED — window NOT held` / `window HELD open`; per-shot log lines |
@@ -251,23 +258,28 @@ verdict against the post-burn readback and post-burn collision rescan —
 any mismatch red. Both artifacts persist in the state dir
 (`last-preview.json`, `last-burn.json`).
 
-**Advanced unlocks — optional, from bench burn history.** Below the
+**Advanced unlocks — optional, tested permanent unlocks.** Below the
 Suggested burns card, an optional card lists the permanent unlocks
-**actually burned on bench cards GPU1/GPU2**, decoded from their
-executed signed plans: PCIe Gen4 permanent, PLM unlock (bench-recipe
-FPF direct rows), and the compute unlock (full floorsweep + SS0/SS1).
-Read the caveats before touching it:
+**proven by executed burns** — PCIe Gen4 permanent, PLM unlock
+(reference-recipe FPF direct rows), and the compute unlock (full
+floorsweep + SS0/SS1). Read the caveats before touching it:
 
 - **Irreversible OTP writes — NOT derived from this card's defect
-  masks.** The data words carry the **bench cards'** defect masks;
+  masks.** The data words carry the **tested cards'** defect masks;
   check them against this card before burning. Per-step
-  `GPU1 burned 0x… (per-die defect)` notes name where the two bench
-  cards differed.
-- Every item and step carries its **provenance** (which bench card,
-  which signed plan, plan + dump timestamps) and a confidence tag:
+  `per-die variant: another tested card burned 0x… (defect-driven)`
+  notes name where the tested cards differed.
+- Every item carries a **TESTED badge** with its test scope:
+  `TESTED · EXTERNAL` (burn executed and confirmed working on cards
+  outside this fleet) or `TESTED · INTERNAL` (confirmed on our own
+  cards) — an empirical claim: the burn ran and the cards came back
+  working. The confidence tag is a **separate axis**:
   `VERIFIED` = field mapping documented in repo evidence / GA100
-  hwref; `UNVERIFIED` = attribution inferred, unresolved.
-- FF-record steps are queueable and show concrete `target row:` rows
+  hwref; `UNVERIFIED` = attribution inferred, unresolved. A word can
+  be TESTED but UNVERIFIED: proven to copy, not yet understood. No
+  recipe or card-name provenance text appears in the UI; the full
+  tag legend lives on the same tab (see *Tag legend* above).
+- FF-record steps are queueable and show concrete `Target row` rows
   from the same allocator as the queue (`+ queue` enqueues the
   selected steps; `select all FF words` / `select none` set them).
   Steps outside the queue's path are badged `MANUAL`: DIRECT rows
@@ -278,7 +290,7 @@ Read the caveats before touching it:
   `ALREADY PRESENT — no burn needed` or `PARTIALLY PRESENT (k/n)`
   against the shown dump.
 
-![Advanced unlocks card — bench-proven permanent unlocks with PROPOSED/VERIFIED/UNVERIFIED badges, MANUAL direct rows, bench provenance](images/console-advanced-unlocks.png)
+![Advanced unlocks card — tested permanent unlocks with TESTED · EXTERNAL / TESTED · INTERNAL and VERIFIED/UNVERIFIED badges, PROPOSED target rows, MANUAL direct rows](images/console-advanced-unlocks.png)
 
 *Captured from the current console UI in mock mode on the latest code (Glitch & Burn tab; representative fuse data);
 card serial, host name, IP addresses, username and home paths are masked.*
@@ -343,8 +355,8 @@ shows lspci only.
    **Blacklist nvidia + nouveau**. Campaign start refuses while a
    driver is bound.
 5. **Campaign** (Glitch & Burn): pick target + pico port; review the
-   **Burn queue** — each entry shows the row it will burn
-   (`→ row N + mirror N+1`). `fixed` repeats one v_dip; `adaptive`
+   **Burn queue** table — each entry shows the row it will burn
+   (`row N`, `+ mirror N+1` only when the opt-in mirror is on). `fixed` repeats one v_dip; `adaptive`
    runs the 3D CRC-guided search over (v_dip, delay, pw) — recommended
    for an uncharacterised card. Start with mode **classify only** to
    find the window; every shot logs its outcome
@@ -455,10 +467,10 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 |---|---|---|---|
 | Live change feed | Fuse Explorer, activity feed | `status.DSOV: 0x1 → 0x0` the moment a glitch lands | no change across many shots (window never opened) |
 | Three-state topology | Fuse Explorer, state buttons | INTENDED shows every non-defective unit on; STOCK-vs-NOW difference = a real fuse change | `no stock baseline recorded yet` (stock view = now view); `ON!` on a dead unit (boots dead silicon) |
-| Proposed burns panel | Fuse Explorer, INTENDED state | concrete `row N → 0x… + mirror row N+1` per word; already-present words pre-unticked; after a completed unlock: `no burns proposed — card already at intended state` | `NO FREE ROW FOR BLOCK b — free space first`; `SUPERSEDED at row N — needs re-burn` |
+| Proposed burns table | Fuse Explorer, INTENDED state | concrete `row N` per word in the `Target row` column (`+ mirror N+1` only with the opt-in mirror); already-present words pre-unticked; after a completed unlock: `no burns proposed — card already at intended state` | `NO FREE ROW (block b)`; `SUPERSEDED at row N — needs re-burn` |
 | Decoded FF records | Explorer row table + burn payload decode line | `chain 1 · block 19 · FBP_DISABLE` | `IFF — REFUSED (bit 5 set)` in a proposed value |
 | Burn Preview | Glitch & Burn → Preview burn (read-only) | `SAFE TO BURN`, LAST-WINS *will win*, zero hazards, predicted effect matches intent | `WILL BE INERT` (lose to a later row), `IMPOSSIBLE`, amber hazard lines |
-| Advanced unlocks provenance | Glitch & Burn → Advanced unlocks | `VERIFIED` step whose bench values match this card's silicon | `UNVERIFIED` step, `PARTIALLY PRESENT (k/n)`, `MANUAL` direct rows (outside the queue path) |
+| Advanced unlocks badges | Glitch & Burn → Advanced unlocks | `TESTED · EXTERNAL`/`INTERNAL` + `VERIFIED` step whose tested values match this card's silicon | `UNVERIFIED` step, `PARTIALLY PRESENT (k/n)`, `MANUAL` direct rows (outside the queue path) |
 | Window pill + `window_ok` | Glitch & Burn pill, from the poller | `● burn window open` | `burn window closed (CRC_STATUS)` names the failing bits |
 | Classify verdicts | campaign log per shot; target pill | `<< GOLDILOCKS` (all five checks: dsov_zero, fpf_readable, dsov_settable, priv_mask_open, crc_valid) | `under`/`over`/`lost` lines; `hit` = DSOV cleared but another check failed |
 | Campaign log + verdict | Glitch & Burn log + stats chips + `result` | `goldilocks`, `window HELD open`, every `row N: VERIFY OK` | `exhausted`/`stopped`, `burn aborts` chip, `IMAGE VERIFY FAILED — window NOT held` |
@@ -514,12 +526,12 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 | Per-block last-wins | Placement and presence are judged per FF **block**: a new record must land after the last row holding a record of its own block, and a word is effective only when its block's last record equals it. This is why already-burned cards keep free rows and why `SUPERSEDED` words need a later re-burn. |
 | Goldilocks | The post-glitch state where the fuse block is unlocked but intact: `DSOV = 0`, `CRC_STATUS = 0x55`, PLMs open, FPF readable — deep enough to unlock, shallow enough to keep the CRC. |
 | SENSE | `CMD_SENSE` (`FUSECTRL = 3`): controller command that re-senses the control fuses and restores program enable inside the window. |
-| Mirror row | FF records are burned in even/odd row pairs (row N and its neighbour) — a half-burned pair is the classic partial-burn failure. |
+| Mirror row | Optional even/odd row pair (row N and its neighbour) for an FF record — OFF by default: the proven reference recipes burned ONE row per FF record. A half-burned pair is the classic partial-burn failure. |
 | Boot FF | The FF records the card shipped with (rows up to `last_occupied`); the policy keeps a buffer after them and never burns on top of them. |
 | STOCK / INTENDED / NOW | The three topology/TPC views: the card's own first-saved baseline (`stock.json`), the unlock goal (disable mask = defective mask), and the live registers. |
 | Proposed burns | The INTENDED-state panel's record list to reach INTENDED — proposals, not writes; queueing them is the user's decision. |
-| Bench provenance | Advanced-unlock values decoded from the signed plans actually executed on bench cards GPU1/GPU2 (plan + dump timestamps named per item); the data words carry the *bench* cards' defect masks. |
-| VERIFIED / UNVERIFIED | Advanced-unlock confidence tags: field mapping documented in repo evidence / GA100 hwref vs attribution inferred, unresolved. |
+| TESTED · EXTERNAL / INTERNAL | Advanced-unlock badge: the burn was **executed and the cards came back working** (empirical) — on cards outside this fleet (EXTERNAL) or on our own cards (INTERNAL). The data words carry the *tested* cards' defect masks. |
+| VERIFIED / UNVERIFIED | Bit-level attribution axis, independent of TESTED: field mapping documented in repo evidence / GA100 hwref vs attribution inferred, unresolved. A word can be TESTED but UNVERIFIED — proven to copy, not yet understood. |
 | PLM | Privilege/Lock Mask (`FUSECTRL_PLM`, `PRIV_MASK`, `FUSEWDATA_PLM`): open (`0xFFFFFFFF`) = the path is writable; closed = reads/writes are gated. |
 | CRC 0x55 | `CRC_STATUS == 0x55`: the fuse block parsed cleanly — the integrity half of the Goldilocks check. |
 | NVVDD | The GPU core rail the Pico dips via PMBus (MP2888B); the glitch is a timed dip of this rail. |
@@ -529,9 +541,9 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 ---
 
 *Screenshot provenance: all console screenshots in this repo were
-captured from the current console UI running in mock mode (a recorded,
-representative fuse dump served to the UI — the bench rig's miner held
-the driver bound during capture). The Proposed burns, Advanced unlocks
+captured from the current (v35) console UI running in mock mode (a
+recorded, representative fuse dump served to the UI — no burns, no bench
+access during capture). The Proposed burns, Advanced unlocks
 and Saved dumps shots were captured from the current build's mock
 console with placeholder serials (all-zeros / all-ones / all-twos) and
 one word seeded already-present to show the `ALREADY PRESENT` badge;

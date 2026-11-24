@@ -219,20 +219,28 @@ The live view of the selected card.
   `No stock baseline recorded yet — this dump is the first record`.
 - **Proposed burns to reach INTENDED**: while the unit/TPC view is in the
   `INTENDED` state, a panel below the TPC map lists the burn records that
-  would achieve it — one row per planner record naming its **exact** target
-  row (`row N → 0xWORD`, `+ mirror row M` when the burn form's mirror
-  setting is on), the current word → proposed word (hex) and the units each
-  word re-enables. Every word carries a selection checkbox (see *Per-burn
+  would achieve it as a **table** — `✓ | Burn | Word | Target row | Field |
+  Effect | Status` (multi-word entries such as the FBPA pair share their
+  Burn/Effect cells via rowspan). Each word names its **exact** target row
+  (`row N`, `+ mirror N+1` when the burn form's mirror checkbox is on —
+  it is OFF by default), the current word → proposed word (hex), the
+  decoded field and the units each word re-enables. Every word carries a
+  selection checkbox (see *Per-burn
   selection and LAST-WINS already-present marking* below); an unselected
-  word shows `not selected — not queued` and gets no row. Proposals name
+  word shows `not selected — not queued` and gets no row; a word already
+  in the burn queue shows `in queue — row shown there` instead of a second
+  allocation — **one word, one row**. Proposals name
   their exact rows because the panel assigns them through the SAME free-row
   allocator the burn queue uses (same dump, same plan order, SELECTED words
-  only, same mirror setting), so `Queue these burns` produces a queue whose
+  only, same mirror setting) and the allocation accounts for the CURRENT
+  queue, so `Queue these burns` produces a queue whose
   rows equal the proposed rows; if the safe zone runs out mid-plan the word
-  shows `NO FREE FF ROW — free space first` and the panel header warns
+  shows `NO FREE ROW (block B)` and the panel header warns
   (counting SELECTED words). Every row carries a `PROPOSED` badge and the header
   states `PROPOSED — not burned; irreversible OTP writes pending a
-  Goldilocks campaign`: these are proposals, not accomplished facts, and
+  Goldilocks campaign`, with a pointer to the Glitch & Burn tab's
+  **Tag legend** for what every badge means: these are proposals, not
+  accomplished facts, and
   they never render in the `STOCK` or `NOW` views. The rows come from the
   SAME planner that feeds the Glitch & Burn tab's `Suggested burns` card
   (one source, no divergence), and `Queue these burns` pushes exactly the
@@ -287,7 +295,9 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   grabs its value from the loaded dump and shows it decoded, FF
   ch·blk·data with known block names, IFF flagged, so burn values never
   have to be typed by hand; blank or missing source rows warn instead of
-  proposing a burn of zero), a mirror-row checkbox, **Check row & guards**
+  proposing a burn of zero), a `burn mirror row too` checkbox — **OFF by
+  default** (the proven reference recipes burned ONE row per FF record;
+  the redundant even/odd mirror pair stays an opt-in), **Check row & guards**
   and **Preview burn (read-only)** (see the burn workflow below for what
   each shows).
   Burn-payload fields carry **no hardcoded defaults**: target row and
@@ -303,16 +313,21 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   re-check`) — the check IS the safety contract.
 - **Suggested burns — minimum common unlock**: derived from **this card's
   own defect masks** in the loaded dump — every disabled-but-healthy unit
-  re-enabled in one pass: GPC 1 word + FBP 1 word + FBPA 2 words = 4
-  words. Each word is labeled **PROPOSED** and names its **concrete
-  target row** (`row N → 0x…`, plus `+ mirror row N+1` when mirroring is
+  re-enabled in one pass: GPC 1 word + TPC unlock words (chain1 offs
+  11–15, one per word that actually changes — see below) + FBP 1 word +
+  FBPA 2 words. The card renders the SAME table shape as the proposed
+  panel — `✓ | Burn | Word | Target row | Field | Effect | Status | +
+  queue`. Each word is labeled **PROPOSED** and names its **concrete
+  target row** (`row N`, plus `+ mirror row N+1` when mirroring is
   on), computed by the SAME `assignRows` allocator the burn queue uses,
   run over the current queue plus the SELECTED records in queue order and
   the mirror setting **⤓ Queue all needed records** will read — so the rows
   shown ARE the rows the queue assigns (proposal == queue by
-  construction; no free-row fallback: placement is per block, so a word
+  construction; a word already in the queue shows `in queue — row shown
+  there` rather than a second allocation — one word, one row; no
+  free-row fallback: placement is per block, so a word
   whose own block has no blank row after the block's last record shows
-  `no free row after block B's last record` while the other words still
+  `NO FREE ROW (block B)` while the other words still
   get concrete rows). **⤓ Queue all needed records** puts the SELECTED
   words in the queue (nothing selected → `no burn words selected — nothing
   queued`); already
@@ -331,25 +346,43 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   foreign demo value — it holds the loaded dump's own DEVID (decoded from
   its DEVIDA/B records, chain 2 block 37/38) when the card carries one,
   and starts empty with a placeholder otherwise.
-- **Advanced unlocks — optional, from bench burn history**: permanent
-  unlocks **actually burned on the bench cards GPU1/GPU2**, decoded from
-  their executed signed plans (`~/nvidia/GPU1/razk-batch1.bin`,
-  `~/nvidia/GPU2/razk-batch2.bin`). Single source:
+- **TPC unlock proposals**: the planner also proposes the chain1 offs
+  11–15 words (`OPT_TPC_GPC{g}_DISABLE`, live at global bit 187+8g — ray
+  schema plane FF, word = bit//16), setting each GPC's TPC disable bits
+  to that GPC's defective mask (`TPC_DEFECTIVE_GPC{g}` shadow). Current
+  values come from the loaded dump's last-wins chain1 records (not the
+  shadow registers); **shared bits are preserved** — every non-TPC bit of
+  a word (the PES bits in word 15, FBPA/GPC spill in words 5–8) is kept
+  from the current word, and word 15's effect line states `PES bits
+  preserved`. Words that already equal the target are skipped (no
+  proposal), and GPCs whose defect word is unknown are left untouched.
+- **Advanced unlocks — optional, tested permanent unlocks**: permanent
+  unlocks whose burns were **executed and confirmed working on tested
+  cards** (single source:
   `host/ga100vfi/advanced_unlocks.py` (`ADVANCED_UNLOCKS`), embedded into
-  the page by `build_html` (`__ADVANCED__`). Items: **PCIe Gen4
+  the page by `build_html` (`__ADVANCED__`); plan provenance and decode
+  reasoning: `evidence/30-advanced-unlocks.md`). Items: **PCIe Gen4
   permanent**, **PLM unlock**, **Compute unlock (full floorsweep +
   SS0/SS1)**. Each item shows its FF word(s) with chain/block/field
-  decode, the bench **provenance** (which card, plan, plan timestamp),
-  and a **confidence badge**: VERIFIED = field mapping documented in the
-  repo's evidence files or the GA100 hwref; UNVERIFIED = attribution
-  inferred, unresolved. These are **IRREVERSIBLE OTP writes and are NOT
-  derived from the shown card's defect masks** — the data words carry the
-  **bench card's** defect masks (GPU1 and GPU2 differ per-die at chain-1
-  blocks 8/12/15/16/17/23), so they must be checked against the shown
-  card before burning. FF steps show PROPOSED target rows through the
+  decode and a **TESTED badge** naming the test scope:
+  `TESTED · EXTERNAL` (burn executed and confirmed working on cards
+  outside this fleet) or `TESTED · INTERNAL` (confirmed on our own
+  cards). The badge is purely empirical — the burn was proven by
+  executed cards. The **confidence badge is a SEPARATE axis**: VERIFIED =
+  field mapping documented in the repo's evidence files or the GA100
+  hwref; UNVERIFIED = attribution inferred, unresolved. A word can be
+  TESTED but UNVERIFIED: proven to copy, not yet understood. No recipe
+  or card-name provenance text appears anywhere in the UI; steps whose
+  value is known to vary per die carry a `per-die variant: another
+  tested card burned 0x… (defect-driven)` note. These are **IRREVERSIBLE
+  OTP writes and are NOT derived from the shown card's defect masks** —
+  the data words carry the **tested cards'** defect masks (they differ
+  per-die at chain-1 blocks 8/12/15/16/17/23), so they must be checked
+  against the shown card before burning. FF steps show PROPOSED target
+  rows through the
   same `assignRows` allocator over the current queue plus the item's
-  SELECTED steps (re-placed on the shown card — the plans' bench rows are
-  shown as provenance only, never as targets), and **+ queue** enqueues
+  SELECTED steps (re-placed on the shown card — the plans' original rows
+  are never shown as targets), and **+ queue** enqueues
   exactly the item's SELECTED FF words at those rows (per-word
   checkboxes with `select all FF words` / `select none`; nothing selected →
   `no FF word selected — nothing queued`). FF steps carry the same
@@ -362,8 +395,23 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   FF records) and IFF words (bit 5 set — refused by the placement
   policy), because `burn_execute` accepts FF records at rows 222–487
   only; an item with no FF steps shows *no queueable FF records —
-  manual burn path only*. Decode + attribution reasoning:
-  `evidence/30-advanced-unlocks.md`.
+  manual burn path only*.
+- **Tag legend — what every badge means**: a collapsible card
+  (`#tag-legend`) on the Glitch & Burn tab that explains every badge the
+  burn UIs emit, and states the **two independent axes**: a `TESTED`
+  badge says the burn was **executed and the cards came back working**
+  (empirical safety; scope `EXTERNAL` = cards outside this fleet,
+  `INTERNAL` = our own cards), while `VERIFIED`/`UNVERIFIED` says whether
+  we know **what the word does** (bit-level attribution) — a word can be
+  TESTED but UNVERIFIED. Badges documented: `PROPOSED` (candidate only,
+  nothing written), `VERIFIED`, `UNVERIFIED`, `TESTED · EXTERNAL`,
+  `TESTED · INTERNAL`, `ALREADY PRESENT` (last record of the block
+  already equals the word — a no-op), `PARTIALLY PRESENT` (some selected
+  words already effective), `SUPERSEDED at row N` (a later record
+  overrides it at boot — needs re-burn), `MANUAL` (outside the FF queue
+  path — direct rows <222 or IFF bit-5 words) and the red
+  `NO FREE ROW FOR BLOCK N` refusal. The proposed-burns panel header
+  points here for badge meanings.
 - **Per-burn selection and LAST-WINS already-present marking**: every word
   in the three burn lists (INTENDED-state proposed panel, Suggested burns
   card, Advanced unlocks FF steps) carries a checkbox; the proposed panel
@@ -388,13 +436,20 @@ burn-on-goldilocks mode creates that state on the selected GPU.
 - **Burn queue**: all queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement
-  policy). A queued word already EFFECTIVE under last-wins is highlighted
+  policy). The queue renders as the SAME table shape as the burn lists —
+  `# | Word | Target row | Field | Status | Via | action` — so what the
+  queue displays IS what it will burn. A queued word already EFFECTIVE
+  under last-wins is highlighted
   with the amber `⚠ already present — likely no-op (row N)` tag; a
   superseded word shows `SUPERSEDED at row N — needs re-burn`. Custom
   records can be added by row + hex value (both start
   empty; the **first free FF row** button fills the row with the first
-  blank FF row of the loaded dump), optionally
-  mirrored; **clear queue** empties it.
+  blank FF row of the loaded dump); an explicitly typed custom row is
+  **reserved before auto-allocation** — a row claimed by two records
+  blocks the queue (`row(s) N claimed by two records — remove the
+  duplicate custom row before burning`), enforcing **one word, one row**
+  (fuses OR; sharing a row corrupts both). Queue entries are optionally
+  mirrored (mirror is opt-in, off by default); **clear queue** empties it.
 - **Glitch campaign**: `v_dip mV`, `pulses`, `pw µs`, `gap µs`, `delay`,
   `max attempts`, a **v_dip strategy** selector (`fixed v_dip` or the
   default `adaptive 3D (v_dip · delay · pw)` with `adaptive v min mV` /
@@ -454,9 +509,10 @@ The whole chase, in the order that actually works:
    what the unlock can still win. Defective TPCs are permanent — never
    plan a burn that enables them.
 5. **Plan the records.** **Glitch & Burn** → *Suggested burns — minimum
-   common unlock* → **⤓ Queue all needed records** (GPC + FBP + FBPA
+   common unlock* → **⤓ Queue all needed records** (GPC + TPC + FBP + FBPA
    words derived from this card's own defect masks; optionally **+ Queue
-   DEVID A/B pair**). Review the queue; every record burns in one window.
+   DEVID A/B pair**). Review the queue table; every record burns in one
+   window.
 6. **Arm.** Type `BURN` in the arm field and press **Arm (120 s)** — the
    button is gated on the selected GPU's live Goldilocks state.
 7. **Glitch campaign in burn mode.** Mode **burn payload on first
