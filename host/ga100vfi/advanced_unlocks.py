@@ -1,34 +1,36 @@
-"""Optional "advanced unlocks" burned on the bench cards, for the console UI.
+"""Optional "advanced unlocks" proven on reference cards, for the console UI.
 
 Single source for the Glitch & Burn tab's Advanced unlocks card. The records
-below are decoded from the SIGNED PLANS ACTUALLY EXECUTED on bench cards
-GPU1 and GPU2 (GA100PLN binaries, frames tag/len/sha256; STEPS are
-struct <IIII (physical_row, before, OR_delta, after) per
-~/nvidia/GPU2/ga100_burn.py):
+below are decoded from the SIGNED PLANS ACTUALLY EXECUTED on two reference
+cards, A and B (GA100PLN binaries, frames tag/len/sha256; STEPS are
+struct <IIII (physical_row, before, OR_delta, after) per the burn tool):
 
-  GPU1  ~/nvidia/GPU1/razk-batch1.bin  sha256 4a6ebbc6...878802 (v1 plan,
+  recipe v1 (reference card A)  sha256 4a6ebbc6...878802 (v1 plan,
         META 2026-11-18T03:00:24Z, dump ga100-dump-20261118T025412Z)
-  GPU2  ~/nvidia/GPU2/razk-batch2.bin  sha256 fcbde382...113f8f (v2 plan,
+  recipe v2 (reference card B)  sha256 fcbde382...113f8f (v2 plan,
         META 2026-11-18T14:58:29Z, dump ga100-dump-20261118T145659Z)
 
 FF record words are (chain=bits[4:0], iff=bit5, block=bits[15:6],
 data=bits[31:16]) — the same layout the console decodes everywhere. FF
-placement rows are per-die (GPU1 chain starts row 308, GPU2 row 326);
-the console re-places them on the shown card via its own allocator, so
-`bench_rows` are provenance, not targets.
+placement rows are per-die (recipe v1 chain starts row 308, recipe v2
+row 326); the console re-places them on the shown card via its own
+allocator, so `bench_rows` are provenance, not targets. Neither recipe
+burned mirror rows for FF records — one record per row; mirror rows are
+an opt-in console option only.
 
 These burns are IRREVERSIBLE OTP writes and are NOT derived from the
-shown card's defect masks: the data words carry the BENCH card's defect
-masks (GPU1 vs GPU2 differ at chain-1 blocks 8/12/15/16/17/23 — TPC/PES
-masks follow each die's silicon). `confidence` marks attribution, not
-safety: VERIFIED = field mapping documented in the repo's evidence files
-or the GA100 hwref; UNVERIFIED = attribution inferred, unresolved.
+shown card's defect masks: the data words carry the reference cards'
+defect masks (recipe v1 vs v2 differ at chain-1 blocks 8/12/15/16/17/23
+— TPC/PES masks follow each die's silicon). `confidence` marks
+attribution, not safety: VERIFIED = field mapping documented in the
+repo's evidence files or the GA100 hwref; UNVERIFIED = attribution
+inferred, unresolved.
 
 Not every step of the plans is an unlock: both also burn chain-2 blocks
 37/38 data 0x416A = DEVID 0x20B5 "A100" (stock 0x4184 = 0x20C2 "170HX",
 data>>1 per evidence/25; stock value evidence/116, /119) — the DEVID
-rewrite is part of the bench conversion but is not an unlock, so it is
-deliberately not an item here.
+rewrite is part of the reference conversion but is not an unlock, so it
+is deliberately not an item here.
 
 Decode + attribution reasoning: evidence/30-advanced-unlocks.md.
 """
@@ -41,9 +43,9 @@ def enc_ff(chain: int, block: int, data: int) -> int:
     return (chain & 0x1F) | ((block & 0x3FF) << 6) | ((data & 0xFFFF) << 16)
 
 
-GPU1_PROV = ("burned on bench GPU1 2026-11-18 (razk-batch1.bin, plan signed "
+GPU1_PROV = ("burned on reference card A 2026-11-18 (recipe v1, plan signed "
              "2026-11-18T03:00:24Z, dump 2026-11-18T02:54:12Z)")
-GPU2_PROV = ("burned on bench GPU2 2026-11-18 (razk-batch2.bin, plan signed "
+GPU2_PROV = ("burned on reference card B 2026-11-18 (recipe v2, plan signed "
              "2026-11-18T14:58:29Z, dump 2026-11-18T14:56:59Z)")
 BOTH_PROV = GPU1_PROV + " · " + GPU2_PROV
 
@@ -54,11 +56,11 @@ def _ff(chain: int, block: int, data: int, field: str, confidence: str,
     step = {"kind": "ff", "chain": chain, "block": block, "data": data,
             "value": enc_ff(chain, block, data), "field": field,
             "confidence": confidence,
-            "bench_rows": {"GPU1": gpu1_row, "GPU2": gpu2_row}}
+            "bench_rows": {"refA": gpu1_row, "refB": gpu2_row}}
     if note:
         step["note"] = note
     if gpu1_data is not None and gpu1_data != data:
-        step["gpu1_data"] = gpu1_data   # defect-driven per-die difference
+        step["ref_a_data"] = gpu1_data   # defect-driven per-die difference
     return step
 
 
@@ -74,9 +76,10 @@ def _iff(rows: list[int], words: list[int], decode: str, confidence: str,
             "confidence": confidence, "note": note}
 
 
-# GPU2 (razk-batch2) chain-1 floorsweep: golden values (ga_studio calls
-# batch2 "the verified best-case recipe — full A100-80GB conversion").
-# GPU1 differences are recorded per step as gpu1_data / bench_rows.
+# Recipe v2 (reference card B) chain-1 floorsweep: golden values (the studio
+# planner calls recipe v2 "the verified best-case recipe — full A100-80GB
+# conversion"). Recipe v1 differences are recorded per step as ref_a_data /
+# bench_rows.
 _COMPUTE_FF = [
     _ff(1, 5, 0x8007, "OPT_FBIO_DISABLE (bits 83-95)", "VERIFIED", 308, 326,
         "memory subpartitions re-enabled (170hx-ray-schema field catalog)"),
@@ -108,9 +111,9 @@ _COMPUTE_FF = [
     _ff(1, 27, 0x0000, "bits 432-447 — no catalog field", "UNVERIFIED",
         324, 341, "burned 0x0000 on both cards"),
 ]
-# GPU1 burned one extra record GPU2 did not: chain1 block 17 (PES upper,
-# bits 272-274) data 0x0000 at row 319. Kept as provenance note, not a
-# queueable step for the golden (GPU2) recipe.
+# Recipe v1 (reference card A) burned one extra record recipe v2 did not:
+# chain1 block 17 (PES upper, bits 272-274) data 0x0000 at row 319. Kept as
+# provenance note, not a queueable step for the golden (recipe v2) recipe.
 
 ADVANCED_UNLOCKS: list[dict] = [
     {
@@ -145,7 +148,7 @@ ADVANCED_UNLOCKS: list[dict] = [
         "name": "PLM unlock (bench-recipe FPF direct rows)",
         "confidence": "UNVERIFIED",
         "provenance": BOTH_PROV,
-        "notes": ("No step in razk-batch1/2 attributes cleanly to a "
+        "notes": ("No step in the reference recipes attributes cleanly to a "
                   "permanent PLM change: the PLM opens these plans rely on "
                   "(FUSEWDATA/FUSECTRL/OPT_PLM) are RUNTIME state — the "
                   "plans' own conditions require them open BEFORE burning "
@@ -154,7 +157,7 @@ ADVANCED_UNLOCKS: list[dict] = [
                   "recipe are the FPF option bits below (dev_fuse.h "
                   "PRI/RED aliases: rows 0x02/03 bit 21, 0x06/07 bit 28, "
                   "0x30/31 bit 5). What would settle it: post-burn dumps "
-                  "of GPU1/GPU2 diffed against the plans' POST "
+                  "of reference cards A/B diffed against the plans' POST "
                   "fingerprints + cold-boot PLM register readback."),
         "steps": [
             _direct([2, 3], 0x00200000, "NV_FUSE_OPT_SM_TTU_EN_CONTROL "
@@ -182,11 +185,12 @@ ADVANCED_UNLOCKS: list[dict] = [
                   "macro WRITE_DW SS0=0x88888888 / SS1=0x00000008 — the "
                   "permanent FMA/SM-speed lift (cmpunlocker: 'Full SM "
                   "compute throughput (SS0/SS1)', 'POST-WRITE "
-                  "SS0=0x88888888 SS1=0x00000008'). Values are GPU2's "
-                  "defect masks — NOT this card's; the queueable words "
-                  "below must be checked against the shown card's defect "
-                  "masks before burning. IFF rows 484-487 are refused by "
-                  "the FF placement policy (bit 5 set) — manual path."),
+                  "SS0=0x88888888 SS1=0x00000008'). Values are reference "
+                  "card B's defect masks — NOT this card's; the queueable "
+                  "words below must be checked against the shown card's "
+                  "defect masks before burning. IFF rows 484-487 are "
+                  "refused by the FF placement policy (bit 5 set) — manual "
+                  "path."),
         "steps": _COMPUTE_FF + [
             _iff([484, 485], [0x082381FD, 0x88888888],
                  "WRITE_DW → 0x82381C (SS0) = 0x88888888", "VERIFIED",

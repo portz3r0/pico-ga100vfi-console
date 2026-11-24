@@ -2199,7 +2199,7 @@ LIVEBOOT = r"""
           </select></div>
         <div class="field" id="gb-typedwrap"><label>value (hex)</label><input type="text" id="gb-value" placeholder="0x…" class="mono" style="width:120px"></div>
         <div class="field" id="gb-dumpwrap" style="display:none"><label>source row in dump</label><input type="number" id="gb-srcrow" placeholder="first blank FF row (≥222)" min="0" max="487"></div>
-        <label class="checkline"><input type="checkbox" id="gb-mirror" checked> burn mirror row too</label>
+        <label class="checkline"><input type="checkbox" id="gb-mirror"> burn mirror row too <span class="note">(row N+1, even-aligned pair — OFF by default: the proven reference recipes burned ONE row per FF record; only enable if you specifically want the redundant pair)</span></label>
         <button class="btn" id="gb-check">Check row &amp; guards</button>
         <button class="btn" id="gb-preview" title="read-only burn preview: FF decode, last-wins collision scan, partial-landing hazards — works any time (no window/arm/token; CMD_READ is gated by FUSECTRL_PLM, not EFP)">Preview burn (read-only)</button>
       </div>
@@ -2237,11 +2237,11 @@ LIVEBOOT = r"""
       </div>
     </div>
     <div class="card" id="gb-advanced" style="margin-top:12px">
-      <h3>Advanced unlocks — optional, from bench burn history</h3>
+      <h3>Advanced unlocks — optional, from reference burn history</h3>
       <div class="note" style="margin-bottom:8px">Permanent unlocks
-      <b>actually burned on bench cards GPU1/GPU2</b> (decoded from their
+      <b>actually burned on reference cards A/B</b> (decoded from their
       signed plans). <b class="warn">Irreversible OTP writes — NOT derived
-      from this card's defect masks:</b> the data words carry the bench
+      from this card's defect masks:</b> the data words carry the reference
       cards' defect masks; check them against this card before burning.
       PROPOSED rows are placement candidates from the same allocator the
       queue uses. DIRECT rows (&lt;222) and IFF words (bit 5 set) are
@@ -2556,8 +2556,8 @@ LIVEBOOT = r"""
     burnQueue.push({ word, src, customRow, mirror: !!mirror });
     renderQueue();
   }
-  // ---- task 30: Advanced unlocks (bench burn history) ----
-  // Optional permanent unlocks burned on bench GPU1/GPU2. FF-record steps
+  // ---- task 30: Advanced unlocks (reference burn history) ----
+  // Optional permanent unlocks burned on reference cards A/B. FF-record steps
   // are queueable and show their concrete target rows through the SAME
   // assignRows allocator over (current queue + this item's steps) — the
   // rows shown ARE the rows "+ queue" will assign. DIRECT (row < 222) and
@@ -2600,8 +2600,8 @@ LIVEBOOT = r"""
         if (s.kind === "ff") {
           const on = advStepSelected(it.id, s);
           const a = on ? (asg ? asg.rows[ai++] : null) : null;
-          const bench = [s.bench_rows && s.bench_rows.GPU1 ? `GPU1 row ${s.bench_rows.GPU1}` : "",
-                         s.bench_rows && s.bench_rows.GPU2 ? `GPU2 row ${s.bench_rows.GPU2}` : ""]
+          const bench = [s.bench_rows && s.bench_rows.refA ? `ref A row ${s.bench_rows.refA}` : "",
+                         s.bench_rows && s.bench_rows.refB ? `ref B row ${s.bench_rows.refB}` : ""]
                         .filter(Boolean).join(" · ");
           return `<div class="planword">` +
             `<input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
@@ -2618,7 +2618,7 @@ LIVEBOOT = r"""
                   (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
             `</span>` +
             `<span class="note">bench: ${esc(bench)}</span>` +
-            (s.gpu1_data !== undefined ? ` <span class="note"><b class="warn">GPU1 burned ${hex((s.value & 0xFFFF) | ((s.gpu1_data & 0xFFFF) << 16))} (per-die defect)</b></span>` : "") +
+            (s.ref_a_data !== undefined ? ` <span class="note"><b class="warn">ref A burned ${hex((s.value & 0xFFFF) | ((s.ref_a_data & 0xFFFF) << 16))} (per-die defect)</b></span>` : "") +
             (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
             `</div>`;
         }
@@ -2657,7 +2657,7 @@ LIVEBOOT = r"""
         if (s.kind === "ff" && advStepSelected(it.id, s)) { queueAdd(s.value, it.name, undefined, mir); n++; }
       });
       if (!n) { note(`advanced unlock “${it.name}”: no FF word selected — nothing queued`, "warnl"); return; }
-      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the BENCH card's defect masks, verify against this card before burning`, "warnl");
+      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the reference card's defect masks, verify against this card before burning`, "warnl");
     });
   }
   function renderQueue() {
