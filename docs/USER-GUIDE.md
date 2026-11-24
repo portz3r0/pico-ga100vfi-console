@@ -114,7 +114,7 @@ card serial, host name, IP addresses, username and home paths are masked.*
 | arm phrase + Arm (120 s) | type `BURN`, click Arm → countdown pill `● armed Ns`; wrong phrase → sticky red refusal until you edit the phrase; button disabled while the selected GPU is not Goldilocks (`selected GPU not Goldilocks — glitch first`) |
 | Burn now | enabled only when checked + armed + window open; double confirm; journal-uncertain → explicit ack dialog |
 | window pill | read-only burn-window verdict from the poller: `● burn window open` / `burn window closed (<failed bits>)` / `window: n/a` |
-| Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / FBP / FBPA-pair), each word decoded, `ALREADY IN DUMP` tagged; queue all or queue a DEVID A/B pair |
+| Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / FBP / FBPA-pair), each word decoded, per-word selection checkboxes with LAST-WINS-aware `ALREADY PRESENT` / `SUPERSEDED` marking (already-present words default unticked); queue all (selected only) or queue a DEVID A/B pair |
 | Burn queue | records that all burn in **one** Goldilocks window; rows auto-assigned ascending in the safe zone (mirror consumes an even/odd pair); server re-validates every row |
 | Glitch campaign | v_dip/pulses/pw/gap/delay/max attempts; strategy `fixed` or `adaptive` (3D CRC-guided search over v_dip/delay/pw — the fixed v_dip is ignored); pico port + rescan; mode `classify only` or `burn payload on first Goldilocks`; window dropdown `hold open — no revert` (default) / `auto-revert` |
 | ▶ Start / ■ Stop / ⟲ Revert VRM | Revert hands PMBus back, closing a held window (refused while a campaign owns the Pico) |

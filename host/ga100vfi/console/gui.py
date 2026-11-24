@@ -281,7 +281,8 @@ HTML = r"""<!DOCTYPE html>
                     border-radius: 8px; margin: 4px 0; font-size: 12px; }
   .planword { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 10px;
               flex-wrap: wrap; width: 100%; }
-  .qrow.qexists { background: rgba(63,185,80,.07); border-color: rgba(63,185,80,.35); }
+  .qrow.qwarn { background: rgba(210,153,34,.07); border-color: rgba(210,153,34,.4); }
+  .planword .psel { accent-color: var(--accent, #58a6ff); margin-right: 2px; }
   .ok-tag { background: rgba(63,185,80,.14); color: var(--ok);
             border-color: rgba(63,185,80,.4); }
   .prop-tag { background: rgba(210,153,34,.16); color: var(--warn);
@@ -623,6 +624,45 @@ const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
 const ffDecode = v => ({ ch: v & 0x1F, iff: (v >> 5) & 1,
                          blk: (v >> 6) & 0x3FF, data: (v >>> 16) & 0xFFFF });
 
+// ---- task 32: last-wins-aware "already present" (single source) ----
+// The controller replays FF records in row order and the LAST record per
+// block wins at boot, so a word is already EFFECTIVE only when the last
+// live record of its own block equals it. A matching word that a later
+// record of the same block overrides is NOT effective — it needs re-burn.
+// (Rows outside the FF region 222-487 are direct OTP words, never block
+// records; blank = 0x0/0xFFFFFFFF, same rule as the row table and the
+// server's ff_layout_from_rows.) Returns
+//   {state:"present", row}                       — last record of the block IS this word
+//   {state:"superseded", row, byRow}             — this word is in the block, a later record wins
+//   null                                         — word not in the block
+function lastWinsStatus(word) {
+  const rows = D.rows || {};
+  const f = ffDecode(word);
+  if (f.iff) return null;   // IFF macro words have no block replay to win
+  let lastRow = -1, lastVal = null, foundRow = null;
+  for (const k of Object.keys(rows)) {
+    const r = +k, v = rows[k];
+    if (typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
+    if (r < 222 || r > 487) continue;
+    const g = ffDecode(v);
+    if (g.iff || g.blk !== f.blk) continue;
+    if (r > lastRow) { lastRow = r; lastVal = v; }
+    if (v === word && foundRow === null) foundRow = r;
+  }
+  if (lastVal === word) return { state: "present", row: lastRow };
+  if (foundRow !== null) return { state: "superseded", row: foundRow, byRow: lastRow };
+  return null;
+}
+// DIRECT OTP rows (<222, plain words — advanced manual steps): the effect
+// is achieved when every delta bit is already set in the dump's row value.
+function directStepPresent(step) {
+  const rows = D.rows || {};
+  return step.rows.every(r => {
+    const v = rows[String(r)];
+    return typeof v === "number" && ((v >>> 0) & step.delta) === step.delta;
+  });
+}
+
 const REGIONS = [
   { min: 0,  max: 47,  name: "MAIN", desc: "main array — paired option words (row 0 = 0x53557C3D known-good signature, bit 5 = DISABLE_SW_OVERRIDE)" },
   { min: 48, max: 95,  name: "UNIQ", desc: "main array — unpaired rows (hash / per-chip data)" },
@@ -948,6 +988,11 @@ function renderTpc() {
 // change (renderLive runs on each poll tick and after each new dump), so
 // after a real burn moves NOW, the next dump shows fewer or no proposals.
 // Renders ONLY in the intended state — never in NOW or STOCK.
+// Task 32: every word carries a selection checkbox (default ON, except
+// words already EFFECTIVE under last-wins, which default OFF); "Queue
+// these burns" queues only the selected words through the same
+// window.__queueSelectedPlan path the Suggested card uses — selection is
+// shared state, so both lists always show the same checkboxes.
 function renderProposedBurns() {
   const el = document.getElementById("proposed-burns");
   if (!el) return;
@@ -960,19 +1005,23 @@ function renderProposedBurns() {
   const asg = typeof window.__planRowAssignment === "function"
     ? window.__planRowAssignment() : null;
   const hex = w => "0x" + w.toString(16).toUpperCase().padStart(8, "0");
+  const words = plan.flatMap(p => (p.pair ? p.words : [p.word]));
+  const sel = words.filter(w => window.__planWordSelected(w)).length;
   let html = `<h3>Proposed burns to reach INTENDED</h3>` +
     `<div class="note"><b class="warn">PROPOSED — not burned; irreversible ` +
     `OTP writes pending a Goldilocks campaign.</b> These records would set ` +
     `the disable masks to the card's defective masks; nothing is written ` +
-    `until a burn campaign runs.</div>`;
+    `until a burn campaign runs. Tick the words to burn; already-present ` +
+    `words (last record of their block already equals the word) start ` +
+    `unticked.</div>`;
   if (asg && asg.noFree > 0)
     html += `<div class="note"><b class="bad">⚠ ${asg.noFree} of ${asg.rows.length} ` +
-      `words have no blank row after their own block's last record — free ` +
+      `selected words have no blank row after their own block's last record — free ` +
       `space first; the queue will refuse to start until rows are available.</b></div>`;
   if (!plan.length) {
     html += `<div class="note">no burns proposed — card already at intended state</div>`;
   }
-  let ai = 0;   // flat word index — same order as queuePlanRecords/assignRows
+  let ai = 0;   // index into asg.rows — selected words only, same order as __planRowAssignment
   for (const p of plan) {
     const words = p.pair ? p.words : [p.word];
     html += `<div class="planrow"><div><b>${esc(p.label)}</b> ` +
@@ -980,28 +1029,46 @@ function renderProposedBurns() {
       `<span class="note">${esc(p.recs)}</span></div>` +
       words.map(w => {
         const f = window.__ffEffect(w);
-        const ex = window.__existingRecordFor(w);
-        const a = asg ? asg.rows[ai++] : null;
+        const st = lastWinsStatus(w);
+        const on = window.__planWordSelected(w);
+        const a = on ? (asg ? asg.rows[ai++] : null) : null;
         return `<div class="planword">` +
+          `<input type="checkbox" class="psel" data-sel-word="${w}"${on ? " checked" : ""} ` +
+            `title="include this word in the queue">` +
           `<span class="tag prop-tag">PROPOSED</span>` +
-          (ex !== null
-            ? `<span class="mono">row ${ex}: ${hex(w)} — already in dump</span>`
+          (st && st.state === "present"
+            ? `<span class="mono">row ${st.row}: ${hex(w)} — already in dump</span>`
             : `<span class="mono">0x00000000 → ${hex(w)}</span>`) +
           `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+          (st && st.state === "present"
+            ? ` <span class="tag ok-tag">ALREADY PRESENT (row ${st.row}) — no burn needed</span>`
+            : st && st.state === "superseded"
+              ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
+              : "") +
           `<span class="note">target row: ` +
-            (!asg ? `FF layout not loaded — rows pending`
+            (!on ? `not selected — not queued`
+              : !asg ? `FF layout not loaded — rows pending`
               : a === null ? `<b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(w).blk} — free space first</b>`
               : `<b data-proprow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(w)}</b>` +
                 (a.mirror ? ` + mirror row ${a.row + 1}` : "") +
-                (ex !== null ? ` (record already present at row ${ex})` : "")) +
+                (st && st.state === "present" ? ` (record already present at row ${st.row})` : "")) +
           `</span></div>`;
       }).join("") + `</div>`;
   }
   if (plan.length) {
-    html += `<div style="margin-top:8px"><button class="btn go" id="proposed-queue">` +
-      `⤓ Queue these burns</button></div>`;
+    html += `<div class="frow" style="margin-top:8px">` +
+      `<button class="btn" data-sel-all="1">select all</button>` +
+      `<button class="btn" data-sel-all="0">select none</button>` +
+      `<button class="btn go" id="proposed-queue">⤓ Queue these burns</button>` +
+      `<span class="pill">${sel} of ${words.length} word(s) selected</span></div>`;
   }
   el.innerHTML = html;
+  el.querySelectorAll("[data-sel-word]").forEach(c => c.onchange = () => {
+    window.__setPlanWordSelected(+c.dataset.selWord, c.checked);
+  });
+  el.querySelectorAll("[data-sel-all]").forEach(b => b.onclick = () => {
+    window.__setAllPlanWordsSelected(b.dataset.selAll === "1");
+  });
   const qb = document.getElementById("proposed-queue");
   if (qb) qb.onclick = () => window.__queueProposedBurns();
 }
@@ -2148,6 +2215,8 @@ LIVEBOOT = r"""
       <b>one</b> Goldilocks window.</div>
       <div id="plan-rows"></div>
       <div class="frow" style="margin-top:8px">
+        <button class="btn" id="plan-sel-all" title="tick every word">select all</button>
+        <button class="btn" id="plan-sel-none" title="untick every word">select none</button>
         <button class="btn go" id="plan-queue-all">⤓ Queue all needed records</button>
         <span class="pill" id="plan-summary">…</span>
       </div>
@@ -2171,6 +2240,10 @@ LIVEBOOT = r"""
       222–487 only) — <b>manual burn path</b>. Confidence: VERIFIED =
       field mapping documented in repo evidence / GA100 hwref; UNVERIFIED
       = attribution inferred, unresolved.</div>
+      <div class="frow" style="margin-bottom:6px">
+        <button class="btn" id="adv-sel-all" title="tick every FF word">select all FF words</button>
+        <button class="btn" id="adv-sel-none" title="untick every FF word">select none</button>
+      </div>
       <div id="adv-rows"></div>
     </div>
     <div class="card" id="gb-queue" style="margin-top:12px">
@@ -2280,13 +2353,42 @@ LIVEBOOT = r"""
     }
     return { key: `chain${ch}·off${off}`, field: null, mask, bits: [] };
   }
-  function existingRecordFor(word) {
-    // Does the loaded dump already contain this exact record word? (user asked:
-    // "if a burn already exists that is also represented")
-    for (const k of Object.keys(D.rows || {})) {
-      if (D.rows[k] === word) return +k;
-    }
-    return null;
+  // ---- task 32: per-burn selection (shared across all three lists) ----
+  // planSel/advSel hold ONLY explicit user choices; the default for any
+  // word is "selected, unless it is already EFFECTIVE under last-wins"
+  // (lastWinsStatus state "present" → default OFF; "superseded" or absent
+  // → default ON). The INTENDED-state panel and this card share planSel —
+  // same words, one state, no divergence.
+  const planSel = {};
+  const advSel = {};
+  function planWordSelected(word) {
+    const k = String(word >>> 0);
+    if (k in planSel) return planSel[k];
+    const st = lastWinsStatus(word);
+    return !(st && st.state === "present");
+  }
+  function setPlanWordSelected(word, on) {
+    planSel[String(word >>> 0)] = on;
+    renderQueue();
+    renderProposedBurns();   // keep the INTENDED-state panel in step
+  }
+  function setAllPlanWordsSelected(on) {
+    for (const p of suggestPlan())
+      for (const w of (p.pair ? p.words : [p.word])) planSel[String(w >>> 0)] = on;
+    renderQueue();
+    renderProposedBurns();
+  }
+  function advStepSelected(id, step) {
+    const s = ADVANCED.find(a => a.id === id);
+    const k = id + ":" + s.steps.indexOf(step);
+    if (k in advSel) return advSel[k];
+    const st = lastWinsStatus(step.value);
+    return !(st && st.state === "present");
+  }
+  function setAllAdvStepsSelected(on) {
+    for (const it of ADVANCED)
+      it.steps.forEach((s, si) => { if (s.kind === "ff") advSel[it.id + ":" + si] = on; });
+    renderQueue();
   }
   function suggestPlan() {
     const sh = D.shadow || {};
@@ -2331,42 +2433,57 @@ LIVEBOOT = r"""
     if (!D.shadow) { el.innerHTML = `<span class="note">load a dump first</span>`; return; }
     const plan = suggestPlan();
     // task 30: name the concrete target rows through the SAME allocator the
-    // queue uses — over the current queue plus these records in queue order
-    // and the mirror setting "Queue all" will read — so the rows shown ARE
-    // the rows the queue will assign (proposal == queue by construction).
+    // queue uses — over the current queue plus the SELECTED plan words in
+    // queue order and the mirror setting "Queue all" will read — so the
+    // rows shown ARE the rows the queue will assign (proposal == queue by
+    // construction). task 32: unselected words show no row and are not
+    // allocated, exactly as queuePlanRecords skips them.
     const mirror = document.getElementById("gb-mirror").checked;
+    const selWords = [];
+    for (const p of plan) for (const w of (p.pair ? p.words : [p.word]))
+      if (planWordSelected(w)) selWords.push(w);
     const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
-    for (const p of plan) for (const w of (p.pair ? p.words : [p.word])) entries.push({word: w, mirror});
+    for (const w of selWords) entries.push({word: w, mirror});
     const asg = assignRows(entries);
-    let ai = burnQueue.length;   // flat word index of the plan's first word
+    let ai = burnQueue.length;   // index of the plan's first SELECTED word
     const needed = plan.length;
     document.getElementById("plan-summary").innerHTML = needed
-      ? `<b>${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s)</b> in ${needed} record group(s)`
+      ? `<b>${selWords.length} of ${plan.reduce((a, p) => a + (p.pair ? 2 : 1), 0)} word(s) selected</b>` +
+        ` in ${needed} record group(s)`
       : `<b class="ok">masks already equal to defective — this card needs no unlock burns</b>`;
     el.innerHTML = plan.map(p => {
       const words = p.pair ? p.words : [p.word];
-      const rows = words.map(w => ({ w, ex: existingRecordFor(w) }));
+      const rows = words.map(w => ({ w, st: lastWinsStatus(w), on: planWordSelected(w) }));
       return `<div class="planrow">` +
         `<div><b>${p.label}</b> <span class="tag prop-tag">PROPOSED</span> <span class="note">${esc(p.recs)}</span></div>` +
         rows.map(r => {
           const f = ffEffect(r.w);
-          const a = asg ? asg.rows[ai++] : null;
+          const a = r.on ? (asg ? asg.rows[ai++] : null) : null;
           return `<div class="planword">` +
+            `<input type="checkbox" class="psel" data-sel-word="${r.w}"${r.on ? " checked" : ""} ` +
+              `title="include this word in the queue">` +
             `<span class="tag prop-tag">PROPOSED</span>` +
             `<span class="mono">0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</span>` +
             `<span class="note">${esc(f.key)} · ${esc(p.effect)}</span>` +
+            (r.st && r.st.state === "present"
+              ? ` <span class="tag ok-tag">ALREADY PRESENT (row ${r.st.row}) — no burn needed</span>`
+              : r.st && r.st.state === "superseded"
+                ? ` <span class="tag prop-tag">SUPERSEDED at row ${r.st.byRow} — needs re-burn</span>`
+                : "") +
             `<span class="note">target row: ` +
-              (!asg ? `FF layout not loaded — rows pending`
+              (!r.on ? `not selected — not queued`
+                : !asg ? `FF layout not loaded — rows pending`
                 : a === null ? `<b class="bad">no free row after block ${ffDecode(r.w).blk}'s last record</b>`
                 : `<b data-planrow="${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → 0x${r.w.toString(16).toUpperCase().padStart(8, "0")}</b>` +
                   (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
             `</span>` +
-            (r.ex !== null
-              ? ` <span class="tag ok-tag">ALREADY IN DUMP — row ${r.ex}</span>`
-              : ` <button class="btn" data-plan-add="${r.w}">+ queue</button>`) +
+            `<button class="btn" data-plan-add="${r.w}">+ queue</button>` +
             `</div>`;
         }).join("") + `</div>`;
     }).join("") || `<span class="note">no records needed — disable masks already match the card's defects</span>`;
+    el.querySelectorAll("[data-sel-word]").forEach(c => c.onchange = () => {
+      setPlanWordSelected(+c.dataset.selWord, c.checked);
+    });
     el.querySelectorAll("[data-plan-add]").forEach(b => b.onclick = () => {
       queueAdd(+b.dataset.planAdd, "suggested");
     });
@@ -2390,23 +2507,48 @@ LIVEBOOT = r"""
     const mirror = document.getElementById("gb-mirror").checked;
     el.innerHTML = ADVANCED.map(it => {
       const ffSteps = it.steps.filter(s => s.kind === "ff");
+      // task 32: last-wins presence per step — FF words through the shared
+      // lastWinsStatus, DIRECT rows by delta-bit containment in the dump
+      // rows; IFF macro words have no block replay, never "present".
+      const stOf = s => s.kind === "ff" ? lastWinsStatus(s.value)
+        : s.kind === "direct" && directStepPresent(s) ? { state: "present" } : null;
+      const checkedSteps = it.steps.filter(s => s.kind !== "iff");
+      const effSteps = checkedSteps.filter(s => stOf(s) && stOf(s).state === "present");
+      const itemBadge = checkedSteps.length && effSteps.length === checkedSteps.length
+        ? ` <span class="tag ok-tag">ALREADY PRESENT — no burn needed</span>`
+        : effSteps.length
+          ? ` <span class="tag prop-tag">PARTIALLY PRESENT (${effSteps.length}/${checkedSteps.length}: ` +
+            effSteps.map(s => s.kind === "ff" ? hex(s.value) : `rows ${s.rows.join("/")}`).join(", ") +
+            `)</span>`
+          : "";
+      const selFf = ffSteps.filter(s => advStepSelected(it.id, s));
       const entries = burnQueue.map(q => ({word: q.word, mirror: !!q.mirror, customRow: q.customRow}));
-      ffSteps.forEach(s => entries.push({word: s.value, mirror}));
+      selFf.forEach(s => entries.push({word: s.value, mirror}));
       const asg = assignRows(entries);
       let ai = burnQueue.length;
-      const stepsHtml = it.steps.map(s => {
+      const stepsHtml = it.steps.map((s, si) => {
+        const st = stOf(s);
+        const badge = st && st.state === "present"
+          ? ` <span class="tag ok-tag">ALREADY PRESENT${st.row !== undefined ? ` (row ${st.row})` : ""} — no burn needed</span>`
+          : st && st.state === "superseded"
+            ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
+            : "";
         if (s.kind === "ff") {
-          const a = asg ? asg.rows[ai++] : null;
+          const on = advStepSelected(it.id, s);
+          const a = on ? (asg ? asg.rows[ai++] : null) : null;
           const bench = [s.bench_rows && s.bench_rows.GPU1 ? `GPU1 row ${s.bench_rows.GPU1}` : "",
                          s.bench_rows && s.bench_rows.GPU2 ? `GPU2 row ${s.bench_rows.GPU2}` : ""]
                         .filter(Boolean).join(" · ");
           return `<div class="planword">` +
+            `<input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
+              `title="include this word in the queue">` +
             `<span class="tag prop-tag">PROPOSED</span>` +
             `<span class="mono">${hex(s.value)}</span>` +
             `<span class="note">chain ${s.chain} · block ${s.block} · ${esc(s.field)}</span>` +
-            conf(s.confidence) +
+            conf(s.confidence) + badge +
             `<span class="note">target row: ` +
-              (!asg ? `FF layout not loaded — rows pending`
+              (!on ? `not selected — not queued`
+                : !asg ? `FF layout not loaded — rows pending`
                 : a === null ? `<b class="bad">no free row in burn zone</b>`
                 : `<b data-advrow="${it.id}:${a.row}${a.mirror ? "+" + (a.row + 1) : ""}">row ${a.row} → ${hex(s.value)}</b>` +
                   (a.mirror ? ` + mirror row ${a.row + 1}` : "")) +
@@ -2421,14 +2563,14 @@ LIVEBOOT = r"""
           `<span class="tag">MANUAL</span>` +
           `<span class="mono">rows ${s.rows.join(" / ")}${isDirect ? " Δ " + hex(s.delta) : " = " + s.words.map(hex).join(" + ")}</span>` +
           `<span class="note">${esc(isDirect ? s.field : s.decode)}</span>` +
-          conf(s.confidence) +
+          conf(s.confidence) + badge +
           `<span class="note">${isDirect ? "DIRECT row — manual burn path (queue burns FF records only)" : "IFF word — manual burn path (ff_policy refuses bit 5)"}</span>` +
           (s.note ? `<span class="note">${esc(s.note)}</span>` : "") +
           `</div>`;
       }).join("");
       return `<div class="planrow" data-adv-item="${it.id}" style="margin-top:10px">` +
         `<div><b>${esc(it.name)}</b> <span class="tag prop-tag">PROPOSED</span> ` +
-        conf(it.confidence) +
+        conf(it.confidence) + itemBadge +
         (ffSteps.length
           ? ` <button class="btn" data-adv-add="${it.id}">+ queue</button>`
           : ` <span class="note">no queueable FF records — manual burn path only</span>`) +
@@ -2437,12 +2579,21 @@ LIVEBOOT = r"""
         `<div class="note">${esc(it.notes)}</div>` +
         stepsHtml + `</div>`;
     }).join("");
+    el.querySelectorAll("[data-sel-adv]").forEach(c => c.onchange = () => {
+      const [id, si] = c.dataset.selAdv.split(":");
+      advSel[id + ":" + si] = c.checked;
+      renderQueue();
+    });
     el.querySelectorAll("[data-adv-add]").forEach(b => b.onclick = () => {
       const it = ADVANCED.find(a => a.id === b.dataset.advAdd);
       if (!it) return;
       const mir = document.getElementById("gb-mirror").checked;
-      for (const s of it.steps) if (s.kind === "ff") queueAdd(s.value, it.name, undefined, mir);
-      note(`advanced unlock “${it.name}” queued — irreversible OTP writes; values carry the BENCH card's defect masks, verify against this card before burning`, "warnl");
+      let n = 0;
+      it.steps.forEach((s, si) => {
+        if (s.kind === "ff" && advStepSelected(it.id, s)) { queueAdd(s.value, it.name, undefined, mir); n++; }
+      });
+      if (!n) { note(`advanced unlock “${it.name}”: no FF word selected — nothing queued`, "warnl"); return; }
+      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the BENCH card's defect masks, verify against this card before burning`, "warnl");
     });
   }
   function renderQueue() {
@@ -2456,9 +2607,9 @@ LIVEBOOT = r"""
     const asg = assignRows(burnQueue);
     el.innerHTML = burnQueue.map((q, i) => {
       const f = ffEffect(q.word);
-      const ex = existingRecordFor(q.word);
+      const st = lastWinsStatus(q.word);
       const a = asg ? asg.rows[i] : null;
-      return `<div class="qrow${ex !== null ? " qexists" : ""}">` +
+      return `<div class="qrow${st && st.state === "present" ? " qwarn" : ""}">` +
         `<span class="mono">#${i + 1}</span>` +
         `<span class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</span>` +
         (asg ? (a !== null
@@ -2466,7 +2617,11 @@ LIVEBOOT = r"""
             : `<span class="mono"><b class="bad">NO FREE ROW FOR BLOCK ${ffDecode(q.word).blk}</b></span>`) : "") +
         `<span class="note">${esc(f.key)}</span>` +
         (f.field === "DEVID" ? `<span class="note">device identity → 0x${f.devid.toString(16).toUpperCase()}</span>` : "") +
-        (ex !== null ? ` <span class="tag ok-tag">⚠ already in dump — row ${ex} (duplicate)</span>` : "") +
+        (st && st.state === "present"
+          ? ` <span class="tag prop-tag">⚠ already present — likely no-op (row ${st.row})</span>`
+          : st && st.state === "superseded"
+            ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow} — needs re-burn</span>`
+            : "") +
         `<span class="note">via ${esc(q.src)}</span>` +
         `<button class="btn" data-q-del="${i}">✕</button></div>`;
     }).join("");
@@ -2564,28 +2719,43 @@ LIVEBOOT = r"""
   function queuePlanRecords() {
     // single queue path for the planner's records: used by "Queue all needed
     // records" here AND by the INTENDED-state "Queue these burns" button
-    // (task 26) — same records, no divergence. Mirror follows the burn
-    // form's "burn mirror row too" setting — the same setting the proposal
-    // panel reads — so the queued rows equal the proposed rows.
+    // (task 26) — same records, no divergence. task 32: only the SELECTED
+    // words are queued (selection shared with the proposed panel); already-
+    // present words the user re-checked queue anyway and the queue row
+    // carries the "already present — likely no-op" warn tag. Mirror follows
+    // the burn form's "burn mirror row too" setting — the same setting the
+    // proposal panel reads — so the queued rows equal the proposed rows.
     const mirror = document.getElementById("gb-mirror").checked;
+    let n = 0;
     for (const p of suggestPlan()) for (const w of (p.pair ? p.words : [p.word]))
-      queueAdd(w, p.label, undefined, mirror);
-    note("all suggested records queued — review the queue, then start the campaign in burn mode", "okl");
+      if (planWordSelected(w)) { queueAdd(w, p.label, undefined, mirror); n++; }
+    if (!n) { note("no burn words selected — nothing queued", "warnl"); return; }
+    note(`${n} selected record(s) queued — review the queue, then start the campaign in burn mode`, "okl");
   }
   document.getElementById("plan-queue-all").onclick = queuePlanRecords;
+  document.getElementById("plan-sel-all").onclick = () => setAllPlanWordsSelected(true);
+  document.getElementById("plan-sel-none").onclick = () => setAllPlanWordsSelected(false);
+  // advanced card: one affordance for every FF word of every item
+  document.getElementById("adv-sel-all").onclick = () => setAllAdvStepsSelected(true);
+  document.getElementById("adv-sel-none").onclick = () => setAllAdvStepsSelected(false);
   // task 26: the INTENDED-state panel (top-level scope) renders from this
   // exact planner and queues through this exact path — single source.
   window.__suggestPlan = suggestPlan;
   window.__ffEffect = ffEffect;
-  window.__existingRecordFor = existingRecordFor;
+  // task 32: the proposed panel reads/writes the SAME selection state.
+  window.__planWordSelected = planWordSelected;
+  window.__setPlanWordSelected = setPlanWordSelected;
+  window.__setAllPlanWordsSelected = setAllPlanWordsSelected;
   // task 27: the proposal panel's row assignment = this exact allocator over
-  // the exact queue order and the exact mirror setting "Queue these burns"
-  // will use — proposed rows ARE the rows the queue will assign.
+  // the exact queue order, the SELECTED words and the exact mirror setting
+  // "Queue these burns" will use — proposed rows ARE the rows the queue
+  // will assign.
   window.__planRowAssignment = () => {
     const mirror = document.getElementById("gb-mirror").checked;
     const entries = [];
     for (const p of suggestPlan())
-      for (const w of (p.pair ? p.words : [p.word])) entries.push({word: w, mirror});
+      for (const w of (p.pair ? p.words : [p.word]))
+        if (planWordSelected(w)) entries.push({word: w, mirror});
     return assignRows(entries);
   };
   window.__queueProposedBurns = () => { queuePlanRecords(); switchTab("glitch"); };

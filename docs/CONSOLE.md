@@ -217,20 +217,22 @@ The live view of the selected card.
   `INTENDED` state, a panel below the TPC map lists the burn records that
   would achieve it — one row per planner record naming its **exact** target
   row (`row N → 0xWORD`, `+ mirror row M` when the burn form's mirror
-  setting is on; a word already present keeps its `already in dump (row X)`
-  line), the current word → proposed word (hex) and the units each word
-  re-enables. Proposals name their exact rows because the panel assigns
-  them through the SAME free-row allocator the burn queue uses (same dump,
-  same plan order, same mirror setting), so `Queue these burns` produces a
-  queue whose rows equal the proposed rows; if the safe zone runs out
-  mid-plan the word shows `NO FREE FF ROW — free space first` and the panel
-  header warns. Every row carries a `PROPOSED` badge and the header
+  setting is on), the current word → proposed word (hex) and the units each
+  word re-enables. Every word carries a selection checkbox (see *Per-burn
+  selection and LAST-WINS already-present marking* below); an unselected
+  word shows `not selected — not queued` and gets no row. Proposals name
+  their exact rows because the panel assigns them through the SAME free-row
+  allocator the burn queue uses (same dump, same plan order, SELECTED words
+  only, same mirror setting), so `Queue these burns` produces a queue whose
+  rows equal the proposed rows; if the safe zone runs out mid-plan the word
+  shows `NO FREE FF ROW — free space first` and the panel header warns
+  (counting SELECTED words). Every row carries a `PROPOSED` badge and the header
   states `PROPOSED — not burned; irreversible OTP writes pending a
   Goldilocks campaign`: these are proposals, not accomplished facts, and
   they never render in the `STOCK` or `NOW` views. The rows come from the
   SAME planner that feeds the Glitch & Burn tab's `Suggested burns` card
-  (one source, no divergence), and `Queue these burns` pushes exactly
-  those records into the burn queue and switches to that tab — queueable
+  (one source, no divergence), and `Queue these burns` pushes exactly the
+  SELECTED records into the burn queue and switches to that tab — queueable
   in one click. When the planner yields nothing the panel says
   `no burns proposed — card already at intended state`; after a real burn
   changes `NOW`, the panel recomputes on the next dump (fewer or no
@@ -301,16 +303,25 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   words. Each word is labeled **PROPOSED** and names its **concrete
   target row** (`row N → 0x…`, plus `+ mirror row N+1` when mirroring is
   on), computed by the SAME `assignRows` allocator the burn queue uses,
-  run over the current queue plus these records in queue order and the
-  mirror setting **⤓ Queue all needed records** will read — so the rows
+  run over the current queue plus the SELECTED records in queue order and
+  the mirror setting **⤓ Queue all needed records** will read — so the rows
   shown ARE the rows the queue assigns (proposal == queue by
   construction; no free-row fallback: placement is per block, so a word
   whose own block has no blank row after the block's last record shows
   `no free row after block B's last record` while the other words still
-  get concrete rows). **⤓ Queue all needed records** puts
-  them in the queue; already
-  equal masks report *this card needs no unlock burns*; a word already
-  present in the dump is tagged `ALREADY IN DUMP — row N`. An optional
+  get concrete rows). **⤓ Queue all needed records** puts the SELECTED
+  words in the queue (nothing selected → `no burn words selected — nothing
+  queued`); already
+  equal masks report *this card needs no unlock burns*; presence is judged
+  LAST-WINS (see *Per-burn selection and LAST-WINS already-present
+  marking* below): a word whose block's last live record already equals it
+  is tagged `ALREADY PRESENT (row N) — no burn needed` and defaults
+  UNticked; a word present in its block but overridden by a later record
+  is tagged `SUPERSEDED at row N — needs re-burn` and stays ticked. Every
+  word carries a selection checkbox; `select all` / `select none` sit
+  beside **⤓ Queue all needed records** and the same checkboxes appear on
+  the INTENDED-state panel (shared state, one `N of M word(s) selected`
+  pill). An optional
   **DEVID change** adds an identity A/B pair via **+ Queue DEVID A/B pair**
   (takes effect at next cold boot); the field is never pre-filled with a
   foreign demo value — it holds the loaded dump's own DEVID (decoded from
@@ -333,19 +344,50 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   blocks 8/12/15/16/17/23), so they must be checked against the shown
   card before burning. FF steps show PROPOSED target rows through the
   same `assignRows` allocator over the current queue plus the item's
-  steps (re-placed on the shown card — the plans' bench rows are shown
-  as provenance only, never as targets), and **+ queue** enqueues
-  exactly the item's FF words at those rows. Steps outside the queue's
+  SELECTED steps (re-placed on the shown card — the plans' bench rows are
+  shown as provenance only, never as targets), and **+ queue** enqueues
+  exactly the item's SELECTED FF words at those rows (per-word
+  checkboxes with `select all FF words` / `select none`; nothing selected →
+  `no FF word selected — nothing queued`). FF steps carry the same
+  LAST-WINS badges as the plan lists; DIRECT rows (<222) are judged
+  present when every delta bit is already set in the dump's row value.
+  An item badges `ALREADY PRESENT — no burn needed` when all its checked
+  steps are effective, else `PARTIALLY PRESENT (k/n: …)` naming the
+  effective words/rows. Steps outside the queue's
   path are flagged **MANUAL**: DIRECT rows (<222, plain OTP words, not
   FF records) and IFF words (bit 5 set — refused by the placement
   policy), because `burn_execute` accepts FF records at rows 222–487
   only; an item with no FF steps shows *no queueable FF records —
   manual burn path only*. Decode + attribution reasoning:
   `evidence/30-advanced-unlocks.md`.
+- **Per-burn selection and LAST-WINS already-present marking**: every word
+  in the three burn lists (INTENDED-state proposed panel, Suggested burns
+  card, Advanced unlocks FF steps) carries a checkbox; the proposed panel
+  and the Suggested card share ONE selection state, so their checkboxes
+  always agree. Default: a word is SELECTED unless it is already EFFECTIVE.
+  Presence is judged by the replay rule, not by string match: a word is
+  `ALREADY PRESENT (row N) — no burn needed` only when the LAST live record
+  of its own FF block equals it (rows 222–487, blank = 0x0/0xFFFFFFFF;
+  IFF words have no block replay and are never present) — such words
+  default UNticked. A matching word that a later record of the same block
+  overrides is `SUPERSEDED at row N — needs re-burn` and stays ticked: the
+  boot replay never reaches it, so re-burning is the fix, not a no-op.
+  Advanced DIRECT rows (<222, plain OTP words) are present when every
+  delta bit is already set in the dump's row value. `select all` /
+  `select none` reset the whole list. All queue paths (`⤓ Queue all needed
+  records`, `Queue these burns`, per-word `+ queue`, advanced `+ queue`)
+  and the proposal row allocator honour the selection — unselected words
+  are neither allocated rows nor queued, so proposal == queue holds under
+  any selection. Re-checking an already-present word queues it anyway; the
+  queue row then carries the amber `⚠ already present — likely no-op
+  (row N)` tag.
 - **Burn queue**: all queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement
-  policy). Custom records can be added by row + hex value (both start
+  policy). A queued word already EFFECTIVE under last-wins is highlighted
+  with the amber `⚠ already present — likely no-op (row N)` tag; a
+  superseded word shows `SUPERSEDED at row N — needs re-burn`. Custom
+  records can be added by row + hex value (both start
   empty; the **first free FF row** button fills the row with the first
   blank FF row of the loaded dump), optionally
   mirrored; **clear queue** empties it.
@@ -567,6 +609,7 @@ row field shows the zone verdict for whatever row you type.
 | row hint | `✓ safe zone` · `✗ occupied (boot FF)` · `✗ buffer zone` · `✗ SM reserve (keep free)` · `✗ revert tail (keep free)` · `✗ outside FF region` |
 | value source decode | `dump row N → 0x…` + decoded FF ch·blk·data (with block names) — verify before Check · blank/missing rows warn · IFF records flagged |
 | Preview burn button | enabled whenever row+value are set — **no window/arm/token requirement** (read-only works on a cold card and in mock); panel: verdict banner `SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`, before→Δ→after with delta bits highlighted, FF decode table, LAST-WINS collision badge (green win / red lose), amber hazard list, predicted effect, window/arm/journal strip |
+| burn selection badges / pill | per-word checkboxes on all three burn lists; pill `N of M word(s) selected`; badges `ALREADY PRESENT (row N) — no burn needed` (green, word defaults UNticked) · `SUPERSEDED at row N — needs re-burn` (amber, stays ticked) · advanced items `ALREADY PRESENT — no burn needed` / `PARTIALLY PRESENT (k/n: …)`; queue tag `⚠ already present — likely no-op (row N)` (amber) — presence judged LAST-WINS, see *Per-burn selection* |
 | budget pill | safe zone rows, free count, last boot FF row |
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = refused (bad phrase or server Goldilocks refusal, failing checks named) — the refusal stays visible until the phrase is edited or an arm succeeds |
 | Arm button | disabled until the current poll of the **selected** GPU says Goldilocks (tooltip `selected GPU not Goldilocks — glitch first`); re-evaluated on poll refresh and GPU-dropdown change; the server re-runs the 4-check pure-read at arm time |
