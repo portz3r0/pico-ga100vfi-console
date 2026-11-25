@@ -1074,6 +1074,15 @@ function renderProposedBurns() {
     }).join("");
   }
   html += `</tbody></table>`;
+  // task 39: disposition for disabled-but-not-defective fields we
+  // deliberately do NOT propose, so the panel answers every mask.
+  {
+    const sh = D.shadow || {};
+    const nv = (sh.NVLINK_DISABLE ?? 0) & ~(sh.NVLINK_DEFECTIVE ?? 0);
+    if (nv) html += `<div class="note" style="margin-top:6px">Not proposed: ` +
+      `NVLink disable ${fmt(nv)} — healthy but floorswept; this board has ` +
+      `no NVLink connector, so the floorsweep is kept (reference cards kept it too).</div>`;
+  }
   if (plan.length) {
     html += `<div class="frow" style="margin-top:8px">` +
       `<button class="btn" data-sel-all="1">select all</button>` +
@@ -2443,11 +2452,21 @@ LIVEBOOT = r"""
     renderQueue();
     renderProposedBurns();
   }
+  // task 39: per-card derivation — defect-derived chain1 words (GPC/TPC/
+  // FBP/FBPA offsets) in advanced unlocks are RECOMPUTED from the selected
+  // card's own disabled-minus-defective state; tested values remain only
+  // as config words (offs 7,9,16,17,20,23,26,27) and reference notes.
+  function advEffWord(s) {
+    if (s.kind !== "ff" || (s.value & 0x1F) !== 1) return s.value;
+    const pd = window.__perDieTargets || {};
+    const w = pd[(s.value >> 6) & 0x3FF];
+    return w === undefined ? s.value : w;
+  }
   function advStepSelected(id, step) {
     const s = ADVANCED.find(a => a.id === id);
     const k = id + ":" + s.steps.indexOf(step);
     if (k in advSel) return advSel[k];
-    const st = lastWinsStatus(step.value);
+    const st = lastWinsStatus(advEffWord(step));
     return !(st && st.state === "present");
   }
   function setAllAdvStepsSelected(on) {
@@ -2505,6 +2524,10 @@ LIVEBOOT = r"""
           tgt = ((tgt & ~(1 << b)) | (want << b)) & 0xFFFF;
         }
       }
+      // task 39: PES bits (word 15, bits 11-15) have no defect register —
+      // disabled-and-not-defective ⇒ floorsweep cleared, matching the
+      // reference cards that ran with these cleared.
+      if (off === 15) tgt &= ~0xF800;
       if (tgt === cur) continue;  // word already matches target (incl. absent=0) — no proposal
       const delta = on.length ? `re-enables ${on.join(", ")}` :
                     masked.length ? `masks ${masked.join(", ")} (defective)` : "no field change";
@@ -2512,14 +2535,14 @@ LIVEBOOT = r"""
         effect: `off${off} word ${fmt(cur)} → ${fmt(tgt)}` +
           (on.length ? ` — ${on.length} TPC(s) re-enabled` : "") +
           (masked.length ? ` — ${masked.length} defective stay masked` : "") +
-          (off === 15 ? " — PES bits preserved" : ""),
+          (off === 15 ? " — PES floorsweep cleared (no PES defect register; reference cards ran with these cleared)" : ""),
         recs: delta + (unknown.length ? ` (GPC${unknown.join(",GPC")} defect words unknown — untouched)` : "") });
     }
     if ((fbpDis & 0xFFF) !== (fbpDef & 0xFFF)) {
       const bits = [];
       for (let i = 0; i < 12; i++) if (((fbpDis & ~fbpDef) >> i) & 1) bits.push("FBP" + i);
       const gb = bits.length * 8;
-      out.push({ label: "FBP unlock", word: encFF(1, 19, (fbpDef & 0xFFF) << 3),
+      out.push({ label: "FBP unlock", word: encFF(1, 19, ((fbpDef & 0xFFF) << 3) | ((curWord[19] ?? 0) & 0x0007)),
         effect: `FBP_DISABLE ${fmt(fbpDis & 0xFFF)} → ${fmt(fbpDef & 0xFFF)}` +
           (bits.length ? ` — re-enables ${bits.join(", ")} (+${gb} GB)` : " — masks already equal"),
         recs: gb ? `+${gb} GB VRAM from healthy-but-floorswept stacks` : "no healthy FBP held off — nothing to gain" });
@@ -2535,6 +2558,30 @@ LIVEBOOT = r"""
           (bits.length ? ` — re-enables channels ${bits.join(", ")} (belong to the FBP unlock — burn together)` : " — masks already equal"),
         recs: "24-bit split field: off5 = low word, off6 = high word" });
     }
+    // task 39: per-card target word for EVERY defect-derived offset —
+    // changed or not — so advanced unlocks derive from the selected card
+    // instead of burning a previous card's sample value.
+    const pd = {};
+    pd[8] = encFF(1, 8, ((gpcDef & 0xFF) << 3) | ((curWord[8] ?? 0) & 0x0007));
+    for (let off = 11; off <= 15; off++) {
+      let t = 0;
+      for (let g = 0; g < 8; g++) {
+        const def = sh["TPC_DEFECTIVE_GPC" + g];
+        for (let tpc = 0; tpc < 8; tpc++) {
+          const bit = 187 + 8 * g + tpc;
+          if ((bit >> 4) !== off) continue;
+          const b = bit & 15;
+          const want = def == null ? ((curWord[off] ?? 0) >> b) & 1 : (def >> tpc) & 1;
+          if (want) t |= 1 << b;
+        }
+      }
+      pd[off] = encFF(1, off, t);
+    }
+    pd[19] = encFF(1, 19, ((fbpDef & 0xFFF) << 3) | ((curWord[19] ?? 0) & 0x0007));
+    { const w2 = ((fbpaDef & 0xFFFFFF) << 3) >>> 0;
+      pd[5] = encFF(1, 5, (w2 & 0xFFFF) | ((curWord[5] ?? 0) & 0x0007));
+      pd[6] = encFF(1, 6, (w2 >>> 16) & 0xFFFF); }
+    window.__perDieTargets = pd;
     return out;
   }
   function renderPlan() {
@@ -2628,7 +2675,7 @@ LIVEBOOT = r"""
       // task 32: last-wins presence per step — FF words through the shared
       // lastWinsStatus, DIRECT rows by delta-bit containment in the dump
       // rows; IFF macro words have no block replay, never "present".
-      const stOf = s => s.kind === "ff" ? lastWinsStatus(s.value)
+      const stOf = s => s.kind === "ff" ? lastWinsStatus(advEffWord(s))
         : s.kind === "direct" && directStepPresent(s) ? { state: "present" } : null;
       const checkedSteps = it.steps.filter(s => s.kind !== "iff");
       const effSteps = checkedSteps.filter(s => stOf(s) && stOf(s).state === "present");
@@ -2646,7 +2693,7 @@ LIVEBOOT = r"""
       const qIdx = {};
       burnQueue.forEach((q, i) => { if (!(q.word in qIdx)) qIdx[q.word] = i; });
       const extra = {};
-      selFf.forEach(s => { if (!(s.value in qIdx) && !(s.value in extra)) { extra[s.value] = entries.length; entries.push({word: s.value, mirror}); } });
+      selFf.forEach(s => { const w = advEffWord(s); if (!(w in qIdx) && !(w in extra)) { extra[w] = entries.length; entries.push({word: w, mirror}); } });
       const asg = assignRows(entries);
       // task 35g: steps render as the same table shape as the burn cards;
       // PROPOSED / VERIFIED / TESTED tags are kept per row.
@@ -2660,8 +2707,10 @@ LIVEBOOT = r"""
             ? ` <span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
             : "";
         if (s.kind === "ff") {
+          const eff = advEffWord(s);
+          const recomputed = eff !== s.value;
           const on = advStepSelected(it.id, s);
-          const a = on && asg ? asg.rows[s.value in qIdx ? qIdx[s.value] : extra[s.value]] : null;
+          const a = on && asg ? asg.rows[eff in qIdx ? qIdx[eff] : extra[eff]] : null;
           const rowCell =
             !on ? `<span class="note">not selected</span>`
             : !asg ? `<span class="note">rows pending</span>`
@@ -2670,11 +2719,12 @@ LIVEBOOT = r"""
           stepsHtml += `<tr class="pbrow${on ? "" : " pboff"}">` +
             `<td><input type="checkbox" class="psel" data-sel-adv="${it.id}:${si}"${on ? " checked" : ""} ` +
               `title="include this word in the queue"></td>` +
-            `<td class="mono">${hex(s.value)}</td>` +
+            `<td class="mono">${hex(eff)}</td>` +
             `<td>${rowCell}</td>` +
             `<td class="note">chain ${s.chain} · block ${s.block} · ${esc(s.field)}</td>` +
             `<td><span class="tag prop-tag">PROPOSED</span> ${conf(s.confidence)}${badge}</td>` +
             `<td class="note">` +
+              (recomputed ? `<b class="ok">recomputed from this card's defect words</b> (tested sample was ${hex(s.value)})<br>` : "") +
               (s.other_burn !== undefined ? `<b class="warn">per-die variant: another tested card burned ${hex((s.value & 0xFFFF) | ((s.other_burn & 0xFFFF) << 16))} (defect-driven)</b><br>` : "") +
               (s.note ? esc(s.note) : "") + `</td></tr>`;
           return;
@@ -2712,10 +2762,10 @@ LIVEBOOT = r"""
       const mir = document.getElementById("gb-mirror").checked;
       let n = 0;
       it.steps.forEach((s, si) => {
-        if (s.kind === "ff" && advStepSelected(it.id, s)) { queueAdd(s.value, it.name, undefined, mir); n++; }
+        if (s.kind === "ff" && advStepSelected(it.id, s)) { queueAdd(advEffWord(s), it.name, undefined, mir); n++; }
       });
       if (!n) { note(`advanced unlock “${it.name}”: no FF word selected — nothing queued`, "warnl"); return; }
-      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; values carry the tested card's defect masks, verify against this card before burning`, "warnl");
+      note(`advanced unlock “${it.name}” queued (${n} selected word(s)) — irreversible OTP writes; defect-derived words recomputed from THIS card, config words carry tested values`, "warnl");
     });
   }
   function renderQueue() {
