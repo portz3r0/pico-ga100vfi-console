@@ -48,6 +48,10 @@ def cmd_attempt(args) -> int:
                 args.t_restore, args.t_revert, args.fast, args.hold_ms,
                 args.pulses, args.pw, args.gap, args.delay, args.revert)
     with Card(args.port) as card:
+        if not args.no_unlock and not _ensure_unlocked(card):
+            print("attempt: VRM unlock failed — refusing to fire "
+                  "(would be a no-op)", file=sys.stderr)
+            return 2
         rep = card.attempt(a)
         print(f"pwd={rep.pwd} e1=0x{rep.e1:04x} nvvdd={rep.nvvdd} "
               f"writes_failed={rep.writes_failed}")
