@@ -407,6 +407,10 @@ def main(argv=None) -> int:
     a.add_argument("--gap", type=int, default=0, help="gap between pulses us (0=auto)")
     a.add_argument("--revert", type=int, default=1, choices=(0, 1),
                    help="1=hand back to PWM-VID after dip; 0=stay PMBus (fast campaigns)")
+    a.add_argument("--fast", type=int, default=1, choices=(0, 1),
+                   help="1=fast glitch timing (same as campaign/console path)")
+    a.add_argument("--hold-ms", type=int, default=0,
+                   help="ms to hold dip before restore (0=none, same as campaign)")
     a.add_argument("--no-unlock", action="store_true")
     a.add_argument("--trace", action="store_true")
     a.set_defaults(fn=cmd_attempt)
