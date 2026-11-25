@@ -2463,10 +2463,21 @@ LIVEBOOT = r"""
     const fbpaDisEff = auditWord(AOFF.FBPA_DIS_EFF, "FBPA_DISABLE_EFF").v ??
                        (sh.FBPA_DISABLE ?? 0);
     const out = [];
+    // task 38: last-wins CURRENT chain1 word per offset (mark-1 records;
+    // ffDecode's ch filter drops the mark-2 factory words). Non-field bits
+    // of a rewritten word are preserved — both tested cards kept off8/5
+    // bits 0-2 (0b110 / 0b111) in their final words.
+    const curWord = {};
+    for (const k of Object.keys(D.rows || {})) {
+      const r = +k, v = D.rows[k];
+      if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
+      const f = ffDecode(v);
+      if (f.ch === 1) curWord[f.blk] = f.data;   // rows ascend → last wins
+    }
     if (((gpcDis & 0xFF) !== (gpcDef & 0xFF)) && (gpcDef & 0xFF) !== 0 || (gpcDis & 0xFF) !== (gpcDef & 0xFF)) {
       const bits = [];
       for (let i = 0; i < 8; i++) if (((gpcDis & ~gpcDef) >> i) & 1) bits.push("GPC" + i);
-      out.push({ label: "GPC unlock", word: encFF(1, 8, (gpcDef & 0xFF) << 3),
+      out.push({ label: "GPC unlock", word: encFF(1, 8, ((gpcDef & 0xFF) << 3) | (curWord[8] ?? 0) & 0x0007),
         effect: `GPC_DISABLE ${fmt(gpcDis & 0xFF)} → ${fmt(gpcDef & 0xFF)}` +
           (bits.length ? ` — re-enables ${bits.join(", ")}` : " — masks already equal"),
         recs: gpcDef ? "re-enables every non-defective GPC" : "no defective GPCs — record would disable all (skip)" });
@@ -2477,13 +2488,7 @@ LIVEBOOT = r"""
     // TARGET per GPC = TPC_DEFECTIVE_GPC{g} shadow. Only words that actually
     // change are proposed; every non-TPC bit of a word (PES in word 15,
     // FBPA/GPC spill in words 5–8) is preserved from the current word.
-    const tpcCur = {};
-    for (const k of Object.keys(D.rows || {})) {
-      const r = +k, v = D.rows[k];
-      if (r < 222 || r > 487 || typeof v !== "number" || v === 0 || v === 0xFFFFFFFF) continue;
-      const f = ffDecode(v);
-      if (f.ch === 1 && f.blk >= 11 && f.blk <= 15) tpcCur[f.blk] = f.data;  // rows ascend → last wins
-    }
+    const tpcCur = curWord;
     for (let off = 11; off <= 15; off++) {
       const cur = tpcCur[off] ?? 0;
       let tgt = cur;
@@ -2521,7 +2526,7 @@ LIVEBOOT = r"""
     }
     if ((fbpaDisEff & 0xFFFFFF) !== (fbpaDef & 0xFFFFFF)) {
       const w = ((fbpaDef & 0xFFFFFF) << 3) >>> 0;
-      const lo = w & 0xFFFF, hi = (w >>> 16) & 0xFFFF;
+      const lo = (w & 0xFFFF) | ((curWord[5] ?? 0) & 0x0007), hi = (w >>> 16) & 0xFFFF;
       const bits = [];
       for (let i = 0; i < 24; i++) if (((fbpaDisEff & ~fbpaDef) >> i) & 1) bits.push("FBPA" + i);
       out.push({ label: "FBPA unlock (2 words)", pair: true,
