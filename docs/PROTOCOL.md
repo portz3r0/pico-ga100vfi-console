@@ -55,15 +55,31 @@ is the captured-rail average and is **present only in the debug build**
 
 | Cmd | Meaning |
 |---|---|
-| `u` | Unlock the MP2888B (password `0x7C25`) |
+| `u` | Unlock the MP2888B (password `0x7C25`), then always re-write reg `0x13` = `0x00` and config ID `0x46` = `0x1229` and read both back (see below) |
 | `z` | Lock status → `cml=0x<hh> pwd=<0|1> e1=0x<hh><hh> vout=0x<hh><hh>` |
-| `v` | Status → debug build: `clk=<n> MHz  nvvdd=<v.vvvv> V  sample_ns=<f>  last reset: <…>`; normal build: `clk=<n> MHz  last reset: <…>` |
+| `v` | Status → debug build: `clk=<n> MHz  nvvdd=<v.vvvv> V  sample_ns=<f>  last reset: <…>`; normal build: `clk=<n> MHz  last reset: <…>  fw=lab-psr1` |
 | `y` | NVVDD trace → header `trace n=<n> sample_ns=<f>` then `<n>` hex samples; `trace: built without DEBUG` in the normal build |
 | `w` | Revert |
-| `k` / `K` | Apply `fast` / `stock` MP2888B transient-response profile |
+| `k` / `K` | `k`: capture the card's own six transient-response registers, then apply the `fast` profile; `K`: write the **captured** values back (nothing captured → nothing written) |
 | `b` | Reboot RP2350 into USB BOOTSEL mode |
 
-`MATCH` in the `u` response means the password was accepted.
+`MATCH` in the `u` response means the password was accepted. Every `u` then
+prints a second line, `unlock <MATCH|LOCKED|ERR> wp=<hh|ERR> cfg=<hhhh|ERR>[
+write=ERR]` (`unlock MATCH wp=00 cfg=1229` on a healthy controller): the two
+writes that stop the GA100's devinit re-locking the controller are now issued
+on **every** `u`, not skipped when CML still reports MATCH across a soft-off
+(stale-CML pitfall — the Pico stays powered over USB and the standby rail
+keeps MATCH while the registers revert). Both writes are idempotent.
+
+The `fast` profile (six MP2888B registers: 0xBA, 0xB9, 0x30, 0x31, 0x32,
+0x45) used to be followed by hard-coded "stock" values taken from one card;
+cards differ, so every shot left the controller with another card's settings.
+`g … fast=1` and `k` now **capture the card's own values first** and `K` /
+shot-end restore those; the capture refuses a set that already holds a fast
+value (an interrupted earlier shot) and the glitch ABORTs with
+`glitch ABORT: VRM profile capture failed or tainted (power-cycle the card)`.
+Firmware marker: banner `[lab: card profile save/restore]`, `v` line
+`fw=lab-psr1`.
 
 ## PMBus over the bridge
 

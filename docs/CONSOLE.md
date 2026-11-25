@@ -459,7 +459,7 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   selector (`hold open — no revert (default)` or `auto-revert VRM`).
   Buttons: **▶ Start campaign**, **■ Stop**, **⟲ Revert VRM** (enabled
   only while a window is held). Stats chips: attempts / valid / lost /
-  nack / dsov=0 / goldilocks / burn aborts / image verify / held window.
+  nack / poisoned / dsov=0 / goldilocks / burn aborts / image verify / held window.
 
 ### Drivers
 
@@ -556,11 +556,22 @@ The whole chase, in the order that actually works:
 3. Mode: `classify only — observe glitch states` — no burns.
 4. **▶ Start campaign** and watch the log: every shot gets a line with
    its `v_dip` and outcome — `under`, `crc_fail`, `warm`, `hit`, `over`,
-   `lost`, or `goldilocks` — plus the per-attempt classify values. The
+   `lost`, `poisoned`, or `goldilocks` — plus the per-attempt classify
+   values. The
    adaptive planner steers from every outcome (see
    [docs/ADAPTIVE.md](ADAPTIVE.md)); a hit prints `<< GOLDILOCKS` and the
    goldilocks chip flips to `YES`. The hit is appended to
    `<state-dir>/goldilocks.jsonl` with the card serial.
+   A **poisoned** fuse controller (FUSECTRL or DSOV reads `0xBADF____`)
+   is its own outcome, never `over`: it is not a voltage data point,
+   never reaches the planner, and **ends the boot** — poison persists
+   until a POWER CYCLE, so shooting on is pointless. Status reads stop
+   at a poisoned FUSECTRL too (further BAR0 reads on such a card are a
+   host-hang risk). `classify()` no longer writes `EN_SW_OVERRIDE`
+   after every shot (the write is opt-in via `CLASSIFY_WRITE=1`): the
+   register keeps its value across PEX_RST and would leave every later
+   shot of the boot under the software override — which also poisons
+   CMD_READ fuse reads for the die-ID gate and fusedump.
 5. **Goldilocks window hold (default):** the run ends with NVVDD still at
    glitch voltage and the shadow registers writable — a `window HELD open
    — verify/burn now, then Revert VRM or cold-boot` chip appears; close
@@ -675,7 +686,7 @@ row field shows the zone verdict for whatever row you type.
 | Arm button | disabled until the current poll of the **selected** GPU says Goldilocks (tooltip `selected GPU not Goldilocks — glitch first`); re-evaluated on poll refresh and GPU-dropdown change; the server re-runs the 4-check pure-read at arm time |
 | Burn now button | enabled only when checked **and** armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` · `idle` |
-| stats chips | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts (not final — attempts keep firing) / image verify failed (window NOT held) / `window HELD open — verify/burn now, then Revert VRM or cold-boot` |
+| stats chips | attempts / valid / lost / nack / poisoned / dsov=0 / goldilocks / burn aborts (not final — attempts keep firing) / image verify failed (window NOT held) / `window HELD open — verify/burn now, then Revert VRM or cold-boot` |
 | burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero latching writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
 
 ## Burn safety model (reference)
@@ -1148,6 +1159,7 @@ mock server):
 | Live pill: `BAR0 unreadable — bus hung or PCIe link down (normal mid-glitch / after reset)` | Normal during a campaign — the PCIe link drops on every shot and comes back. |
 | GPU Info shows an nvidia-smi error / "No devices were found" | Expected while the card is GFW-dead; the banner is honest, not an error. While the module is absent the console reports `driver not loaded — nvidia-smi skipped (NVML would auto-load the driver)`. |
 | Campaign start refused: `driver '<driver>' is bound to <bdf> — every glitch attempt reprograms PCI COMMAND/BAR0 via bar0.restore(), which corrupts GSP boots under a bound driver. Unload it from the Drivers tab first.` | AGENTS rule: never write PCI `COMMAND`/BAR0 under a bound driver. Drivers tab → **Unload nvidia stack**. |
+| Campaign log: `FUSE CONTROLLER POISONED (0xBADF____) — persists until a POWER CYCLE; stopping this boot` | The shot disturbed the fuse read; the controller stopped answering and further BAR0 reads risk hanging the host. Power-cycle the card; the next boot's shots are unaffected. Poison is NOT counted as `over` and never steers the planner. |
 | Campaign start refused: `v_dip <n> mV outside 200-500 — refusing (check for a typo)` | Fat-fingered v_dip; the firmware does not clamp `vd`. |
 | Campaign start refused: `adaptive range invalid: min_v <a> >= max_v <b>` | Swap the adaptive v min/max fields. |
 | Campaign start refused: `burn mode requires a valid arm token (type BURN in the burn panel, 120s TTL)` | Arm first; the token expires after 120 s. |
