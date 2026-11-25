@@ -237,6 +237,25 @@ static void unlock_cmd(void) {
     pmbus_w16(0x46, 0x1229);
 }
 
+// Runs after unlock_cmd() on every `u`: write reg 0x13 = 0x00 and config ID
+// 0x46 = 0x1229 (stops GPU devinit re-locking the controller) and read both
+// back. unlock_cmd() returns early when the controller already reports MATCH
+// (it can keep that across a soft-off while the Pico stays powered) and then
+// skipped both writes — the stale-CML pitfall. Both writes are idempotent.
+static void unlock_config(void) {
+    uint8_t cml = 0, wp = 0x00, cfg[2] = { 0, 0 };
+    bool wok = pmbus_w(0x13, &wp, 1);
+    wok &= pmbus_w16(0x46, 0x1229);
+    bool rwp = pmbus_r(0x13, &wp, 1);
+    bool rcfg = pmbus_r(0x46, cfg, 2);
+    bool rcml = pmbus_r(0x7E, &cml, 1);
+    printf("unlock %s wp=", !rcml ? "ERR" : (cml & 0x08) ? "MATCH" : "LOCKED");
+    if (rwp) printf("%02x", wp); else printf("ERR");
+    printf(" cfg=");
+    if (rcfg) printf("%02x%02x", cfg[1], cfg[0]); else printf("ERR");
+    printf("%s\n", wok ? "" : " write=ERR");
+}
+
 static void lock_status_cmd(void) {
     uint8_t cml, e1[2], v21[2];
     if (!pmbus_r(0x7E, &cml, 1) || !pmbus_r(0xE1, e1, 2) || !pmbus_r(0x21, v21, 2)) {
@@ -265,9 +284,47 @@ static bool profile_apply(bool fast) {
     return ok;
 }
 
+// Cards differ from the hard-coded "stock" values in PROFILE (one card here reads
+// 0xBA=0x000e 0xB9=0x0039 0x31=0x1872). Capture the card's own values right before
+// the fast profile and write those back afterwards, instead of the table. Never
+// capture a set that already holds a fast value (an interrupted shot).
+static uint16_t prof_saved[PROFILE_N];
+static bool prof_saved_ok = false;
+
+static bool profile_capture(void) {
+    uint16_t cur[PROFILE_N];
+    bool tainted = false;
+    for (unsigned i = 0; i < PROFILE_N; i++) {
+        uint8_t b[2] = { 0, 0 };
+        if (!pmbus_r(PROFILE[i].reg, b, 2)) return false;
+        cur[i] = (uint16_t)(b[0] | (b[1] << 8));
+        if (cur[i] == PROFILE[i].fast) tainted = true;
+    }
+    if (tainted) return prof_saved_ok;   // keep the earlier capture, never save fast values
+    for (unsigned i = 0; i < PROFILE_N; i++) prof_saved[i] = cur[i];
+    prof_saved_ok = true;
+    return true;
+}
+
+static bool profile_restore(void) {
+    if (!prof_saved_ok) return false;    // nothing captured: write nothing
+    bool ok = true;
+    for (unsigned i = 0; i < PROFILE_N; i++) ok &= pmbus_w16(PROFILE[i].reg, prof_saved[i]);
+    return ok;
+}
+
 static void profile_cmd(bool fast) {
-    printf("profile %s:", fast ? "fast" : "stock");
-    profile_apply(fast);
+    if (fast) {
+        if (!profile_capture()) { printf("profile fast: ABORT capture failed or tainted (power-cycle the card)\n"); return; }
+        printf("profile fast (saved:");
+        for (unsigned i = 0; i < PROFILE_N; i++) printf(" %02x=%04x", PROFILE[i].reg, prof_saved[i]);
+        printf("):");
+        profile_apply(true);
+    } else {
+        if (!prof_saved_ok) { printf("profile restore: nothing captured, nothing written\n"); return; }
+        printf("profile restore:");
+        profile_restore();
+    }
     for (unsigned i = 0; i < PROFILE_N; i++) {
         uint8_t b[2] = { 0, 0 };
         pmbus_r(PROFILE[i].reg, b, 2);
@@ -461,7 +518,15 @@ static void glitch_cmd(char *line) {
 
     i2c_baud_hz = 1000000;
     if (i2c_up) { i2c_deinit(I2C_BUS); i2c_up = false; }
-    if (fast) profile_apply(true);
+    if (fast) {
+        if (!profile_capture()) {
+            i2c_baud_hz = 100000;
+            if (i2c_up) { i2c_deinit(I2C_BUS); i2c_up = false; }
+            printf("glitch ABORT: VRM profile capture failed or tainted (power-cycle the card)\n");
+            return;
+        }
+        profile_apply(true);
+    }
 
     printf("glitch vd=%d td=%d vr=%d tr=%d tv=%d fast=%d hold=%d pw=%d gap=%d delay=%d revert=%d\n",
            vd, td, vr, tr, tv, fast, hold_ms, pw, gap, delay, revert);
@@ -485,7 +550,7 @@ static void glitch_cmd(char *line) {
         if (!ok) wfail++;
     }
     capture_stop();
-    if (fast) profile_apply(false);
+    if (fast) { if (!profile_restore()) wfail++; }
     sleep_ms(30);
     i2c_baud_hz = 100000;
     if (i2c_up) { i2c_deinit(I2C_BUS); i2c_up = false; }
@@ -575,7 +640,7 @@ int main(void) {
     stdio_init_all();
     i2c_pins_float();
     sleep_ms(1500);
-    printf("\npwmvid: %u MHz, wiring: I2C + PEX_RST",
+    printf("\npwmvid: %u MHz, wiring: I2C + PEX_RST [lab: card profile save/restore]",
            clock_get_hz(clk_sys) / 1000000);
 #ifdef DEBUG
     printf(" + NVVDD ADC (GP%d) [debug build]\n", PIN_NVVDD_ADC);
@@ -611,11 +676,11 @@ int main(void) {
                    clock_get_hz(clk_sys) / 1000000,
                    nvvdd_v, sample_ns, reset_note);
 #else
-            printf("clk=%u MHz  last reset: %s\n",
+            printf("clk=%u MHz  last reset: %s  fw=lab-psr1\n",
                    clock_get_hz(clk_sys) / 1000000, reset_note);
 #endif
         }
-        else if (c == 'u') unlock_cmd();
+        else if (c == 'u') { unlock_cmd(); unlock_config(); }
         else if (c == 'z') lock_status_cmd();
         else if (c == 'y') trace_dump(0);
         else if (c == 'w') revert_cmd();
