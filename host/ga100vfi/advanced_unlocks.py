@@ -14,10 +14,14 @@ console re-places records on the shown card via its own allocator. Tested
 burns used ONE row per FF record — no mirror rows; mirror rows are an
 opt-in console option only.
 
-These burns are IRREVERSIBLE OTP writes and are NOT derived from the shown
-card's defect masks: the data words carry the TESTED cards' defect masks
-(steps where the value is known to vary per die carry an `other_burn`
-variant). Check every word against the shown card before burning.
+These burns are IRREVERSIBLE OTP writes. The console RECOMPUTES every
+chain-1 compute-unlock word from the SHOWN card's own defect readouts
+(evidence/40 §3); only fields whose readout is missing from the loaded
+dump carry the card's own current word bits, and the console labels each
+one. The values below are the TESTED cards' words — shown as the
+reference recipe (steps where the value is known to vary per die carry an
+`other_burn` variant). Check every word against the shown card before
+burning.
 
 Not every step of the tested plans is an unlock: they also burn chain-2
 blocks 37/38 data 0x416A = DEVID 0x20B5 "A100" (stock 0x4184 = 0x20C2
@@ -165,10 +169,13 @@ ADVANCED_UNLOCKS: list[dict] = [
                   "boot macro WRITE_DW SS0=0x88888888 / SS1=0x00000008 — the "
                   "permanent FMA/SM-speed lift (cmpunlocker: 'Full SM "
                   "compute throughput (SS0/SS1)', 'POST-WRITE "
-                  "SS0=0x88888888 SS1=0x00000008'). Values carry the TESTED "
-                  "card's defect masks — NOT this card's; the queueable "
-                  "words below must be checked against the shown card's "
-                  "defect masks before burning. IFF rows 484-487 are "
+                  "SS0=0x88888888 SS1=0x00000008'). The console "
+                  "recomputes these words from the shown card's defect "
+                  "readouts; fields whose readout is missing from the "
+                  "loaded dump carry the card's own current word and are "
+                  "labelled. The words below are the tested cards' "
+                  "reference values — check every word against the shown "
+                  "card before burning. IFF rows 484-487 are "
                   "refused by the FF placement policy (bit 5 set) — manual "
                   "path."),
         "steps": _COMPUTE_FF + [

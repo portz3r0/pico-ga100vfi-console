@@ -84,6 +84,19 @@ SHADOW_REGS = {
     "FBPA_DEFECTIVE":   0x8205D0,
     "NVLINK_DISABLE":   0x820684,
     "NVLINK_DEFECTIVE": 0x82068C,
+    # Defect planes for the remaining compute-unlock FF fields (offsets =
+    # FF_FIELD_DEFECT, service.py). 0x820698/0x8205E8/0x8203AC have never
+    # been read on this fleet (evidence/40 §2) — the SHADOW_REGS capture
+    # loop tolerates a failed read (value None) so one unreadable plane
+    # cannot kill the shadow dict; the console then CARRIES that field's
+    # bits from the card's current word and labels it (evidence/40 §3).
+    # NOTE: the raw hex-window sweep below reads these offsets UNGUARDED
+    # (pre-existing sweep behaviour) — a plane that faults on EVERY read
+    # would still die there, not here.
+    "PES_DEFECTIVE":    0x820698,
+    "ROP_L2_DEFECTIVE": 0x8205E8,
+    "SYS_PIPE_DEFECTIVE": 0x8203AC,
+    "FBIO_DEFECTIVE":   0x8205D4,
     "STATUS_OPT_GPC":   0x820C1C,
     "STATUS_OPT_FBP":   0x820D38,
 }
@@ -127,6 +140,20 @@ KNOWN_GOOD_ROW0 = 0x53557C3D
 
 def bits(mask):
     return sorted(i for i in range(32) if (mask >> i) & 1)
+
+
+# Fingerprint input: the EXPLICIT four defect planes + SBFE only. Adding
+# SHADOW_REGS keys must never change existing dumps' fingerprints, so this
+# tuple is deliberately NOT derived from SHADOW_REGS (evidence/40 §4).
+FP_KEYS = ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
+           "NVLINK_DEFECTIVE")
+
+
+def fingerprint(shadow, sbfe):
+    """Dump fingerprint over FP_KEYS (None/unreadable counts as 0)."""
+    src = "".join(f"{(shadow.get(k) or 0):08x}" for k in FP_KEYS) \
+        + str((sbfe or 0) & 1)
+    return hashlib.sha256(src.encode()).hexdigest()[:16]
 
 
 def tpc_summary(shadow, hexwin=None):
@@ -375,7 +402,13 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         # ---- 3. shadow registers
         shadow = {}
         for name, off in SHADOW_REGS.items():
-            shadow[name] = bar.rd(off)
+            try:
+                shadow[name] = bar.rd(off)
+            except Exception:
+                # unreadable plane (never-read offsets may fault or answer
+                # garbage): record None — the console carries that field's
+                # bits from the card's current word and labels it.
+                shadow[name] = None
         for i in range(8):
             shadow[f"TPC_DEFECTIVE_GPC{i}"] = bar.rd(TPC_DEFECT_FF[i])
             shadow[f"TPC_FFDISABLE_GPC{i}"] = bar.rd(TPC_FFDIS_BASE + 4 * i)
@@ -384,8 +417,12 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         res["shadow"] = dict(shadow)
         for name in ("GPC_DISABLE", "GPC_DEFECTIVE", "FBP_DISABLE",
                      "FBP_DEFECTIVE", "FBPA_DISABLE", "FBPA_DEFECTIVE",
-                     "NVLINK_DISABLE", "NVLINK_DEFECTIVE"):
-            log(f"  {name:16s} 0x{shadow[name]:08X}  bits {bits(shadow[name])}")
+                     "NVLINK_DISABLE", "NVLINK_DEFECTIVE", "FBIO_DEFECTIVE",
+                     "PES_DEFECTIVE", "ROP_L2_DEFECTIVE",
+                     "SYS_PIPE_DEFECTIVE"):
+            v = shadow[name]
+            log(f"  {name:16s} " + (f"0x{v:08X}  bits {bits(v)}"
+                                    if v is not None else "UNREADABLE"))
 
         # ---- 4. raw hex window
         hexwin = []
@@ -442,12 +479,12 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
         if isinstance(crc, int):
             res["crc_ok"] = (crc & 0xFF) == 0x55
         res["ceilings"] = {
-            "live_gpc": 8 - len(bits(shadow.get("GPC_DISABLE", 0))),
-            "max_gpc": 8 - len(bits(shadow.get("GPC_DEFECTIVE", 0))),
-            "live_fbp": 12 - len(bits(shadow.get("FBP_DISABLE", 0))),
-            "max_fbp": 12 - len(bits(shadow.get("FBP_DEFECTIVE", 0))),
-            "live_mem_gb": (12 - len(bits(shadow.get("FBP_DISABLE", 0)))) * 8,
-            "max_mem_gb": (12 - len(bits(shadow.get("FBP_DEFECTIVE", 0)))) * 8,
+            "live_gpc": 8 - len(bits(shadow.get("GPC_DISABLE") or 0)),
+            "max_gpc": 8 - len(bits(shadow.get("GPC_DEFECTIVE") or 0)),
+            "live_fbp": 12 - len(bits(shadow.get("FBP_DISABLE") or 0)),
+            "max_fbp": 12 - len(bits(shadow.get("FBP_DEFECTIVE") or 0)),
+            "live_mem_gb": (12 - len(bits(shadow.get("FBP_DISABLE") or 0))) * 8,
+            "max_mem_gb": (12 - len(bits(shadow.get("FBP_DEFECTIVE") or 0))) * 8,
         }
         res["tpc"] = tpc_summary(shadow, hexwin)
         t = res["tpc"]["totals"]
@@ -455,10 +492,7 @@ def dump_card(bdf, out, rows, clear_override=True, log=print):
             f"({t['sm_defective']} SM) · recoverable {t['tpc_recoverable']} TPC "
             f"({t['sm_recoverable']} SM) · SM now {t['sm_now']} → "
             f"post-unlock ceiling {t['sm_max']}")
-        fp_src = "".join(f"{shadow[k]:08x}" for k in
-                         ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
-                          "NVLINK_DEFECTIVE")) + str((sbfe or 0) & 1)
-        res["fingerprint"] = hashlib.sha256(fp_src.encode()).hexdigest()[:16]
+        res["fingerprint"] = fingerprint(shadow, sbfe)
     finally:
         bar.close()
     res["finished"] = datetime.now().isoformat()

@@ -621,6 +621,7 @@ HTML = r"""<!DOCTYPE html>
 
 <script id="dumpdata" type="application/json">__PAYLOAD__</script>
 <script id="advanceddata" type="application/json">__ADVANCED__</script>
+<script id="ffcatdata" type="application/json">__FFCAT__</script>
 <script>
 "use strict";
 let D = JSON.parse(document.getElementById("dumpdata").textContent);
@@ -628,6 +629,26 @@ let D = JSON.parse(document.getElementById("dumpdata").textContent);
 // signed plans — single source host/ga100vfi/advanced_unlocks.py, embedded
 // by build_html (see the Advanced unlocks card in the Glitch & Burn tab).
 const ADVANCED = JSON.parse(document.getElementById("advanceddata").textContent);
+// task 41: chain-1 FF field catalog [name, global_bit_start, width],
+// embedded from service.FF_FIELDS — the SAME catalog the server's plane
+// gate uses. Global bit g lives in block g//16, data bit g%16.
+const FF_CAT = JSON.parse(document.getElementById("ffcatdata").textContent);
+// Same overlap arithmetic as service.ff_fields_for (data window of a block).
+function ffFieldsFor(block) {
+  const lo = block * 16, out = [];
+  for (const [name, g, w] of FF_CAT) {
+    const a = Math.max(g, lo), b = Math.min(g + w, lo + 16);
+    if (a < b) out.push({name, g, w, dlo: a - lo, n: b - a, fbit0: a - g});
+  }
+  return out;
+}
+// Shadow key holding a field's dead-silicon readout (dump.json shadow
+// names; mirrors FF_FIELD_DEFECT's register set, service.py).
+function defectKey(name) {
+  return name.startsWith("TPC_GPC")
+    ? "TPC_DEFECTIVE_" + name.split("_")[1]
+    : name.replace("_DISABLE", "_DEFECTIVE");
+}
 // task 35c: the burn queue is declared HERE (page script, var → global) so
 // the proposed-burns panel can read it during first paint, before the
 // live-boot script loads; the live-boot script uses this same binding.
@@ -1453,8 +1474,12 @@ function renderShadow() {
     FBP_DEFECTIVE: [0x8205CC, "dummy stacks — missing silicon"],
     FBPA_DISABLE: [0x820368, "per-FBPA floorsweep"],
     FBPA_DEFECTIVE: [0x8205D0, "per-FBPA defects"],
+    FBIO_DEFECTIVE: [0x8205D4, "per-FBIO defects (memory subpartitions)"],
     NVLINK_DISABLE: [0x820684, "NVLink floorsweep"],
     NVLINK_DEFECTIVE: [0x82068C, ""],
+    PES_DEFECTIVE: [0x820698, "dead PES units"],
+    ROP_L2_DEFECTIVE: [0x8205E8, "dead ROP/L2 slices"],
+    SYS_PIPE_DEFECTIVE: [0x8203AC, "dead sys-pipe units"],
     STATUS_OPT_GPC: [0x820C1C, "replayed GPC option status — the latch to watch after a burn"],
     STATUS_OPT_FBP: [0x820D38, "replayed FBP option status — the latch to watch after a burn"],
   };
@@ -2528,10 +2553,13 @@ LIVEBOOT = r"""
     renderQueue();
     renderProposedBurns();
   }
-  // task 39: per-card derivation — defect-derived chain1 words (GPC/TPC/
-  // FBP/FBPA offsets) in advanced unlocks are RECOMPUTED from the selected
-  // card's own disabled-minus-defective state; tested values remain only
-  // as config words (offs 7,9,16,17,20,23,26,27) and reference notes.
+  // task 39/41: per-card derivation — EVERY compute-unlock chain1 word in
+  // advanced unlocks is RECOMPUTED from the selected card's own defect
+  // readouts (window.__perDieTargets, built by suggestPlan from the
+  // embedded FF_FIELDS catalog); fields whose readout is missing from the
+  // loaded dump carry the card's current word bits and are labelled
+  // (window.__perDieCarried). Tested values remain only for blocks the
+  // derivation does not cover (chain 2, IFF/DIRECT steps).
   function advEffWord(s) {
     if (s.kind !== "ff" || (s.value & 0x1F) !== 1) return s.value;
     const pd = window.__perDieTargets || {};
@@ -2569,6 +2597,38 @@ LIVEBOOT = r"""
       const f = ffDecode(v);
       if (f.ch === 1) curWord[f.blk] = f.data;   // rows ascend → last wins
     }
+    // task 41: per-card target word for EVERY compute-unlock chain-1 block
+    // (evidence/40 §3) — catalog-driven placement of the SELECTED card's
+    // own defect readouts at the FF field positions of FF_FIELDS (embedded
+    // as ffcatdata, same source the server's plane gate uses). A field
+    // whose defect readout is missing from this dump CARRIES the card's
+    // current last-wins bits — never enable a unit of unknown status (the
+    // Nov-24 brick class) — and is labelled in the advanced-unlocks table.
+    // Non-field bits: block 5 data 0-2 preserved (both reference cards
+    // kept 0b111 there); every other non-field bit → 0 (both reference
+    // cards cleared block 8 data 11-15 and blocks 9/26/27 despite
+    // non-zero pre-burn values). Blocks 9/26/27 carry no catalog field →
+    // word 0x0000, the tested value, UNVERIFIED flag kept.
+    const pd = {}, pdCarried = {};
+    for (const blk of [5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 19, 20, 23, 26, 27]) {
+      let word = 0;
+      const carried = [];
+      for (const f of ffFieldsFor(blk)) {
+        const mask = (1 << f.n) - 1;
+        const v = sh[defectKey(f.name)];
+        if (v != null) {
+          word |= ((v >>> f.fbit0) & mask) << f.dlo;
+        } else {
+          word |= (((curWord[blk] ?? 0) >>> f.dlo) & mask) << f.dlo;
+          carried.push(f.name);
+        }
+      }
+      if (blk === 5) word |= (curWord[5] ?? 0) & 0x0007;
+      pd[blk] = encFF(1, blk, word);
+      if (carried.length) pdCarried[blk] = carried;
+    }
+    window.__perDieTargets = pd;
+    window.__perDieCarried = pdCarried;
     if (((gpcDis & 0xFF) !== (gpcDef & 0xFF)) && (gpcDef & 0xFF) !== 0 || (gpcDis & 0xFF) !== (gpcDef & 0xFF)) {
       const bits = [];
       for (let i = 0; i < 8; i++) if (((gpcDis & ~gpcDef) >> i) & 1) bits.push("GPC" + i);
@@ -2579,31 +2639,32 @@ LIVEBOOT = r"""
     }
     // TPC unlock — chain1 offs 11–15 carry OPT_TPC_GPC{g}_DISABLE at global
     // bit 187+8g (ray schema plane FF, word = bit//16). CURRENT values come
-    // from the DUMP's last-wins chain1 records (NOT shadow registers);
-    // TARGET per GPC = TPC_DEFECTIVE_GPC{g} shadow. Only words that actually
-    // change are proposed; every non-TPC bit of a word (PES in word 15,
-    // FBPA/GPC spill in words 5–8) is preserved from the current word.
+    // from the DUMP's last-wins chain1 records (NOT shadow registers); the
+    // TARGET word IS pd[off] from the catalog-driven derivation above —
+    // single source, so the proposal word and the advanced-unlocks eff word
+    // are the same value by construction. This loop only names the TPC
+    // deltas for the effect string. PES bits (word 15, data 11-15) follow
+    // the same rule as every other field: derived from this card's
+    // PES_DEFECTIVE when the dump has that readout, carried from the
+    // current word when it does not. Reference card A ran with PES bits
+    // 3-5 masked (burned 15=0xC080, 16=0x0001) while card B cleared them —
+    // that difference is per-die PES defects, not a floorsweep to clear.
     const tpcCur = curWord;
     for (let off = 11; off <= 15; off++) {
       const cur = tpcCur[off] ?? 0;
-      let tgt = cur;
+      const tgt = (pd[off] >>> 16) & 0xFFFF;
       const on = [], masked = [], unknown = [];
       for (let g = 0; g < 8; g++) {
         const def = sh["TPC_DEFECTIVE_GPC" + g];
-        if (def == null) { unknown.push(g); continue; }  // defects unknown — leave bits untouched
+        if (def == null) { unknown.push(g); continue; }  // defects unknown — pd carries these bits
         for (let t = 0; t < 8; t++) {
           const bit = 187 + 8 * g + t;
           if ((bit >> 4) !== off) continue;
           const b = bit & 15, want = (def >> t) & 1;
           if (((cur >> b) & 1) && !want) on.push(`GPC${g} TPC${t}`);
           if (!(((cur >> b) & 1)) && want) masked.push(`GPC${g} TPC${t}`);
-          tgt = ((tgt & ~(1 << b)) | (want << b)) & 0xFFFF;
         }
       }
-      // task 39: PES bits (word 15, bits 11-15) have no defect register —
-      // disabled-and-not-defective ⇒ floorsweep cleared, matching the
-      // reference cards that ran with these cleared.
-      if (off === 15) tgt &= ~0xF800;
       if (tgt === cur) continue;  // word already matches target (incl. absent=0) — no proposal
       const delta = on.length ? `re-enables ${on.join(", ")}` :
                     masked.length ? `masks ${masked.join(", ")} (defective)` : "no field change";
@@ -2611,8 +2672,10 @@ LIVEBOOT = r"""
         effect: `off${off} word ${fmt(cur)} → ${fmt(tgt)}` +
           (on.length ? ` — ${on.length} TPC(s) re-enabled` : "") +
           (masked.length ? ` — ${masked.length} defective stay masked` : "") +
-          (off === 15 ? " — PES floorsweep cleared (no PES defect register; reference cards ran with these cleared)" : ""),
-        recs: delta + (unknown.length ? ` (GPC${unknown.join(",GPC")} defect words unknown — untouched)` : "") });
+          (off === 15 ? (sh.PES_DEFECTIVE != null
+              ? " — PES bits from this card's PES defect readout"
+              : " — PES bits carried (no PES defect readout in this dump)") : ""),
+        recs: delta + (unknown.length ? ` (GPC${unknown.join(",GPC")} defect words unknown — carried)` : "") });
     }
     if ((fbpDis & 0xFFF) !== (fbpDef & 0xFFF)) {
       const bits = [];
@@ -2634,30 +2697,9 @@ LIVEBOOT = r"""
           (bits.length ? ` — re-enables channels ${bits.join(", ")} (belong to the FBP unlock — burn together)` : " — masks already equal"),
         recs: "24-bit split field: off5 = low word, off6 = high word" });
     }
-    // task 39: per-card target word for EVERY defect-derived offset —
-    // changed or not — so advanced unlocks derive from the selected card
-    // instead of burning a previous card's sample value.
-    const pd = {};
-    pd[8] = encFF(1, 8, ((gpcDef & 0xFF) << 3) | ((curWord[8] ?? 0) & 0x0007));
-    for (let off = 11; off <= 15; off++) {
-      let t = 0;
-      for (let g = 0; g < 8; g++) {
-        const def = sh["TPC_DEFECTIVE_GPC" + g];
-        for (let tpc = 0; tpc < 8; tpc++) {
-          const bit = 187 + 8 * g + tpc;
-          if ((bit >> 4) !== off) continue;
-          const b = bit & 15;
-          const want = def == null ? ((curWord[off] ?? 0) >> b) & 1 : (def >> tpc) & 1;
-          if (want) t |= 1 << b;
-        }
-      }
-      pd[off] = encFF(1, off, t);
-    }
-    pd[19] = encFF(1, 19, ((fbpDef & 0xFFF) << 3) | ((curWord[19] ?? 0) & 0x0007));
-    { const w2 = ((fbpaDef & 0xFFFFFF) << 3) >>> 0;
-      pd[5] = encFF(1, 5, (w2 & 0xFFFF) | ((curWord[5] ?? 0) & 0x0007));
-      pd[6] = encFF(1, 6, (w2 >>> 16) & 0xFFFF); }
-    window.__perDieTargets = pd;
+    // task 39/41: per-card target words for every compute-unlock offset are
+    // in pd (built above, before the proposals) — advanced unlocks derive
+    // from the selected card instead of burning a previous card's sample.
     return out;
   }
   function renderPlan() {
@@ -2801,6 +2843,11 @@ LIVEBOOT = r"""
             `<td><span class="tag prop-tag">PROPOSED</span> ${conf(s.confidence)}${badge}</td>` +
             `<td class="note">` +
               (recomputed ? `<b class="ok">recomputed from this card's defect words</b> (tested sample was ${hex(s.value)})<br>` : "") +
+              // task 41: fields whose defect plane is missing from this
+              // dump carry the card's current word — say so explicitly,
+              // never silently (evidence/40 §3).
+              (((window.__perDieCarried || {})[s.block]) || [])
+                .map(n => `<b class="warn">no ${n.replace(/_DISABLE$/, "")} defect readout in this dump — current word carried</b><br>`).join("") +
               (s.other_burn !== undefined ? `<b class="warn">per-die variant: another tested card burned ${hex((s.value & 0xFFFF) | ((s.other_burn & 0xFFFF) << 16))} (defect-driven)</b><br>` : "") +
               (s.note ? esc(s.note) : "") + `</td></tr>`;
           return;
@@ -4080,8 +4127,16 @@ def build_html(payload, live):
     # the single source); same </ escape so it can never break the JSON tag.
     advanced_json = json.dumps(ADVANCED_UNLOCKS,
                                separators=(",", ":")).replace("</", "<\\/")
+    # task 41: chain-1 FF field catalog for the page's per-die derivation —
+    # the SAME FF_FIELDS the server's plane gate uses (service.py is the
+    # single source; lazy import because service imports gui at module
+    # level). Entries: [name, global_bit_start, width].
+    from .service import FF_FIELDS
+    ffcatalog_json = json.dumps(FF_FIELDS.get(1, []),
+                                separators=(",", ":")).replace("</", "<\\/")
     return (HTML.replace("__PAYLOAD__", payload_json)
                 .replace("__ADVANCED__", advanced_json)
+                .replace("__FFCAT__", ffcatalog_json)
                 .replace("__LIVEBAR__", livebar)
                 .replace("__LIVEBOOT__", liveboot))
 

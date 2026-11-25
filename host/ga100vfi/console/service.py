@@ -731,10 +731,7 @@ def bound_dump_api():
         crc = regs.get(fd.CRC_STATUS)
         if isinstance(crc, int):
             d["crc_ok"] = (crc & 0xFF) == 0x55
-        fp_src = "".join(f"{shadow[k] or 0:08x}" for k in
-                         ("GPC_DEFECTIVE", "FBP_DEFECTIVE", "FBPA_DEFECTIVE",
-                          "NVLINK_DEFECTIVE")) + str((regs.get(fd.SBFE) or 0) & 1)
-        d["fingerprint"] = hashlib.sha256(fp_src.encode()).hexdigest()[:16]
+        d["fingerprint"] = fd.fingerprint(shadow, regs.get(fd.SBFE))
         out = dump_out_dir(serial, bdf,
                            datetime.now().strftime("%Y%m%d-%H%M%S-bound"))
         os.makedirs(out, exist_ok=True)

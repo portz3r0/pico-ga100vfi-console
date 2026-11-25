@@ -377,11 +377,19 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   TESTED but UNVERIFIED: proven to copy, not yet understood. No recipe
   or card-name provenance text appears anywhere in the UI; steps whose
   value is known to vary per die carry a `per-die variant: another
-  tested card burned 0x… (defect-driven)` note. These are **IRREVERSIBLE
-  OTP writes and are NOT derived from the shown card's defect masks** —
-  the data words carry the **tested cards'** defect masks (they differ
-  per-die at chain-1 blocks 8/12/15/16/17/23), so they must be checked
-  against the shown card before burning. FF steps show PROPOSED target
+  tested card burned 0x… (defect-driven)` note. **Every chain-1
+  compute-unlock word is RECOMPUTED from the shown card's own defect
+  readouts** (GPC/TPC/FBP/FBPA/FBIO/NVLINK/PES/ROP_L2/SYS_PIPE
+  `_DEFECTIVE`, placed at the logical-field bit positions of the
+  170HX-RAY catalog — `evidence/40` §3); the tested words remain only as
+  the reference recipe shown beside each row. When a plane's readout is
+  missing from the loaded dump (old dumps predate PES/ROP_L2/SYS_PIPE/
+  FBIO capture), that field's bits **carry the card's own current word**
+  — nothing of unknown status is ever enabled — and the row is labelled
+  `no <plane> defect readout in this dump — current word carried`; take
+  a fresh full dump to get all readouts and the full derivation. These
+  remain **IRREVERSIBLE OTP writes** — check every word against the
+  shown card before burning. FF steps show PROPOSED target
   rows through the
   same `assignRows` allocator over the current queue plus the item's
   SELECTED steps (re-placed on the shown card — the plans' original rows
