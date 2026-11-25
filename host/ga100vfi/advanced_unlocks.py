@@ -100,6 +100,18 @@ _COMPUTE_FF = [
 # One tested card burned one extra record the others did not: chain1 block 17
 # (PES upper, bits 272-274) data 0x0000. Kept as a note, not a queueable step.
 
+# NO CHAIN-0 MIRROR STEPS 2026-11-25 (task 44, corrects the task-44 brief):
+# the signed plans' STEP entries burn every FF row in TWO physical writes
+# (ga100_burn.py issues one CMD_WRITE per STEP delta): first data+block with
+# the chain bits zero — a chain-0 INTERMEDIATE word — then the chain bits
+# (batch1 rows 308-324, batch2 rows 326-341). Decoding each STEP entry as a
+# record makes those intermediates look like "chain-0 mirror records with
+# data identical to the chain-1 words". The FINAL arrays hold no chain-0 FF
+# record in 222-487 on either tested card: both plan POST images, GPU1's
+# post-burn dump (sn-1322321006870/20261124-112031) and both pre-burn
+# Nov-18 dumps agree. The golden recipe therefore has no chain-0 steps;
+# host/tests/test_chain0_golden.py locks this in. History: evidence/44.
+
 # REMOVED 2026-11-25 (operator ruling): the "gen4-permanent" item (chain-2
 # blocks 39/47/49, from the external CMPGlitch/cmp_gen4.md source) is NOT
 # offered anymore. GPU1 and GPU2 both ran those burns (the signed plans
