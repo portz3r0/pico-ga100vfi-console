@@ -57,3 +57,5 @@ still carry tested values; 5/6/8/11-15/19 already derived via __perDieTargets).
 | 43 | Goal check: console proposals vs GPU1/GPU2 recipes | orchestrator | DONE d1a7ec1 (derivation==burned words AND PROPOSED==QUEUED for both cards) |
 | 43b | Drop gen4-permanent item (Gen4 = riser, operator ruling) | orchestrator | SUPERSEDED — operator corrected same day: Gen4 REQUIRES 39/47/49 (+ riser). Restored 83e46c6, deployed HP, gates green |
 | 44 | chain-0 mirror records = golden recipe (DEVID + gen4 stay excluded) | subagent | DONE 6811a67 — FINDING: NO chain-0 records exist; the 'mirrors' were two-stage STEP artifacts (stage-1 marker words, bit0=0). Golden recipe complete as-is. Orchestrator re-verified (rows appear 2x, 0x80070140->0x80070141) + test green |
+
+| 45 | Campaign exhausted on lab-psr1 fw -> rolled back to dalzyu build | orchestrator | DONE (100 shots, boundary ~330mV straddled, 8 over-class dsov=0; dalzyu fw flashed via console, banner verified; A/B test pending) |
