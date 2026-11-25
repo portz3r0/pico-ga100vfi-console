@@ -276,7 +276,12 @@ class Bar:
             # invariant — fusedump must never issue CMD_WRITE or SENSE_CTRL
             raise RuntimeError(
                 "REFUSING: FUSECTRL write with CMD_WRITE/SENSE bits set")
-        struct.pack_into("<I", self.mm, o, v & 0xFFFFFFFF)
+        # one aligned store — pack_into would flash 0x00000000 through the
+        # register first (see bar0.wr32); FUSEADDR/FUSEWDATA readers share
+        # this mapping
+        mv = memoryview(self.mm)[o:o + 4].cast("I")
+        mv[0] = v & 0xFFFFFFFF
+        mv.release()
 
     def idle(self, timeout=1.0):
         t0 = time.time()

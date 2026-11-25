@@ -132,7 +132,14 @@ class Bar:
                    or (address == ADDR and 0 <= value < ROW_COUNT)
                    or (address == EN and value in (0, 1)))
         require(allowed, "Write outside collector read-operation allowlist")
-        struct.pack_into("<I", self.mm, address, value)
+        # one aligned store — pack_into would flash 0x00000000 through the
+        # register first (see bar0.wr32); write_checked could sample it
+        mm = self.mm
+        if mm is None:
+            raise CaptureError("collector mapping is closed")
+        mv = memoryview(mm)[address:address + 4].cast("I")
+        mv[0] = value
+        mv.release()
 
     def write_checked(self, address, value):
         self.write32(address, value)

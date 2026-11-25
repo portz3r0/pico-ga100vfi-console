@@ -100,7 +100,16 @@ class Bar0:
         return struct.unpack_from("<I", self.mm, off)[0]
 
     def wr32(self, off: int, value: int) -> None:
-        struct.pack_into("<I", self.mm, off, value & 0xFFFFFFFF)
+        # ONE aligned 32-bit store. struct.pack_into memsets its destination
+        # before packing (Modules/_struct.c s_pack_internal) — on this mmap
+        # that is a PCIe write of 0x00000000 to the register followed by the
+        # value, and a concurrent reader on the shared mapping can catch the
+        # zero (measured ~1% cross-process, both CPython 3.12 and 3.14).
+        # memoryview.cast does one native-endian store and nothing between;
+        # bench hosts are little-endian, offsets are 4-aligned.
+        mv = memoryview(self.mm)[off:off + 4].cast("I")
+        mv[0] = value & 0xFFFFFFFF
+        mv.release()
 
     def close(self) -> None:
         self.mm.close()
