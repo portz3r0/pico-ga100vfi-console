@@ -268,6 +268,10 @@ HTML = r"""<!DOCTYPE html>
   #auditbg { display: none; position: fixed; inset: 0; z-index: 50;
              background: rgba(4,8,14,.72); overflow: auto; padding: 36px 16px; }
   #auditbg.open { display: block; }
+  #dpbg { display: none; position: fixed; inset: 0; z-index: 50;
+          background: rgba(4,8,14,.72); overflow: auto; padding: 36px 16px; }
+  #dpbg.open { display: block; }
+  #dpbg #dumppicker { max-width: 920px; margin: 0 auto; }
   #audit { max-width: 920px; margin: 0 auto; background: var(--card);
            border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
   #audit h3 { margin: 0 0 2px; font-size: 15px; }
@@ -527,18 +531,6 @@ HTML = r"""<!DOCTYPE html>
   <section id="tab-explorer" class="tabpane on" role="tabpanel" aria-labelledby="tabbtn-explorer">
   <div class="card verdict" id="cardless" style="display:none"></div>
   <div class="card verdict warnv" id="dumpsrc" style="display:none"></div>
-  <div class="card" id="dumppicker" style="display:none">
-    <div class="flexline" style="justify-content:space-between; align-items:center">
-      <b>Saved dumps — newest first</b>
-      <span class="flexline">
-      <button class="btn" id="dumppicker-dedupe"
-        title="Find saved dumps whose FUSE CONTENT is identical to another dump of the same card (timestamps/dmesg/lspci ignored). Each identical group keeps its oldest dump; anything different — one differing row, another card — is kept. Dry-run first, delete on confirm.">Dedupe</button>
-      <button class="btn" id="dumppicker-close">Close ✕</button>
-      </span>
-    </div>
-    <div class="card verdict" id="dedupebox" style="display:none;margin-top:8px"></div>
-    <div class="scroll" id="dumplist" style="margin-top:8px"></div>
-  </div>
   <div class="card verdict warnv" id="nodata" style="display:none"></div>
   <div id="dumpwrap">
   <h2>Status</h2>
@@ -605,6 +597,20 @@ HTML = r"""<!DOCTYPE html>
   </div>
 
   <div id="auditbg" role="dialog" aria-modal="true" aria-label="unit audit"><div id="audit"></div></div>
+  <div id="dpbg" role="dialog" aria-modal="true" aria-label="saved dumps">
+    <div class="card" id="dumppicker">
+      <div class="flexline" style="justify-content:space-between; align-items:center">
+        <b>Saved dumps — newest first</b>
+        <span class="flexline">
+        <button class="btn" id="dumppicker-dedupe"
+          title="Find saved dumps whose FUSE CONTENT is identical to another dump of the same card (timestamps/dmesg/lspci ignored). Each identical group keeps its oldest dump; anything different — one differing row, another card — is kept. Dry-run first, delete on confirm.">Dedupe</button>
+        <button class="btn" id="dumppicker-close">Close ✕</button>
+        </span>
+      </div>
+      <div class="card verdict" id="dedupebox" style="display:none;margin-top:8px"></div>
+      <div class="scroll" id="dumplist" style="margin-top:8px"></div>
+    </div>
+  </div>
 
   <footer>
     <span>data: ga100vfi.fusedump + ga100vfi.console</span>
@@ -1808,7 +1814,7 @@ LIVEBOOT = r"""
     document.getElementById("nodata-browse").onclick = openPicker;
   }
   function closePicker() {
-    document.getElementById("dumppicker").style.display = "none";
+    document.getElementById("dpbg").classList.remove("open");
   }
   async function openPickerList() {
     const list = document.getElementById("dumplist");
@@ -1835,13 +1841,12 @@ LIVEBOOT = r"""
       el.onclick = () => pickDump(el.dataset.dir));
   }
   async function openPicker() {
-    const p = document.getElementById("dumppicker");
-    p.style.display = "";
-    // The picker renders near the top of the content column: when the page
-    // is scrolled down, showing it alone looks like nothing happened.
-    // scrollIntoView honours #dumppicker's scroll-margin-top, so the
-    // heading lands below the sticky topbar, not under it.
-    p.scrollIntoView({ behavior: "smooth", block: "start" });
+    // modal popup (like the unit audit): reachable from every tab, the
+    // backdrop click and Escape close it — no longer an inline card that
+    // only exists inside the Fuse Explorer pane
+    const bg = document.getElementById("dpbg");
+    bg.classList.add("open");
+    bg.scrollTop = 0;
     await openPickerList();
   }
   function applyDumpData(j) {
@@ -2020,6 +2025,14 @@ LIVEBOOT = r"""
   document.getElementById("fulldump").onclick = fullDump;
   document.getElementById("dumpsbtn").onclick = e => { e.preventDefault(); openPicker(); };
   document.getElementById("dumppicker-close").onclick = closePicker;
+  document.getElementById("dpbg").addEventListener("click", e => {
+    if (e.target.id === "dpbg") closePicker();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" &&
+        document.getElementById("dpbg").classList.contains("open"))
+      closePicker();
+  });
   // ---- saved-dump dedupe: identical fuse content -> keep oldest, delete rest
   const kb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
               : n >= 1024 ? (n / 1024).toFixed(0) + " KB" : n + " B";
@@ -2398,7 +2411,9 @@ LIVEBOOT = r"""
       <div class="frow">
         <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
         <button class="btn" id="gc-ports-refresh" title="rescan serial ports">⟳ rescan</button>
+        <button class="btn" id="gc-flash" title="Flash firmware into the Pico 2 from the console: sends 'b' to the selected port (firmware BOOTSEL reboot), waits for the RP2350 drive, writes the .uf2 stored on this host (firmware/build/pwmvid.uf2 — build it on a workstation and scp it over), then reads the firmware banner back and shows it. The board reboots into the new firmware by itself.">⚡ Flash Pico 2</button>
         <span class="note" id="gc-portnote"></span>
+        <span class="note" id="gc-flashstate"></span>
         <div class="field"><label>mode</label>
           <select id="gc-mode">
             <option value="classify">classify only — observe glitch states</option>
@@ -3223,6 +3238,25 @@ LIVEBOOT = r"""
     } catch (e) {}
   }
   $("gc-ports-refresh").onclick = loadPorts;
+  $("gc-flash").onclick = async () => {
+    const b = $("gc-flash"), st = $("gc-flashstate");
+    b.disabled = true; st.className = "note";
+    st.textContent = "rebooting pico into BOOTSEL, writing uf2… (~15 s)";
+    try {
+      const j = await jpost("/api/pico/flash", {port: $("gc-port").value});
+      if (j.error) {
+        st.className = "bad";
+        st.textContent = "⚠ flash: " + j.error +
+          (j.steps && j.steps.length ? " — " + j.steps.join("; ") : "");
+      } else {
+        st.className = j.banner ? (j.fw_marker ? "ok" : "warn") : "warn";
+        st.textContent = "flashed " + (j.uf2 || "").split("/").pop() + ": " +
+          (j.banner || "wrote ok but " + (j.note || "port did not return"));
+      }
+    } catch (e) { st.className = "bad"; st.textContent = "⚠ " + e; }
+    b.disabled = false;
+    loadPorts();          // the port re-enumerates after a flash
+  };
   loadPorts();
 
   function updateArmState() {

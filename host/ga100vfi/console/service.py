@@ -100,6 +100,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import uuid
@@ -3065,6 +3066,138 @@ def dumps_dedupe(apply=False):
             "skipped_uncomparable": skipped}
 
 
+# ------------------------------------------------------------ pico flash
+FIRMWARE_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "..", "firmware"))
+
+
+def _pico_bootsel_drive():
+    """A Pico/Pico2 BOOTSEL mass-storage (RPI-RP2 on RP2040, RP2350 on
+    RP2350) present on this host: (dev, label) or (None, None)."""
+    out = sh(["lsblk", "-rno", "NAME,LABEL,FSTYPE"])
+    if out.startswith("<<"):
+        return None, None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].upper() in ("RPI-RP2", "RP2350"):
+            return "/dev/" + parts[0], parts[1]
+    return None, None
+
+
+def _pico_boot_bootsel(port):
+    """Send 'b' — the firmware's own reboot-into-BOOTSEL. None on success,
+    an error string otherwise."""
+    try:
+        import serial
+        s = serial.Serial(port, 115200, timeout=1)
+        try:
+            s.write(b"b\n")
+            time.sleep(0.4)
+        finally:
+            s.close()
+        return None
+    except Exception as e:
+        return f"cannot open pico port {port}: {e}"
+
+
+def _pico_mount(dev, mnt):
+    if not sh(["mount", dev, mnt]).startswith("<<") and os.path.ismount(mnt):
+        return None
+    sh(["sudo", "-n", "mount", dev, mnt])
+    return None if os.path.ismount(mnt) else f"mount {dev} on {mnt} failed"
+
+
+def _pico_umount(mnt):
+    sh(["sync"])
+    if not sh(["umount", mnt]).startswith("<<") and not os.path.ismount(mnt):
+        return True
+    sh(["sudo", "-n", "umount", mnt])
+    return not os.path.ismount(mnt)
+
+
+def pico_flash_api(body):
+    """POST /api/pico/flash — flash a firmware .uf2 into the Pico 2 from
+    the console. Sends 'b' to the pico port (the firmware's BOOTSEL
+    reboot) unless a BOOTSEL drive is already up, waits for the RP2
+    mass-storage, mounts it, copies the .uf2 (the drive auto-detaches and
+    the board reboots on write), then reopens the serial port and reads
+    the firmware banner back — the console reports what actually RUNS on
+    the board, not just 'copy succeeded'. The console host needs no
+    toolchain: build the .uf2 on a workstation and drop it at
+    <repo>/firmware/build/pwmvid.uf2 (or the state dir)."""
+    port = str(body.get("port") or "/dev/ttyACM0")
+    uf2 = str(body.get("uf2") or "").strip()
+    cands = ([uf2] if uf2 else []) + [
+        os.path.join(CFG.get("state_dir") or "/tmp", "pwmvid.uf2"),
+        os.path.join(FIRMWARE_DIR, "build", "pwmvid.uf2"),
+        os.path.join(FIRMWARE_DIR, "pwmvid.uf2")]
+    uf2 = next((c for c in cands if os.path.isfile(c)), None)
+    if not uf2:
+        return {"error": "no firmware .uf2 on this host — build one "
+                         "(cmake -DPICO_BOARD=pico2_w … && make pwmvid.uf2) "
+                         "and place it at " + cands[-1] + " or "
+                         + os.path.join(CFG.get("state_dir") or "/tmp",
+                                        "pwmvid.uf2")}
+    steps = []
+    dev, label = _pico_bootsel_drive()
+    if dev is None:
+        err = _pico_boot_bootsel(port)
+        if err:
+            return {"error": err + " — and no BOOTSEL drive is present; "
+                                   "hold BOOTSEL while reconnecting the "
+                                   "Pico, then retry", "steps": steps}
+        steps.append(f"sent 'b' to {port} — rebooting into BOOTSEL")
+        for _ in range(40):
+            time.sleep(0.5)
+            dev, label = _pico_bootsel_drive()
+            if dev:
+                break
+    if dev is None:
+        return {"error": "no RP2 BOOTSEL drive appeared within 20 s",
+                "steps": steps}
+    steps.append(f"BOOTSEL drive {dev} ({label}) is up")
+    mnt = os.path.join(tempfile.gettempdir(), "ga100vfi-flash")
+    os.makedirs(mnt, exist_ok=True)
+    if not os.path.ismount(mnt):
+        err = _pico_mount(dev, mnt)
+        if err:
+            return {"error": err, "steps": steps}
+    try:
+        shutil.copyfile(uf2, os.path.join(mnt, os.path.basename(uf2)))
+        steps.append(f"wrote {os.path.basename(uf2)} "
+                     f"({os.path.getsize(uf2)} bytes) — drive auto-detaches")
+    except OSError as e:
+        return {"error": f"copy to {mnt} failed: {e}", "steps": steps}
+    finally:
+        if not _pico_umount(mnt):
+            steps.append("warning: unmount did not settle — the Pico "
+                         "re-enumerates anyway; recheck the drive")
+    banner = None
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            import serial
+            s = serial.Serial(port, 115200, timeout=1)
+            try:
+                time.sleep(0.3)
+                s.reset_input_buffer()
+                s.write(b"v\n")
+                time.sleep(0.4)
+                banner = s.read(400).decode(errors="replace").strip()
+            finally:
+                s.close()
+            if banner:
+                break
+        except Exception:
+            banner = None
+    return {"flashed": True, "uf2": uf2, "steps": steps, "banner": banner,
+            "fw_marker": "lab-psr1" in (banner or ""),
+            "note": ("banner read back over " + port if banner else
+                     port + " did not come back within 10 s — check the "
+                           "port name / rescan")}
+
+
 # ------------------------------------------------------- stock baseline
 def stock_path(serial):
     return os.path.join(dumps_dir(), f"sn-{serial}", "stock.json")
@@ -3576,6 +3709,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = arm_api(body)
             elif path == "/api/dumps/dedupe":
                 resp = dumps_dedupe(bool(body.get("apply")))
+            elif path == "/api/pico/flash":
+                resp = pico_flash_api(body)
             elif path == "/api/driver/op":
                 resp = driver_op_api(body)
             elif path == "/api/bound_dump":

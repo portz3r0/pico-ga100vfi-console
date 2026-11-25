@@ -180,13 +180,16 @@ The live view of the selected card.
   live to show.` / `No dump yet for this card (serial X).`) with a
   **Browse saved dumps** button; another card's dump is never rendered by
   default.
-- **Saved dumps (header button)**: explicit history browser. The picker
+- **Saved dumps (header button)**: explicit history browser, opened as a
+  **modal popup** (same pattern as the unit audit) so it works from every
+  tab — backdrop click or Escape closes it. The picker
   lists every saved dump newest-first (`serial · timestamp ·
   driver-bound/UNVERIFIED flags · rows`, `(current card)` tag; unreadable
-  dirs shown as such); opening it scrolls the picker into view just below
-  the sticky header (so it is never opened off-screen when the page is
-  scrolled down) and the list scrolls internally (max-height 430px) so
+  dirs shown as such); the list scrolls internally so
   hundreds of saved dumps stay usable; closing it never scrolls the page.
+  A **Dedupe** button in the picker header dry-runs the identical-content
+  scan (see `/api/dumps/dedupe`) and deletes the duplicates only after
+  you press the confirm button.
   Selecting one loads it into the explorer panels
   under the stale chrome: dimmed panels + strip `Browsing saved dump —
   serial X, dumped <ts>` with a **← Back to current** button that leaves
@@ -991,6 +994,7 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; **identity gate re-checked at execution** — `identity gate: …` refuses before any write; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN", bdf?, dump?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`) **and on the identity gate** (serial readable + live die-ID rows 8–15 match `dump` — a dumps-relative dir, else the newest same-serial dump; see "Dump identity"): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; identity failure → error `identity gate: …`, no token; success adds `bdf` + `checks` dict + `die_id` verdict |
 | POST | `/api/dumps/dedupe` | `{apply?}` — drop saved dumps whose **fuse content** is identical to another dump of the same card: same serial + same rows dict (timestamps/dmesg/lspci ignored). Each identical group keeps its **oldest** dump; anything different — one differing row, another card's serial, a dump without a rows dict — is kept. Dry-run by default; `apply: true` deletes. Never touches `stock.json`; the die-ID gate still resolves (the kept dump carries the same rows). GUI: **Dedupe** button in the Saved dumps picker (dry-run panel → confirm) |
+| POST | `/api/pico/flash` | `{port?, uf2?}` — flash firmware into the Pico 2 from the console: sends `b` to the pico port (the firmware's own BOOTSEL reboot; skipped when a BOOTSEL drive is already up), waits for the RP2350/RPI-RP2 mass-storage, mounts it, copies the `.uf2` (drive auto-detaches, board reboots), then **reads the firmware banner back** over the port and reports `fw_marker`. The console host needs no toolchain — build the `.uf2` on a workstation and drop it at `<repo>/firmware/build/pwmvid.uf2` (or the state dir); `uf2` overrides the path. GUI: **⚡ Flash Pico 2** button next to the pico port dropdown |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` (`blacklist`/`unload` need `confirm: true`) |
 | GET | `/api/gpu` | nvidia-smi + lspci link state (`?bdf=` any GPU on the host) |
