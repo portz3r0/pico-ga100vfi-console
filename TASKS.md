@@ -56,4 +56,4 @@ still carry tested values; 5/6/8/11-15/19 already derived via __perDieTargets).
 | 42 | Independent verification of 41 (read-only, own tests) | subagent | DONE PASS (evidence/42; 3 non-blocking findings; finding-1 comment fixed in b48f7c3) |
 | 43 | Goal check: console proposals vs GPU1/GPU2 recipes | orchestrator | DONE d1a7ec1 (derivation==burned words AND PROPOSED==QUEUED for both cards) |
 | 43b | Drop gen4-permanent item (Gen4 = riser, operator ruling) | orchestrator | DONE b31d5d0, deployed HP, gates green |
-| 44 | chain-0 mirror records = golden recipe (DEVID + gen4 stay excluded) | subagent | RUNNING |
+| 44 | chain-0 mirror records = golden recipe (DEVID + gen4 stay excluded) | subagent | DONE 6811a67 — FINDING: NO chain-0 records exist; the 'mirrors' were two-stage STEP artifacts (stage-1 marker words, bit0=0). Golden recipe complete as-is. Orchestrator re-verified (rows appear 2x, 0x80070140->0x80070141) + test green |
