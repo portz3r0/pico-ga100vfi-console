@@ -53,4 +53,7 @@ still carry tested values; 5/6/8/11-15/19 already derived via __perDieTargets).
 |---|------|-------|--------|
 | 40 | READ-ONLY: formalize per-die derivation spec for remaining config words (evidence/40) | subagent | DONE evidence/40: rule = per-field placement of own DEFECTIVE at catalog bits; missing plane -> carry current word + label; A 17/17 PASS; 4 new SHADOW_REGS keys; live-today audit done |
 | 41 | Build: extend __perdieTargets + shadow capture + UI honesty labels (from evidence/40) | subagent | DONE cfa022b (agent exit2=commit-pending; orchestrator ran gate4b+docs+commit). 35/35b/35c green (35b labels + 35c threshold = verified record fixes: 35b failed on baseline too; 35c 16->13 = blocks 5/16/20 now ALREADY-PRESENT by design). New test 3x green; fingerprint stable |
-| 42 | Independent verification of 41 (read-only, own tests) | subagent | RUNNING |
+| 42 | Independent verification of 41 (read-only, own tests) | subagent | DONE PASS (evidence/42; 3 non-blocking findings; finding-1 comment fixed in b48f7c3) |
+| 43 | Goal check: console proposals vs GPU1/GPU2 recipes | orchestrator | DONE d1a7ec1 (derivation==burned words AND PROPOSED==QUEUED for both cards) |
+| 43b | Drop gen4-permanent item (Gen4 = riser, operator ruling) | orchestrator | DONE b31d5d0, deployed HP, gates green |
+| 44 | chain-0 mirror records = golden recipe (DEVID + gen4 stay excluded) | subagent | RUNNING |
