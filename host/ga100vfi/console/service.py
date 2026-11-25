@@ -93,6 +93,7 @@ import json
 import mmap
 import os
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -2994,6 +2995,76 @@ def dumps_get(rel):
     return 200, d
 
 
+def dumps_dedupe(apply=False):
+    """POST /api/dumps/dedupe — drop saved dumps whose FUSE CONTENT is
+    identical to another saved dump of the same card.
+
+    'Practically the same' = same serial AND the same rows dict, compared
+    over the fuse state only; timestamps, dmesg, lspci and every other
+    capture metadata are ignored. Anything genuinely different is kept:
+    one differing row, another card's serial (two stock cards can share
+    rows — different dies, both kept), or a dump without a rows dict
+    (content unprovable — never touched). Each identical group keeps its
+    OLDEST dump (the first record; stock provenance reads that way) and
+    the newer duplicates go. stock.json is a file beside the dump dirs,
+    never a dump dir — untouched by construction. Dry-run by default;
+    apply=True deletes. The die-ID gate survives: it resolves the newest
+    same-serial dump with rows 8-15, and an identical older one carries
+    the same rows."""
+    root = dumps_dir()
+    groups, skipped = {}, 0
+    for dd in _bundle_dump_dirs():          # oldest first
+        rel = os.path.relpath(dd, root)
+        try:
+            with open(os.path.join(dd, "dump.json")) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        rows = d.get("rows")
+        if not isinstance(rows, dict) or not rows:
+            skipped += 1                    # content unprovable: keep
+            continue
+        try:
+            norm = {str(k): int(v) for k, v in rows.items()}
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        key = hashlib.sha256(json.dumps(
+            [d.get("serial"), norm], sort_keys=True).encode()).hexdigest()
+        groups.setdefault(key, []).append((dd, rel, d))
+    out_groups, removed, freed = [], [], 0
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        keep_dd, keep_rel, keep_d = members[0]
+        dups = []
+        for dd, rel, d in members[1:]:
+            size = sum(os.path.getsize(os.path.join(dp, fn))
+                       for dp, _, fns in os.walk(dd) for fn in fns)
+            freed += size
+            entry = {"dir": rel, "dumped": d.get("started"),
+                     "bytes": size,
+                     "driver_bound": bool(d.get("driver_bound"))}
+            dups.append(entry)
+            if apply:
+                shutil.rmtree(dd)
+                removed.append(rel)
+        g = {"key": key[:12], "serial": members[0][2].get("serial"),
+             "row_count": len(members[0][2].get("rows") or {}),
+             "kept": keep_rel, "kept_dumped": keep_d.get("started"),
+             "duplicates": dups}
+        if apply:
+            g["deleted"] = True
+        out_groups.append(g)
+    out_groups.sort(key=lambda g: g["kept_dumped"] or "", reverse=True)
+    return {"dry_run": not apply, "groups": out_groups,
+            "identical_groups": len(out_groups),
+            "duplicates": sum(len(g["duplicates"]) for g in out_groups),
+            "removed": removed, "freed_bytes": freed,
+            "skipped_uncomparable": skipped}
+
+
 # ------------------------------------------------------- stock baseline
 def stock_path(serial):
     return os.path.join(dumps_dir(), f"sn-{serial}", "stock.json")
@@ -3503,6 +3574,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = burn_preview_api(body)
             elif path == "/api/arm":
                 resp = arm_api(body)
+            elif path == "/api/dumps/dedupe":
+                resp = dumps_dedupe(bool(body.get("apply")))
             elif path == "/api/driver/op":
                 resp = driver_op_api(body)
             elif path == "/api/bound_dump":

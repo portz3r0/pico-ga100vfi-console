@@ -530,8 +530,13 @@ HTML = r"""<!DOCTYPE html>
   <div class="card" id="dumppicker" style="display:none">
     <div class="flexline" style="justify-content:space-between; align-items:center">
       <b>Saved dumps — newest first</b>
+      <span class="flexline">
+      <button class="btn" id="dumppicker-dedupe"
+        title="Find saved dumps whose FUSE CONTENT is identical to another dump of the same card (timestamps/dmesg/lspci ignored). Each identical group keeps its oldest dump; anything different — one differing row, another card — is kept. Dry-run first, delete on confirm.">Dedupe</button>
       <button class="btn" id="dumppicker-close">Close ✕</button>
+      </span>
     </div>
+    <div class="card verdict" id="dedupebox" style="display:none;margin-top:8px"></div>
     <div class="scroll" id="dumplist" style="margin-top:8px"></div>
   </div>
   <div class="card verdict warnv" id="nodata" style="display:none"></div>
@@ -1805,14 +1810,7 @@ LIVEBOOT = r"""
   function closePicker() {
     document.getElementById("dumppicker").style.display = "none";
   }
-  async function openPicker() {
-    const p = document.getElementById("dumppicker");
-    p.style.display = "";
-    // The picker renders near the top of the content column: when the page
-    // is scrolled down, showing it alone looks like nothing happened.
-    // scrollIntoView honours #dumppicker's scroll-margin-top, so the
-    // heading lands below the sticky topbar, not under it.
-    p.scrollIntoView({ behavior: "smooth", block: "start" });
+  async function openPickerList() {
     const list = document.getElementById("dumplist");
     list.innerHTML = '<span class="note">loading saved dumps…</span>';
     let arr;
@@ -1835,6 +1833,16 @@ LIVEBOOT = r"""
     }).join("");
     list.querySelectorAll(".dumptrow[data-dir]").forEach(el =>
       el.onclick = () => pickDump(el.dataset.dir));
+  }
+  async function openPicker() {
+    const p = document.getElementById("dumppicker");
+    p.style.display = "";
+    // The picker renders near the top of the content column: when the page
+    // is scrolled down, showing it alone looks like nothing happened.
+    // scrollIntoView honours #dumppicker's scroll-margin-top, so the
+    // heading lands below the sticky topbar, not under it.
+    p.scrollIntoView({ behavior: "smooth", block: "start" });
+    await openPickerList();
   }
   function applyDumpData(j) {
     const hex = j.hexnonzero; delete j.hexnonzero;
@@ -2012,6 +2020,58 @@ LIVEBOOT = r"""
   document.getElementById("fulldump").onclick = fullDump;
   document.getElementById("dumpsbtn").onclick = e => { e.preventDefault(); openPicker(); };
   document.getElementById("dumppicker-close").onclick = closePicker;
+  // ---- saved-dump dedupe: identical fuse content -> keep oldest, delete rest
+  const kb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+              : n >= 1024 ? (n / 1024).toFixed(0) + " KB" : n + " B";
+  function renderDedupe(j, applied) {
+    const box = document.getElementById("dedupebox");
+    if (!j.groups || !j.groups.length) {
+      box.style.display = "";
+      box.innerHTML = `<b class="ok">No identical dumps.</b> ` +
+        `<span class="note">${j.skipped_uncomparable} dump(s) without a ` +
+        `rows dict were left alone (content unprovable).</span>`;
+      return;
+    }
+    const rows = j.groups.map(g =>
+      `<div style="margin-top:6px"><span class="mono">${esc(g.serial || "no serial")}</span>` +
+      ` · ${g.row_count} rows · keep <span class="mono">${esc(g.kept)}</span>` +
+      ` <span class="note">(${esc(g.kept_dumped || "?")})</span><br>` +
+      g.duplicates.map(d => `<span class="bad">delete</span> ` +
+        `<span class="mono">${esc(d.dir)}</span> <span class="note">` +
+        `(${esc(d.dumped || "?")}, ${kb(d.bytes)}` +
+        (d.driver_bound ? ", driver-bound" : "") + `)</span>`).join("<br>") +
+      `</div>`).join("");
+    box.style.display = "";
+    box.innerHTML = (applied
+        ? `<b class="ok">Deleted ${j.removed.length} duplicate dump(s)</b>` +
+          ` — ${kb(j.freed_bytes)} freed.`
+        : `<b>${j.identical_groups} identical group(s)</b> — ` +
+          `${j.duplicates} duplicate dump(s), ${kb(j.freed_bytes)} to free. ` +
+          `Oldest kept per group; different content is never touched.<br>` +
+          rows +
+          `<div style="margin-top:8px"><button class="btn badl" id="dedupe-apply">` +
+          `Delete ${j.duplicates} duplicate(s)</button></div>`) +
+      (j.skipped_uncomparable ? `<br><span class="note">${j.skipped_uncomparable} ` +
+        `dump(s) without a rows dict left alone.</span>` : "");
+    const ab = document.getElementById("dedupe-apply");
+    if (ab) ab.onclick = async () => {
+      ab.disabled = true; ab.textContent = "deleting…";
+      try {
+        const r = await jpost("/api/dumps/dedupe", {apply: true});
+        renderDedupe(r, true);
+        openPickerList();          // refresh the list under the panel
+      } catch (e) {
+        ab.disabled = false; ab.textContent = "delete failed — retry";
+      }
+    };
+  }
+  document.getElementById("dumppicker-dedupe").onclick = async () => {
+    const box = document.getElementById("dedupebox");
+    box.style.display = "";
+    box.innerHTML = '<span class="note">comparing fuse content…</span>';
+    try { renderDedupe(await jpost("/api/dumps/dedupe", {}), false); }
+    catch (e) { box.innerHTML = '<span class="bad">⚠ ' + esc(String(e)) + "</span>"; }
+  };
 
   // ---- driver-bound guarded capture (paused live view is not a dead end) ----
   const BOUND_ACTIONS = "Issues 512 fuse CMD_READs x2 passes; writes ONLY " +
