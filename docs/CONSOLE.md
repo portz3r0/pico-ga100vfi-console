@@ -901,6 +901,23 @@ slots change between boots. Dumps are therefore keyed by the card's
   this console first saw it has stock = state at first sight — the
   provenance line is what it claims, nothing more.
 
+- **Identity gate at burn time** (die-ID witness): serials key the dump
+  archive, but a serial is a *label* — InfoROM is writable, and a failed
+  read used to degrade silently to a BDF fallback. A burn therefore also
+  reads the **die ID** — fuse rows 8–15, factory OTP per die, never
+  touched by any burn in our plans — through the same fuse macro the burn
+  uses (`CMD_READ`, two passes, unstable reads refuse; `EN_SW_OVERRIDE`
+  cleared and restored around the reads, `FUSEADDR` restored). The live
+  rows must match the dump the payload is sourced from (the shown dump in
+  the GUI; else the newest same-serial dump carrying rows 8–15). Enforced
+  at `/api/arm`, at burn execution and at burn-mode campaign start;
+  `burn_check` reports it. Refusals name **row numbers, never values**.
+  No saved dump for the serial → pass with a "nothing to compare" note
+  (first burn for that serial); an explicitly selected dump *without*
+  rows 8–15 fails. A serial read failure now refuses the burn outright —
+  **no BDF fallback for burns** — and failed serial reads are no longer
+  cached, so a retry can succeed. Mock bench: vacuously satisfied.
+
 Saved-dump views are labelled by serial and presence state, never left
 masquerading as live. The default face resolves current-card-only (task
 23): the page seeds the present card's own newest dump — card-less or
@@ -960,8 +977,8 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) + `policy` verdict + `pure_0to1` |
 | POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`; stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
-| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
-| POST | `/api/arm` | `{phrase: "BURN", bdf?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; success adds `bdf` + `checks` dict |
+| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; **identity gate re-checked at execution** — `identity gate: …` refuses before any write; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
+| POST | `/api/arm` | `{phrase: "BURN", bdf?, dump?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`) **and on the identity gate** (serial readable + live die-ID rows 8–15 match `dump` — a dumps-relative dir, else the newest same-serial dump; see "Dump identity"): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; identity failure → error `identity gate: …`, no token; success adds `bdf` + `checks` dict + `die_id` verdict |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` (`blacklist`/`unload` need `confirm: true`) |
 | GET | `/api/gpu` | nvidia-smi + lspci link state (`?bdf=` any GPU on the host) |
@@ -1119,7 +1136,8 @@ mock server):
   flagged `"mock": true`; `/api/bound_dump`, `/api/glitch/start`,
   `/api/burn`, `/api/burn/check`, `/api/revert` and `/api/driver/op` all
   refuse with a `not available in mock mode` style error.
-- `/api/arm` runs the Goldilocks gate against the mock status registers.
+- `/api/arm` runs the Goldilocks gate against the mock status registers;
+  the identity gate is vacuously satisfied in mock (no physical card).
 
 ## Troubleshooting
 
@@ -1133,6 +1151,7 @@ mock server):
 | Campaign start refused: `v_dip <n> mV outside 200-500 — refusing (check for a typo)` | Fat-fingered v_dip; the firmware does not clamp `vd`. |
 | Campaign start refused: `adaptive range invalid: min_v <a> >= max_v <b>` | Swap the adaptive v min/max fields. |
 | Campaign start refused: `burn mode requires a valid arm token (type BURN in the burn panel, 120s TTL)` | Arm first; the token expires after 120 s. |
+| Arm/burn refused: `identity gate: …` | The card in the slot is not provably the card the payload was made for: serial unreadable (reseat/rewarm, retry — failed reads are not cached), die-ID rows differ from the selected dump (wrong card or mis-keyed dump — check the SN pill against the strip), die-ID read unstable (re-read; a poisoned fuse controller also fails this — cold-boot first), or the selected dump predates rows 8–15 (re-dump with `--rows`). |
 | Campaign start refused: `burn mode needs at least one record (set + check the burn payload first)` | Queue records or Check the payload first. |
 | Campaign start refused: `burn placement policy: <issues>` | A queued row violates the zone rules (occupied / buffer / SM reserve / revert tail / outside FF region) or a value has bit 5 set (IFF). |
 | Arm refused: `GPU <bdf> is not Goldilocks — failing: <checks>` | The 4-check pure-read (dsov / crc_ok / priv_open / fpf_readable) failed on the selected GPU — glitch it to Goldilocks first. |

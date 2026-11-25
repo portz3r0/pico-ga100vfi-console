@@ -2372,6 +2372,7 @@ LIVEBOOT = r"""
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
   let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
+  let armDieId = null;            // identity gate verdict from the arm response
   let gpuGoldilocks = false;      // arm gate: current poll of the SELECTED GPU only
   let targetBdf = null;
   let windowOk = false;           // live burn-window verdict (poller / fresh check)
@@ -3169,7 +3170,19 @@ LIVEBOOT = r"""
     const armed = armToken && Date.now() < armExpiry;
     if (armed) {
       armRefusal = null;
-      el.textContent = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
+      let t = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
+      if (armDieId && armDieId.serial) {
+        // identity verdict rides the pill: serial in the label, the
+        // die-ID witness detail in the tooltip (row numbers, never values)
+        t += " · sn-" + armDieId.serial;
+        el.title = "identity: serial " + armDieId.serial +
+          " (" + (armDieId.serial_source || "?") + ")" +
+          (armDieId.checked_against
+            ? " · die-ID rows 8-15 match " + armDieId.checked_against
+            : " · die-ID recorded (no prior dump to compare)");
+        if (armDieId.note) el.title += " · " + armDieId.note;
+      }
+      el.textContent = t;
       el.className = "pill okl";
     } else {
       armToken = null;
@@ -3217,12 +3230,16 @@ LIVEBOOT = r"""
   pollWindow();
 
   $("gb-arm").onclick = async () => {
+    // the shown dump (HIST) is the payload source when browsing history;
+    // empty means the server resolves this card's own newest saved dump
     const j = await jpost("/api/arm",
-                          {phrase: $("gb-armphrase").value, bdf: targetBdf});
+                          {phrase: $("gb-armphrase").value, bdf: targetBdf,
+                           dump: HIST ? HIST.dir : ""});
     if (j.error) { const el = $("gb-armstate");
-      armRefusal = "⚠ " + j.error;
+      armRefusal = "⚠ " + j.error; armDieId = null;
       el.textContent = armRefusal; el.className = "pill badl"; return; }
     armToken = j.token; armExpiry = Date.now() + j.expires_in * 1000;
+    armDieId = j.die_id || null;
     updateArmState();
   };
   $("gb-armphrase").oninput = () => { armRefusal = null; updateArmState(); };
@@ -3515,13 +3532,20 @@ LIVEBOOT = r"""
           ? "REFUSED — " + esc(pln.reason || "")
           : "OK — every touched plane keeps its defective units masked"}</b>` +
         `</div>` : "";
+    const did = j.die_id;
+    const didBlock = did ? `<div class="${did.ok ? "ok" : "bad"}" style="margin-top:6px">` +
+      `<b>identity: ${did.ok
+        ? "OK — sn-" + esc(did.serial || "") + (did.checked_against
+            ? " · die-ID rows 8-15 match " + esc(did.checked_against)
+            : " · die-ID recorded (no prior dump to compare)")
+        : "FAIL — " + esc(did.error || "")}</b></div>` : "";
     res.innerHTML =
       `<div><b class="${j.window_ok ? "ok" : "bad"}">${j.window_ok ? "SAFE TO BURN" : "REFUSED"}</b> — ` +
       `burn window ${j.window_ok ? "open" : "not open"} (verdict keys off the window checks, not EFP/WDATA_PLM)</div>` +
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
-      plnBlock + polBlock +
+      plnBlock + polBlock + didBlock +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
       (pending ? `<div class="guardlist">${pending}</div>` : "") +

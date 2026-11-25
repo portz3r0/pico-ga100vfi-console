@@ -239,16 +239,20 @@ def card_serial(bdf):
     if drv and "nvidia" in drv:
         s = smi_serial(bdf)
         return (s, "nvidia-smi") if s else (None, "unavailable")
-    if bdf in SERIAL_CACHE:
-        s = SERIAL_CACHE[bdf]
-        return (s, "inforom") if s else (None, "unavailable")
+    hit = SERIAL_CACHE.get(bdf)
+    if hit:
+        return (hit, "inforom")
     try:
         ensure_bar0_decode(bdf)   # cold boot: decode off -> PROM reads garbage
         with Bar0(bdf) as bar:
             s = brd_serial(bar.mm)
     except OSError:
         s = None
-    SERIAL_CACHE[bdf] = s
+    # cache only successes: a failed read (cold boot, decode off, flaky
+    # PROM) must not pin the card "unavailable" for the process lifetime —
+    # the burn identity gate needs a real retry, not a cached negative.
+    if s:
+        SERIAL_CACHE[bdf] = s
     return (s, "inforom") if s else (None, "unavailable")
 
 
@@ -284,6 +288,186 @@ def dump_serial_of(dd):
         serial = None
     _DUMP_SERIAL_CACHE[dd] = (mtime, serial)
     return serial
+
+
+# --------------------------------------------------------------- die-ID gate
+# Fuse rows 8-15: factory-programmed die identity. No burn path ever writes
+# them (FPF burns live at 2/3/6/7/48/49, FF/IFF at 128+), they exist on stock
+# cards, and they are readable via CMD_READ outside any Goldilocks window
+# (CMD_READ is gated by FUSECTRL_PLM, not EFP) — the same fuse macro the burn
+# itself uses. The board serial is the fleet's operational key but lives in
+# the WRITABLE InfoROM and its read can fail (dumps then key by BDF); rows
+# 8-15 are the substrate-bound witness that catches a re-flashed label, a
+# swapped die, or a dump filed under the wrong serial. Row NUMBERS are
+# reported, never values — the die ID is card-identifying.
+DIE_ID_ROWS = tuple(range(8, 16))
+
+
+def read_die_id(bdf):
+    """Live fuse rows 8-15 via CMD_READ, two passes, stability required
+    (an unstable witness guards nothing). EN_SW_OVERRIDE is cleared for the
+    reads and restored — with it set the shadow plane answers CMD_READ with
+    stable garbage. Returns (rows, None) or (None, error)."""
+    if CFG["mock"]:
+        try:
+            with open(CFG["mock"]) as f:
+                rows = json.load(f).get("rows", {})
+            got = {}
+            for r in DIE_ID_ROWS:
+                v = rows.get(str(r))
+                if isinstance(v, str):
+                    v = int(v, 0)
+                if isinstance(v, int):
+                    got[r] = v
+            return (got, None) if got else (None, "mock dump has no rows 8-15")
+        except Exception as ex:
+            return None, f"mock rows unreadable: {ex}"
+    ensure_bar0_decode(bdf)
+    if not card_lock.acquire(timeout=5.0):
+        return None, "card busy (campaign or dump in progress)"
+    try:
+        bar = fd.Bar(bdf)
+        passes = []
+        try:
+            rd, wr = bar.rd, bar.wr
+            en_sw = rd(EN_SW_OVERRIDE)
+            if en_sw != 0:
+                wr(EN_SW_OVERRIDE, 0)
+                time.sleep(0.05)
+            saved_addr = rd(FUSEADDR)
+            try:
+                for _ in range(2):
+                    passes.append({r: read_row_via(rd, wr, r)
+                                   for r in DIE_ID_ROWS})
+            finally:
+                wr(FUSEADDR, saved_addr)
+                if en_sw != 0:
+                    wr(EN_SW_OVERRIDE, en_sw)
+                    time.sleep(0.05)
+        finally:
+            bar.close()
+    except (OSError, RuntimeError) as ex:
+        return None, f"die-ID read failed: {ex}"
+    finally:
+        card_lock.release()
+    if passes[0] != passes[1]:
+        diff = [r for r in DIE_ID_ROWS if passes[0][r] != passes[1][r]]
+        return None, ("die-ID read unstable across two passes (rows "
+                      + ",".join(map(str, diff)) + ") — untrusted witness")
+    return passes[0], None
+
+
+def _dump_die_rows(path):
+    """rows 8-15 from a saved dump.json/stock.json, or None if absent."""
+    try:
+        with open(path) as f:
+            rows = json.load(f).get("rows") or {}
+    except (OSError, ValueError):
+        return None
+    out = {}
+    for r in DIE_ID_ROWS:
+        v = rows.get(str(r))
+        if isinstance(v, str):
+            try:
+                v = int(v, 0)
+            except ValueError:
+                v = None
+        if isinstance(v, int):
+            out[r] = v
+    return out or None
+
+
+def _serial_dump_candidates(serial):
+    """dump.json/stock.json files under dumps/sn-<serial>/, newest first."""
+    base = os.path.join(dumps_dir(), f"sn-{serial}")
+    found = []
+    for root, _dirs, files in os.walk(base):
+        for fn in files:
+            if fn in ("dump.json", "stock.json"):
+                p = os.path.join(root, fn)
+                try:
+                    found.append((os.path.getmtime(p), p))
+                except OSError:
+                    continue
+    found.sort(reverse=True)
+    return [p for _m, p in found]
+
+
+def die_id_gate(bdf, dump_rel=None):
+    """Burn identity gate: serial required, live die-ID (rows 8-15) must
+    match the dump the burn is sourced from.
+
+    dump_rel: dumps_dir-relative dump the payload was sourced from (the GUI
+    sends the shown dump's dir); empty -> the newest saved dump for this
+    serial that carries rows 8-15. No comparable dump -> pass with a note
+    (first burn for this serial: nothing to compare yet). A dump explicitly
+    selected but WITHOUT rows 8-15 fails — the operator chose it as the
+    payload source, so its substrate must be verifiable.
+
+    Returns {ok, serial, serial_source, checked_against, rows_differ, note?}
+    or {ok: False, error} — errors name row numbers, never values."""
+    if CFG["mock"]:
+        # mock bench: no physical card, no InfoROM, no fuse macro — the
+        # substrate witness is vacuously satisfied, like the other
+        # hardware-bound guards
+        return {"ok": True, "mock": True, "serial": None,
+                "serial_source": "mock", "checked_against": None,
+                "rows_differ": [],
+                "note": "mock bench — no physical identity to verify"}
+    serial, src = card_serial(bdf)
+    if not serial:
+        return {"ok": False,
+                "error": f"serial unreadable on {bdf} — burns require serial "
+                         "identity (no BDF fallback)"}
+    live, err = read_die_id(bdf)
+    if live is None:
+        return {"ok": False, "serial": serial, "serial_source": src,
+                "error": err}
+    ref, ref_label = None, None
+    if dump_rel:
+        dumps_root = os.path.abspath(dumps_dir())
+        p = os.path.normpath(os.path.join(dumps_root, str(dump_rel)))
+        if not p.startswith(dumps_root + os.sep):
+            return {"ok": False, "serial": serial,
+                    "error": f"dump path escapes the dumps dir: {dump_rel}"}
+        cand = p if os.path.isfile(p) else os.path.join(p, "dump.json")
+        if not os.path.isfile(cand):
+            return {"ok": False, "serial": serial,
+                    "error": f"selected dump not found: {dump_rel}"}
+        ref = _dump_die_rows(cand)
+        ref_label = str(dump_rel)
+        if ref is None:
+            return {"ok": False, "serial": serial, "checked_against": ref_label,
+                    "error": f"selected dump {dump_rel} has no rows 8-15 — "
+                             "cannot verify the substrate; re-dump the card"}
+    else:
+        for cand in _serial_dump_candidates(serial):
+            ref = _dump_die_rows(cand)
+            if ref:
+                ref_label = os.path.relpath(cand, dumps_dir())
+                break
+    if ref is None:
+        return {"ok": True, "serial": serial, "serial_source": src,
+                "checked_against": None, "rows_differ": [],
+                "note": "no saved dump with rows 8-15 for this serial — "
+                        "die-ID recorded, nothing to compare yet"}
+    differ = [r for r in DIE_ID_ROWS if r in ref and ref[r] != live[r]]
+    if differ:
+        return {"ok": False, "serial": serial, "serial_source": src,
+                "checked_against": ref_label, "rows_differ": differ,
+                "error": "die-ID mismatch vs " + (ref_label or "saved dump")
+                         + " at rows "
+                         + ",".join(map(str, differ))
+                         + " — the card in the slot is not the card that "
+                           "dump came from (re-flashed InfoROM, swapped die, "
+                           "or wrong dump selected)"}
+    out = {"ok": True, "serial": serial, "serial_source": src,
+           "checked_against": ref_label, "rows_differ": []}
+    missing = [r for r in DIE_ID_ROWS if r not in ref]
+    if missing:
+        out["note"] = ("dump rows " + ",".join(map(str, missing))
+                       + " unreadable — partial compare")
+    return out
 
 
 # ---------------------------------------------------------------- probe
@@ -1682,6 +1866,9 @@ def burn_check(row, value, mirror, bdf=None):
     bdf, err = resolve_target(bdf)
     if bdf is None:
         return {"error": err}
+    # identity status (informational here — arm and burn ENFORCE it):
+    # run before ff_layout, both take card_lock themselves, never nested
+    idgate = die_id_gate(bdf)
     layout = ff_layout(bdf)          # own card_lock pass — scan the FF region
     if "error" in layout:
         return {"error": "FF region scan failed: " + layout["error"]}
@@ -1718,6 +1905,8 @@ def burn_check(row, value, mirror, bdf=None):
             if ok:
                 note = "burn window OPEN — EFP/WDATA_PLM read 0 statically but " \
                        "are auto-armed at burn via SENSE_CTRL (amber rows)"
+            if not idgate.get("ok"):
+                note = "IDENTITY: " + idgate.get("error", "failed") + " — " + note
             if plane["blocking"]:
                 note = "PLANE GATE: " + plane["reason"] + " — " + note
             elif policy["issues"]:
@@ -1730,7 +1919,7 @@ def burn_check(row, value, mirror, bdf=None):
                     "pure_0to1": pure, "window_ok": ok,
                     "guards_ok": ok, "guards": checks,
                     "arm_pending": arm_pending,
-                    "policy": policy, "plane": plane,
+                    "policy": policy, "plane": plane, "die_id": idgate,
                     "rows_to_burn": rows, "note": note}
         finally:
             bar.close()
@@ -1766,6 +1955,11 @@ def burn_api(body):
         return {"error": "not armed (or arm token expired) — arm first, 120s TTL"}
     if not confirm:
         return burn_check(row, value, bool(body.get("mirror")), bdf)
+    # identity re-check at execution (arm gated it too; the 120s TTL is
+    # short but the card is only ever proven at the moment of the write)
+    idgate = die_id_gate(bdf, str(body.get("dump") or ""))
+    if not idgate.get("ok"):
+        return {"error": "identity gate: " + idgate.get("error", "failed")}
     layout = ff_layout(bdf)
     if "error" in layout:
         return {"error": f"cannot scan FF region: {layout['error']}"}
@@ -1884,10 +2078,16 @@ def arm_api(body):
         # authoritative re-check and are unchanged).
         why = st.get("error") or ", ".join(failing_checks(st))
         return {"error": f"GPU {bdf} is not Goldilocks — failing: {why}"}
+    # Identity gate (serial + die-ID vs the source dump): the arm token is
+    # the single choke point every burn path passes through, so the
+    # wrong-card check lives here and is re-checked at execution.
+    gate = die_id_gate(bdf, str(body.get("dump") or ""))
+    if not gate.get("ok"):
+        return {"error": "identity gate: " + gate.get("error", "failed")}
     ARM["token"] = uuid.uuid4().hex
     ARM["expires"] = time.time() + 120
     return {"token": ARM["token"], "expires_in": 120, "bdf": bdf,
-            "checks": st,
+            "checks": st, "die_id": gate,
             "note": "armed for 120s — burns verify the burn window and "
                     "self-arm via SENSE_CTRL at execution"}
 
@@ -2213,6 +2413,9 @@ def glitch_start(body):
         if not (token and ARM["token"] == token and time.time() < ARM["expires"]):
             return {"error": "burn mode requires a valid arm token "
                              "(type BURN in the burn panel, 120s TTL)"}
+        idgate = die_id_gate(params["bdf"], str(body.get("dump") or ""))
+        if not idgate.get("ok"):
+            return {"error": "identity gate: " + idgate.get("error", "failed")}
         for rec in recs:
             try:
                 row = int(rec["row"])
