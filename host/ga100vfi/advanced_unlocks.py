@@ -100,33 +100,16 @@ _COMPUTE_FF = [
 # One tested card burned one extra record the others did not: chain1 block 17
 # (PES upper, bits 272-274) data 0x0000. Kept as a note, not a queueable step.
 
+# REMOVED 2026-11-25 (operator ruling): the "gen4-permanent" item (chain-2
+# blocks 39/47/49, from the external CMPGlitch/cmp_gen4.md source) is NOT
+# offered anymore. GPU1 and GPU2 both ran those burns (the signed plans
+# include chain-2 + chain-0 records 39=0x0582, 47=0x0051, 49=0x0024) and
+# the operator confirmed the Gen4 link behaviour is set by the RISER, not
+# by these fuses — extra burns from that source buy nothing. The fuses are
+# already burned on GPU1/GPU2 (irreversible, harmless); new cards simply
+# skip them. History: evidence/46, evidence/54.
+
 ADVANCED_UNLOCKS: list[dict] = [
-    {
-        "id": "gen4-permanent",
-        "name": "PCIe Gen4 permanent",
-        "confidence": "VERIFIED",
-        "badge": TESTED_EXTERNAL,
-        "notes": ("chain-2 (CHIPLET_LOGIC) option records that clear the "
-                  "Gen4/Gen3 speed caps at boot. Block 47 bit 3 = "
-                  "PCIE_MAGIC_BITS_D bit 25 GEN4_SPEED_DISABLE — the one "
-                  "mapping the CMPGlitch pass-3 derivation confirmed "
-                  "(0x0059→0x0051, evidence/54 §3, cmp_gen4.md). Blocks 39 "
-                  "and 49 carry the Gen3/boot-policy bits whose exact "
-                  "positions are still ambiguous (evidence/46): burned "
-                  "identically on all tested cards."),
-        "steps": [
-            _ff(2, 39, 0x0582, "OPT_DISABLE_GEN3_SPEED", "UNVERIFIED",
-                "bit 1 or 9 still ambiguous (evidence/46); data 0x0582 "
-                "sets bit 1"),
-            _ff(2, 47, 0x0051, "PCIE_MAGIC_BITS_D GEN4_SPEED_DISABLE "
-                "(block 47 bit 3 = MAGIC_D bit 25)", "VERIFIED",
-                "matches the pass-3 cleared value 0x0051 (evidence/54)"),
-            _ff(2, 49, 0x0024, "OPT_PCIE_BOOT_GEN23/GEN3 boot policy "
-                "(block 49 bits 6/7)", "UNVERIFIED",
-                "data 0x0024 sets bits 2/5, not 6/7 — bit-level mapping "
-                "unresolved"),
-        ],
-    },
     {
         "id": "plm-unlock",
         "name": "PLM unlock (FPF direct rows)",
