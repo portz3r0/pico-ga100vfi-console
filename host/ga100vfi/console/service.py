@@ -2165,6 +2165,7 @@ def burn_campaign_final(records, results):
 
 def campaign_worker(params, records):
     stats = {"attempts": 0, "valid": 0, "lost": 0, "nack": 0,
+             "poisoned": 0,
              "dsov_zero": 0, "goldilocks": False, "burned": [],
              "burn_aborts": 0}
     with glitch_lock:
@@ -2244,14 +2245,26 @@ def campaign_worker(params, records):
                 outcome = "lost"
                 try:
                     with Bar0(bdf) as bar:
-                        if bar.rd32(0x00) == 0xFFFFFFFF:
+                        # FUSECTRL, not PMC_BOOT_0: poison-safe liveness —
+                        # a 0xBADFxxxx controller must not be read further
+                        if bar.rd32(0x00820000) == 0xFFFFFFFF:
                             glog(f"[{n}] ffff")
                         else:
                             v = classify(bar)
                             outcome = classify_outcome(v) if planner else (
+                                "poisoned" if v.poisoned else
                                 "goldilocks" if v.passed else
                                 "hit" if v.dsov == 0 and v.crc_status == 0x55
                                 else "over" if v.dsov == 0 else "under")
+                            if outcome == "poisoned":
+                                # dead fuse controller: not a voltage data
+                                # point (never reaches the planner) and it
+                                # persists until a POWER CYCLE
+                                stats["poisoned"] += 1
+                                glog(f"[{n}] FUSE CONTROLLER POISONED "
+                                     "(0xBADF____) — persists until a POWER "
+                                     "CYCLE; stopping this boot")
+                                break
                             stats["valid"] += 1
                             if v.dsov == 0:
                                 stats["dsov_zero"] += 1
@@ -2586,8 +2599,16 @@ def gpu_state(bdf):
         try:
             def rd(o):
                 return struct.unpack_from("<I", mm, o)[0]
-            if rd(FUSECTRL) == 0xFFFFFFFF:
+            ctrl = rd(FUSECTRL)
+            if ctrl == 0xFFFFFFFF:
                 return {"error": "BAR0 unreadable (link down / mid-glitch)"}
+            if (ctrl & 0xFFFF0000) == 0xBADF0000:
+                # poisoned fuse controller: further BAR0 reads on such a
+                # card are a host-hang risk — stop at this one register
+                # (persists until a POWER CYCLE)
+                return {"error": f"fuse controller poisoned "
+                                 f"(FUSECTRL 0x{ctrl:08x})",
+                        "poisoned": True}
             dsov = rd(DSOV) & 1
             crc = (rd(CRC_STATUS) & 0xFF) == 0x55
             priv = rd(PRIV_MASK) == 0xFFFFFFFF

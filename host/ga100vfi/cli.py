@@ -57,9 +57,11 @@ def cmd_attempt(args) -> int:
 
 
 def _ensure_unlocked(card: Card) -> bool:
-    pwd, _ = card.lock_status()
-    if pwd:
-        return True
+    # Always send 'u', even when z already reports MATCH: a controller can
+    # keep MATCH across a soft-off (Pico stays powered) while reg 0x13 and
+    # config ID 0x46 reverted — the stale-CML pitfall. unlock_config
+    # firmware re-writes both (idempotent) on every 'u'; older firmware
+    # just prints "already MATCH", which still parses.
     return card.unlock()
 
 
@@ -88,7 +90,7 @@ def cmd_campaign(args) -> int:
     delay = args.delay
     pw = args.pw
     spots: dict[str, dict[str, int]] = {}  # adaptive: "v_dip/delay/pw" -> counts
-    tries = valid = lost = nack = dsov0 = 0
+    tries = valid = lost = nack = dsov0 = poisoned = 0
     verdict = None
 
     tele = None
@@ -100,7 +102,9 @@ def cmd_campaign(args) -> int:
             try:
                 if restore(args.bdf, wait_s=0.5, settle_s=0.15):
                     with Bar0(args.bdf) as bar:
-                        if bar.rd32(0x00) != 0xFFFFFFFF:
+                        # FUSECTRL, not PMC_BOOT_0: poison-safe liveness —
+                        # a 0xBADFxxxx controller must not be read further
+                        if bar.rd32(0x00820000) != 0xFFFFFFFF:
                             pre = classify(bar).as_dict()
                             serial_ = brd_serial(bar.mm)
             except OSError:
@@ -193,10 +197,38 @@ def cmd_campaign(args) -> int:
                     v_dict = None
                     if restore(args.bdf, wait_s=args.restore_wait):
                         with Bar0(args.bdf) as bar:
-                            if bar.rd32(0x00) != 0xFFFFFFFF:
+                            # FUSECTRL, not PMC_BOOT_0: poison-safe liveness
+                            if bar.rd32(0x00820000) != 0xFFFFFFFF:
                                 v = classify(bar)
                                 outcome = classify_outcome(v)
                                 v_dict = v.as_dict()
+                    if outcome == "poisoned":
+                        # dead fuse controller: not a voltage data point
+                        # (never reaches the planner) and it stays poisoned
+                        # until a POWER CYCLE — shooting on is pointless
+                        poisoned += 1
+                        sh = (v_dict or {}).get("shadow", {})
+                        tag = sh.get("FUSECTRL_POISONED",
+                                     sh.get("DSOV_POISONED", 0))
+                        if tele:
+                            tele.write({
+                                "kind": "attempt", "n": tries,
+                                "t_s": round(time.monotonic() - t0, 3),
+                                "dt_s": round(time.monotonic() - ta, 3),
+                                "shot": {"v_dip_mv": v_dip, "delay_us": delay,
+                                         "pw_us": pw},
+                                "g_cmd": a.command(),
+                                "planner": planner.stats() if planner else None,
+                                "report": {"pwd": rep.pwd, "e1": rep.e1,
+                                           "writes_failed": rep.writes_failed,
+                                           "nvvdd": rep.nvvdd, "echo": rep.echo},
+                                "verdict": v_dict, "outcome": "poisoned",
+                            })
+                        print(f"[{tries}] FUSE CONTROLLER POISONED "
+                              f"(0x{tag:08x}) — stays poisoned until a POWER "
+                              f"CYCLE; stopping this boot", file=sys.stderr,
+                              flush=True)
+                        break
                     if outcome == "lost":
                         lost += 1
                     else:
@@ -251,6 +283,7 @@ def cmd_campaign(args) -> int:
             "valid": valid,
             "lost": lost,
             "nack": nack,
+            "poisoned": poisoned,
             "dsov_zero": dsov0,
             "elapsed_s": round(time.monotonic() - t0, 2),
             "verdict": verdict.as_dict() if verdict else None,

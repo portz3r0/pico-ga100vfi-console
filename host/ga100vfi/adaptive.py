@@ -39,7 +39,8 @@ SEED_MAX_SHOTS = 16
 # Cap refined arms per cluster so local refinement stays bounded.
 MAX_CLUSTER_ARMS = 48
 
-COMPASS_OUTCOMES = ("under", "crc_fail", "warm", "hit", "over", "lost", "goldilocks")
+COMPASS_OUTCOMES = ("under", "crc_fail", "warm", "hit", "over", "lost",
+                    "poisoned", "goldilocks")
 _TIER = {"under": 0, "over": 0, "lost": 0, "crc_fail": 1, "warm": 2, "hit": 3}
 
 
@@ -58,6 +59,11 @@ def classify_outcome(v) -> str:
     """Classify a BAR0 Verdict into a compass outcome for the planner."""
     if v.passed:
         return "goldilocks"
+    if getattr(v, "poisoned", False):
+        # dead fuse controller, not a voltage data point: callers must
+        # NOT feed this to the planner and must end the boot (poison
+        # persists until a power cycle)
+        return "poisoned"
     crc = v.crc_status & 0xFF
     if v.dsov == 1 and crc == 0x55:
         return "under"
