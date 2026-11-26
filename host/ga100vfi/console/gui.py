@@ -2424,6 +2424,7 @@ LIVEBOOT = r"""
         <div class="field"><label>pw µs</label><input type="number" id="gc-pw" value="198"></div>
         <div class="field"><label>gap µs</label><input type="number" id="gc-gap" value="150"></div>
         <div class="field"><label>delay</label><input type="number" id="gc-delay" value="117"></div>
+        <div class="field"><label>Cooldown s</label><input type="number" id="gc-cooldown" value="10" step="1" min="0" max="120"></div>
         <div class="field"><label>max attempts</label><input type="number" id="gc-max" value="100"></div>
         <div class="field"><label>v_dip strategy</label>
           <select id="gc-strategy">
@@ -3786,6 +3787,7 @@ LIVEBOOT = r"""
       min_v: +$("gc-vmin").value, max_v: +$("gc-vmax").value,
       v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
+      cooldown_s: +$("gc-cooldown").value,
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
       no_revert: $("gc-hold").value === "hold"};
     if (mode === "burn") {

@@ -93,6 +93,10 @@ def cmd_campaign(args) -> int:
     v_dip = args.v_dip
     delay = args.delay
     pw = args.pw
+    # Mandatory inter-shot VRM rest (mirrors the console campaign worker);
+    # clamped 0-120 s. Skipped on goldilocks/poisoned (break) and on the
+    # nack/lost abort paths, as well as the final attempt.
+    cooldown = min(max(args.cooldown, 0.0), 120.0)
     spots: dict[str, dict[str, int]] = {}  # adaptive: "v_dip/delay/pw" -> counts
     tries = valid = lost = nack = dsov0 = poisoned = 0
     verdict = None
@@ -271,6 +275,14 @@ def cmd_campaign(args) -> int:
                         break
                     if planner and shot is not None:
                         planner.record(shot, outcome)
+                    # VRM rest at the end of the iteration, before the next
+                    # shot; skipped on the last attempt. A lost shot still
+                    # fired its pulses, so it rests too; the nack abort paths
+                    # already `continue` past this point.
+                    if cooldown > 0 and tries < args.budget:
+                        print(f"[{tries}] cooldown {cooldown:g}s (VRM rest)",
+                              file=sys.stderr, flush=True)
+                        time.sleep(cooldown)
             finally:
                 if not args.no_revert:
                     try:
@@ -441,6 +453,10 @@ def main(argv=None) -> int:
                       help="dip advance in us (seed delay with --adaptive)")
     camp.add_argument("--restore-wait", type=float, default=0.25,
                       help="seconds to wait for PCIe link after PEX_RST")
+    camp.add_argument("--cooldown", type=float, default=10.0,
+                      help="seconds of VRM rest between shots (0 disables; "
+                           "clamped 0-120) — back-to-back shots fatigue the "
+                           "VRM and turn results into noise")
     camp.add_argument("--no-unlock", action="store_true")
     camp.add_argument("--no-revert", action="store_true",
                       help="leave VRM in PMBus mode after campaign")

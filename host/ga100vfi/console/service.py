@@ -2214,6 +2214,7 @@ def campaign_worker(params, records):
                 glog("STOPPED by user")
                 break
             stats["attempts"] = n
+            cooldown = float(params.get("cooldown_s", 10.0))
             if not vrm_unlock(card):
                 glog("VRM unlock failed — stopping")
                 break
@@ -2239,6 +2240,13 @@ def campaign_worker(params, records):
                 if planner:      # a lost link reads as a too-deep shot
                     planner.record(shot if shot is not None else v_dip, "lost")
                 glog(f"[{n}] link lost")
+                # a lost shot still fired its pulses — rest the VRM before
+                # the next one (back-to-back lost shots hammered the card)
+                if cooldown > 0 and n < params.get("max_attempts", 100):
+                    glog(f"[{n}] cooldown {cooldown:g}s (after link loss)")
+                    if glitch_stop.wait(cooldown):
+                        glog("STOPPED by user (during cooldown)")
+                        break
                 continue
             with card_lock:
                 outcome = "lost"
@@ -2332,6 +2340,20 @@ def campaign_worker(params, records):
                 if outcome == "goldilocks" and (not records
                                                 or stats["goldilocks"]):
                     break   # burn mode: only an all-VERIFY-OK burn ends it
+            # Mandatory inter-shot VRM rest: a campaign that fired 100 shots
+            # back-to-back in ~2 min fatigued the VRM and turned the results
+            # into noise (306 mV read "over", 356 "under"). Reached on the
+            # normal classify path; the link-lost path has its own wait above
+            # (it fired real pulses). The nack/IOError `continue`s (un-fired
+            # shots) and the goldilocks/poisoned `break`s skip it by design,
+            # as does the last attempt.
+            # Stop-aware wait so POST /api/glitch/stop stays responsive.
+            if (cooldown > 0 and n < params.get("max_attempts", 100)
+                    and not glitch_stop.is_set()):
+                glog(f"[{n}] cooldown {cooldown:g}s (VRM rest)")
+                if glitch_stop.wait(cooldown):
+                    glog("STOPPED by user (during cooldown)")
+                    break
     except Exception as e:
         glog(f"ABORT — {e}")
         with glitch_lock:
@@ -2399,6 +2421,10 @@ def glitch_start(body):
         "gap": int(body.get("gap", 150)),
         "delay": int(body.get("delay", 117)),
         "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
+        # Mandatory inter-shot VRM rest (see campaign_worker loop tail);
+        # clamped 0-120 s. Echoed back in /api/glitch/status params.
+        "cooldown_s": min(max(float(body.get("cooldown_s", 10.0)), 0.0),
+                          120.0),
         "port": body.get("port", "/dev/ttyACM0"),
         # Goldilocks keeps the window open unless the caller explicitly asks
         # for the classic always-revert behaviour (misses/stops always revert).
@@ -2466,7 +2492,8 @@ def glitch_start(body):
     glog(f"campaign started — target {params.get('bdf', CFG['bdf'])} "
          f"v_dip={params['v_dip']} pulses={params['pulses']} "
          f"pw={params['pw']} gap={params['gap']} delay={params['delay']} "
-         f"max={params['max_attempts']} mode={body.get('mode', 'classify')}")
+         f"max={params['max_attempts']} cooldown={params['cooldown_s']:g}s "
+         f"mode={body.get('mode', 'classify')}")
     return {"started": True, "params": params, "records": len(records)}
 
 
