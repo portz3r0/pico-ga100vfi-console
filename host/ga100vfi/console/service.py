@@ -152,6 +152,77 @@ SWIFF, IFF_CTRL = 0x820088, 0x820028          # fusedump EXTRA controller-state 
 LOADER_120060 = 0x120060                      # loader must be quiescent (ga100_dump)
 CMD_READ, CMD_WRITE, CMD_SENSE = 1, 2, 3
 
+# Allspark-derived readouts (community guide "The Lab"), READ-ONLY live
+# payload only — never written, never part of any burn gate. Interpretations
+# carry ALLSPARK_TAG: external claims, not measurements on our silicon.
+GFW_BOOT, FEAT_READOUT_1 = 0x00118234, 0x00823818
+READOUT_REGS = {"GFW_BOOT": GFW_BOOT, "FEAT_READOUT_1": FEAT_READOUT_1}
+ALLSPARK_TAG = "[The Lab / allspark, unverified on our silicon]"
+
+# Reference list of values that must never be written (frontend renders it
+# read-only). 'enforced' marks a guard already blocking it in code
+# (bit5-set FF records: ff_policy).
+NEVER_WRITE = [
+    {"register": "FEAT_OVR_ROW_REMAP", "offset": "0x823824", "value": "3",
+     "effect": "confirmed kill x2 — bricked two cards",
+     "source": ALLSPARK_TAG},
+    {"register": "FEAT_OVR_QUADRO", "offset": "0x823808", "value": "0xffffffff",
+     "effect": "booter halts at 0x29; revert only via the driver",
+     "source": ALLSPARK_TAG},
+    {"register": "fuse rows 0/1 (main array)", "offset": "rows 0-1",
+     "value": "all-ones",
+     "effect": "all-ones into rows 0/1 bricks boot — no revert path",
+     "source": ALLSPARK_TAG},
+    {"register": "FF region (rows 222-487)", "offset": "rows 222-487",
+     "value": "bit5 set in data word",
+     "effect": "bit5-set word is the invalidation flag, not a chain/block "
+               "record — burns as garbage",
+     "enforced": True, "source": ALLSPARK_TAG},
+]
+
+
+def gfw_boot_note(v):
+    """Allspark interpretation of the GFW boot status word."""
+    if v == 0x3FF:
+        return "clean POST " + ALLSPARK_TAG
+    if v == 0x1:
+        return ("FWSEC failed-secure-boot-step marker — NOT proof of a "
+                "brick; diagnose via FB trained + BAR0 responsive "
+                + ALLSPARK_TAG)
+    return "boot in progress / other " + ALLSPARK_TAG
+
+
+def feat_readout_note(v):
+    """Allspark interpretation of FEAT_READOUT_1."""
+    if v == 0x00000000:
+        return "compute unlocked " + ALLSPARK_TAG
+    if v == 0x016DB6ED:
+        return "throttled " + ALLSPARK_TAG
+    return "unknown " + ALLSPARK_TAG
+
+
+def enrich_readouts(snap, mock=False):
+    """Attach Allspark readout interpretations + the never-write list to a
+    live/mock snapshot dict. Pure over the dict — never touches the card.
+    Mock snapshots missing the keys get plausible synthetic values so the
+    frontend always has something to render."""
+    st = snap.get("status")
+    if isinstance(st, dict):
+        gfw, feat = st.get("GFW_BOOT"), st.get("FEAT_READOUT_1")
+        if mock:
+            if not isinstance(gfw, int):
+                gfw = st["GFW_BOOT"] = 0x3FF
+            if not isinstance(feat, int):
+                feat = st["FEAT_READOUT_1"] = 0x016DB6ED
+        if isinstance(gfw, int) and isinstance(feat, int):
+            snap["readouts"] = {
+                "GFW_BOOT": {"value": gfw, "note": gfw_boot_note(gfw)},
+                "FEAT_READOUT_1": {"value": feat,
+                                   "note": feat_readout_note(feat)},
+                "source": ALLSPARK_TAG}
+    snap["never_write"] = NEVER_WRITE
+    return snap
+
 # GPIO19 program strobe (ga100_burn: GPIO=0xD65C, TRIGGER=0xD604). Written
 # ONLY inside the burn_execute write bracket — never by probe/poller/check.
 GPIO_REG, GPIO_TRIGGER = 0xD65C, 0xD604
@@ -511,6 +582,8 @@ def probe(bdf):
                 return {"error": "BAR0 unreadable — bus hung or PCIe link down "
                                  "(normal mid-glitch / after reset)"}
             status = {k: rd(o) for k, o in fd.STATUS_REGS.items()}
+            for k, o in READOUT_REGS.items():   # Allspark readouts, pure reads
+                status[k] = rd(o)
             shadow = {k: rd(o) for k, o in fd.SHADOW_REGS.items()}
             for i in range(8):
                 shadow[f"TPC_DEFECTIVE_GPC{i}"] = rd(fd.TPC_DEFECT_FF[i])
@@ -523,12 +596,14 @@ def probe(bdf):
             else:
                 serial = brd_serial(mm)   # PROM shadow read; cached per BDF
                 SERIAL_CACHE[bdf] = serial
-            return {"status": status, "shadow": shadow,
-                    "window_ok": window_ok, "window_checks": window_checks,
-                    "serial": serial, "serial_source": "inforom",
-                    "tpc": fd.tpc_summary(shadow),
-                    "driver": driver_of(bdf),
-                    "bdf": bdf, "ts": datetime.now().isoformat(timespec="seconds")}
+            return enrich_readouts(
+                {"status": status, "shadow": shadow,
+                 "window_ok": window_ok, "window_checks": window_checks,
+                 "serial": serial, "serial_source": "inforom",
+                 "tpc": fd.tpc_summary(shadow),
+                 "driver": driver_of(bdf),
+                 "bdf": bdf,
+                 "ts": datetime.now().isoformat(timespec="seconds")})
         finally:
             mm.close()
     finally:
@@ -546,6 +621,7 @@ def poller(interval):
                     with open(CFG["mock"]) as f:
                         snap = json.load(f)
                     snap["ts"] = datetime.now().isoformat(timespec="seconds")
+                    enrich_readouts(snap, mock=True)
                 except Exception as e:        # a bad mock path must not kill
                     snap = {"error": f"mock failed: {e}"}  # the poll thread
             else:
@@ -1679,6 +1755,27 @@ def _raise_write(off, val):
     raise RuntimeError(f"preview write refused: 0x{off:05X} = 0x{val:08X}")
 
 
+def rir_decode(value):
+    """Decode a 32-bit word as an RIR record — the encoding in effect while
+    DEBUGCTRL bit1 (RWL) is 1: enabled = v&1, data = (v>>1)&1,
+    abs_bit = (v>>2)&0x3FFF, row = abs_bit//32, bit = abs_bit%32. Under
+    RWL=0 the same word is an FF record (data16<<16 | offset10<<6 | chain5)
+    and the console burns with RWL=0 — so this decode is a HAZARD WARNING
+    covering stuck-RWL states, never a blocking gate. Rows 0-7 are the
+    DIS_PROGRAM/DSOV control region: a mis-macro write there is catastrophic.
+    Pure decode, no card access. [The Lab / allspark provenance]"""
+    enabled = value & 1
+    abs_bit = (value >> 2) & 0x3FFF
+    row = abs_bit // 32
+    return {"rir_enabled": bool(enabled),
+            "rir_data": (value >> 1) & 1,
+            "rir_row": row,
+            "rir_bit": abs_bit % 32,
+            "rir_targets_control_rows_0_7": bool(enabled) and row <= 7,
+            "rir_layout_warning": bool(enabled) and row <= 7,
+            "source": ALLSPARK_TAG}
+
+
 def burn_preview(rd, row, value, mirror):
     """Read-only burn preview — ga100_burn's default preview mode, inside
     the console. `rd` is a read-only card handle (callable reads + .wr
@@ -1776,6 +1873,7 @@ def burn_preview(rd, row, value, mirror):
     return {"verdict": verdict, "rows": row_entries,
             "collisions": collisions, "hazards": hazards,
             "plane": plane,
+            "two_layout": rir_decode(value),   # warning only, never a gate
             "predicted": predicted,
             "window_ok": window_ok, "window_checks": window_checks,
             "arm_pending": arm_pending,
@@ -1918,6 +2016,7 @@ def burn_check(row, value, mirror, bdf=None):
                     "pure_0to1": pure, "window_ok": ok,
                     "guards_ok": ok, "guards": checks,
                     "arm_pending": arm_pending,
+                    "two_layout": rir_decode(value),  # warning only, never a gate
                     "policy": policy, "plane": plane, "die_id": idgate,
                     "rows_to_burn": rows, "note": note}
         finally:
