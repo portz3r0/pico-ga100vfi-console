@@ -2470,6 +2470,7 @@ LIVEBOOT = r"""
         <div class="field"><label>pw µs</label><input type="number" id="gc-pw" value="198"></div>
         <div class="field"><label>gap µs</label><input type="number" id="gc-gap" value="150"></div>
         <div class="field"><label>delay</label><input type="number" id="gc-delay" value="117"></div>
+        <div class="field"><label>t_dip µs</label><input type="number" id="gc-tdip" value="-60" title="dip timing vs PEX_RST release; -60 = our proven regime, +50 = The Lab in-window claim (unverified here)"></div>
         <div class="field"><label>Cooldown s</label><input type="number" id="gc-cooldown" value="10" step="1" min="0" max="120"></div>
         <div class="field"><label>max attempts</label><input type="number" id="gc-max" value="100"></div>
         <div class="field"><label>v_dip strategy</label>
@@ -3878,14 +3879,15 @@ LIVEBOOT = r"""
     try { setCampaignUI(await jget("/api/glitch/status")); } catch (e) {}
   }
   // task 51: Lab in-window single-pulse preset — fills the campaign inputs
-  // ONLY (never starts a campaign). t_dip +50 us maps to the console's
-  // delay field; v_restore 750 / t_restore -20 have no console inputs —
-  // the firmware's post-dip restore is fixed (docs/PROTOCOL.md invariants).
+  // ONLY (never starts a campaign). t_dip +50 us goes to the t_dip field
+  // (review fix: was wrongly stuffed into delay). v_restore 750 / t_restore
+  // -20 have no console inputs — the firmware's post-dip restore is fixed
+  // (docs/PROTOCOL.md invariants).
   $("t51-lab-preset").onclick = () => {
-    $("gc-vdip").value = 365; $("gc-delay").value = 50;
+    $("gc-vdip").value = 365; $("gc-tdip").value = 50;
     $("gc-pw").value = 196;   $("gc-pulses").value = 1;
     $("t51-preset-note").textContent =
-      "Lab preset filled (v_dip 365, delay +50, pw 196, pulses 1) — " +
+      "Lab preset filled (v_dip 365, t_dip +50, pw 196, pulses 1) — " +
       "v_restore 750 / t_restore -20 have no console inputs; start manually.";
   };
   $("gc-start").onclick = async () => {
@@ -3895,6 +3897,7 @@ LIVEBOOT = r"""
       min_v: +$("gc-vmin").value, max_v: +$("gc-vmax").value,
       v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
+      t_dip: +$("gc-tdip").value,
       cooldown_s: +$("gc-cooldown").value,
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
       no_revert: $("gc-hold").value === "hold"};

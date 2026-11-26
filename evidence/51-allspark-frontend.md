@@ -77,3 +77,19 @@
   key's presence.
 - Preset t_dip +50 maps to the console's single `delay` input;
   v_restore/t_restore have no console inputs (fixed firmware restore).
+
+## Orchestrator review fix (post-commit 3929453)
+DEFECT found in review: preset stuffed t_dip +50 into gc-delay (the adaptive
+search seed, default 117) — NOT t_dip. Campaign hardcoded t_dip_us=-60
+(service.py:2323); t_dip was not a console parameter at all, so the Lab
+in-window regime was inexpressible in the console.
+FIX: t_dip is now a real campaign param end to end — API parse default -60
+(service.py ~2525), Attempt uses t_dip_us=t_dip (~2326), campaign log
+includes t_dip, gui form field gc-tdip (default -60), body sends t_dip,
+preset fills gc-tdip=50. Existing behavior unchanged (default -60).
+Test: test_allspark_frontend.py updated (preset asserts gc-tdip, forbids
+gc-delay; new test_t_dip_is_a_real_campaign_param source asserts).
+Gates re-run: py_compile OK; full suite FAIL-set == baseline (5 pre-existing);
+mock serve: readouts+never_write in /api/live, markers present, node --check
+OK; /api/glitch/start correctly refuses in mock (t_dip passthrough covered
+by source asserts, not exercisable in mock).

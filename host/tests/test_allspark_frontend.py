@@ -64,10 +64,23 @@ def test_preset_fills_inputs_only():
                   html, re.S)
     assert m, "preset handler not found"
     body = m.group(1)
-    for frag in ('$("gc-vdip").value = 365', '$("gc-delay").value = 50',
+    for frag in ('$("gc-vdip").value = 365', '$("gc-tdip").value = 50',
                  '$("gc-pw").value = 196', '$("gc-pulses").value = 1'):
         assert frag in body, frag
+    assert '$("gc-delay").value' not in body  # review fix: delay is NOT t_dip
     assert "jpost" not in body and "gc-start" not in body  # never starts
+
+
+def test_t_dip_is_a_real_campaign_param():
+    # review fix: campaign used to hardcode t_dip_us=-60; the Lab regime
+    # (+50 us in-window) must be expressible end to end.
+    import pathlib
+    src = pathlib.Path("ga100vfi/console/service.py").read_text()
+    assert '"t_dip": int(body.get("t_dip", -60))' in src
+    assert "t_dip_us=t_dip" in src
+    gui = pathlib.Path("ga100vfi/console/gui.py").read_text()
+    assert 'id="gc-tdip"' in gui
+    assert 't_dip: +$("gc-tdip").value' in gui
 
 
 def test_readouts_payload_shape_matches_renderers():

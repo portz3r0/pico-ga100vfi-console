@@ -2299,6 +2299,9 @@ def campaign_worker(params, records):
         v_dip = params.get("v_dip", 354)
         delay = params.get("delay", 117)
         pw = params.get("pw", 198)
+        # t_dip was hardcoded -60; now a param with the same default so the
+        # Lab in-window regime (+50 us after PEX_RST release) is expressible.
+        t_dip = params.get("t_dip", -60)
         shot = None
         if params.get("adaptive"):
             # upstream v0.1.0: 3D CRC-guided planner searching (v_dip, delay,
@@ -2320,7 +2323,7 @@ def campaign_worker(params, records):
             if planner:
                 shot = planner.next_shot()
                 v_dip, delay, pw = shot.v_dip_mv, shot.delay_us, shot.pw_us
-            att = Attempt(v_dip_mv=v_dip, t_dip_us=-60,
+            att = Attempt(v_dip_mv=v_dip, t_dip_us=t_dip,
                           v_restore_mv=750, t_restore_us=-20, t_revert_us=0,
                           fast=1, hold_ms=0, pulses=params.get("pulses", 3),
                           pw=pw, gap=params.get("gap", 150),
@@ -2519,6 +2522,9 @@ def glitch_start(body):
         "pw": int(body.get("pw", 198)),
         "gap": int(body.get("gap", 150)),
         "delay": int(body.get("delay", 117)),
+        # dip timing vs PEX_RST release; -60 = our proven pre-release regime,
+        # +50 = The Lab in-window claim (unverified on our silicon).
+        "t_dip": int(body.get("t_dip", -60)),
         "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
         # Mandatory inter-shot VRM rest (see campaign_worker loop tail);
         # clamped 0-120 s. Echoed back in /api/glitch/status params.
@@ -2591,6 +2597,7 @@ def glitch_start(body):
     glog(f"campaign started — target {params.get('bdf', CFG['bdf'])} "
          f"v_dip={params['v_dip']} pulses={params['pulses']} "
          f"pw={params['pw']} gap={params['gap']} delay={params['delay']} "
+         f"t_dip={params['t_dip']} "
          f"max={params['max_attempts']} cooldown={params['cooldown_s']:g}s "
          f"mode={body.get('mode', 'classify')}")
     return {"started": True, "params": params, "records": len(records)}
