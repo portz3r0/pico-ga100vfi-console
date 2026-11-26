@@ -2014,6 +2014,10 @@ LIVEBOOT = r"""
       const curSerial = j.serial || null;
       liveCard = { present: true, serial: curSerial };
       D.status = j.status; D.shadow = j.shadow;
+      // task 51: Allspark readouts + never-write list ride the live payload
+      // (service.enrich_readouts) — refresh the provenance-tagged tiles.
+      D.readouts = j.readouts; D.never_write = j.never_write;
+      renderNeverWrite(); renderAllsparkTiles();
       if (j.tpc !== undefined) D.tpc = j.tpc;
       if (j.driver !== undefined) D.driver = j.driver;
       if (j.bdf !== undefined) D.bdf = j.bdf;
@@ -2028,6 +2032,48 @@ LIVEBOOT = r"""
       updateEmptyState();
       note("● live — " + j.ts, "okl");
     } catch (e) { note("⚠ service unreachable (" + e + ")", "badl"); }
+  }
+  // ---- task 51: Allspark-sourced surfaces (provenance tag on every tile) ----
+  function renderAllsparkTiles() {
+    const el = document.getElementById("t51-gpu-readouts-body");
+    if (!el) return;
+    const r = D.readouts;
+    if (!r || (!r.GFW_BOOT && !r.FEAT_READOUT_1)) {
+      el.innerHTML = "awaiting first live poll (/api/live readouts)…"; return;
+    }
+    const tile = (name, item, color) =>
+      `<div class="card stat" style="border-color:${color}">` +
+      `<div class="k">${name}</div>` +
+      `<div class="v mono" style="color:${color}">` +
+      `0x${(item.value >>> 0).toString(16).toUpperCase().padStart(8, "0")}</div>` +
+      `<div class="note">${esc(item.note || "")}</div>` +
+      `<span class="pill warnl">The Lab · unverified here</span></div>`;
+    const g = r.GFW_BOOT, f = r.FEAT_READOUT_1;
+    const gcol = g && g.value === 0x3FF ? "var(--ok)"
+               : g && g.value === 0x1 ? "var(--warn)" : "var(--fg-subtle)";
+    const fcol = f && f.value === 0 ? "var(--ok)"
+               : f && f.value === 0x016DB6ED ? "var(--bad)" : "var(--fg-subtle)";
+    el.innerHTML = `<div class="flexline" style="gap:10px">` +
+      (g ? tile("GFW_BOOT", g, gcol) : "") +
+      (f ? tile("FEAT_READOUT_1", f, fcol) : "") + `</div>` +
+      (g && g.value === 0x1
+        ? `<div class="note" style="margin-top:6px">0x1 is the FWSEC ` +
+          `failed-secure-boot-step marker — <b>not proof of a brick</b>; ` +
+          `diagnose via FB trained + BAR0 responsive first.</div>` : "");
+  }
+  function renderNeverWrite() {
+    const el = document.getElementById("t51-neverwrite-body");
+    if (!el) return;
+    const list = D.never_write;
+    if (!list || !list.length) {
+      el.innerHTML = "awaiting first live poll (/api/live never_write)…"; return;
+    }
+    el.innerHTML = list.map(e =>
+      `<div style="margin-top:6px"><b class="mono">${esc(e.register)}</b> ` +
+      `<span class="note mono">${esc(e.offset)} = ${esc(e.value)}</span> — ` +
+      `${esc(e.effect)} ` +
+      (e.enforced ? `<span class="pill okl">guarded by console</span>` : "") +
+      ` <span class="pill warnl">The Lab · unverified here</span></div>`).join("");
   }
   async function fullDump() {
     const b = document.getElementById("fulldump");
@@ -2433,6 +2479,8 @@ LIVEBOOT = r"""
           </select></div>
         <div class="field"><label>adaptive v min mV</label><input type="number" id="gc-vmin" value="300"></div>
         <div class="field"><label>adaptive v max mV</label><input type="number" id="gc-vmax" value="380"></div>
+        <button class="btn" id="t51-lab-preset" title="The Lab / allspark claim: arming dip fires +50 us AFTER PEX_RST release, single pulse only. Our card's proven regime is 3 pulses at -60 us — this preset is for bounded A/B sweeps, not a replacement.">Lab in-window single-pulse (UNVERIFIED here)</button>
+        <span class="note" id="t51-preset-note"></span>
       </div>
       <div class="frow">
         <div class="field"><label>pico port</label><select id="gc-port"><option>scanning…</option></select></div>
@@ -2458,6 +2506,38 @@ LIVEBOOT = r"""
       <div class="chips" id="gc-chips"></div>
       <div class="logbox" id="gc-log">— campaign log —</div>
     </div>
+    <div class="card" id="t51-neverwrite" style="margin-top:12px">
+      <h3>Never-write reference <span class="note">(The Lab / allspark
+        community claims — read-only, never a burn gate)</span></h3>
+      <div id="t51-neverwrite-body" class="note">awaiting first live poll
+        (/api/live never_write)…</div>
+    </div>
+    <details class="card" id="t51-reset-cheat" style="margin-top:12px">
+      <summary>Reset semantics cheat sheet — FLR vs SBR vs cold power
+      cycle <span class="note">(provenance tagged per row)</span></summary>
+      <table style="margin-top:8px">
+        <tr><th>reset</th><th>clears</th><th>does NOT clear</th><th>provenance</th></tr>
+        <tr><td><b>FLR</b> (function level reset)</td>
+          <td>little — the GFW-side state largely survives</td>
+          <td>glitched fuse-latch state; FSP latch; XVE errors</td>
+          <td><span class="pill warnl">The Lab · unverified here</span></td></tr>
+        <tr><td><b>SBR</b> (secondary bus reset)</td>
+          <td>HS write engine state; booter halts re-run from 0x15</td>
+          <td>glitched fuse-latch state; FSP latch; XVE errors</td>
+          <td><span class="pill warnl">The Lab · unverified here</span>
+            <span class="note">SBR has physically damaged a test card in our
+            history — PEX_RST is the reset path (AGENTS.md).</span></td></tr>
+        <tr><td><b>cold power cycle</b> — PSU off AND unplugged</td>
+          <td>glitched state, FSP latch, XVE errors</td>
+          <td>burned fuses (OTP is permanent)</td>
+          <td><span class="pill okl">verified here</span></td></tr>
+      </table>
+      <div class="note" style="margin-top:6px">An OS reboot is NONE of these —
+      it does not cold-cycle the card. <code>nvidia-smi -r</code> is
+      unsupported on this card <span class="pill okl">verified here</span>.
+      FLR/SBR row content is a community claim:
+      <span class="pill warnl">The Lab · unverified here</span>.</div>
+    </details>
     <div class="dangerstrip">
       Glitching dips NVVDD via the pico; burns are <b>irreversible OTP writes</b>.
       Burn mode requires an armed token, a pure 0→1 payload, matching row state and a
@@ -3582,6 +3662,14 @@ LIVEBOOT = r"""
         (hz.hazards || []).map(x =>
           `<div class="warn" style="margin-top:3px">⚠ ${x.row !== undefined && (j.rows || []).length > 1 ? `row ${x.row} ` : ""}partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
           `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") + `</div>`;
+    const tl = j.two_layout || {};
+    const tlHtml = `<div style="margin-top:8px"><b>two-layout check</b> ` +
+      `<span class="pill warnl">The Lab · unverified here</span><br>` +
+      `<span class="note">If RWL were 1 this word = RIR write to row ` +
+      `${tl.rir_row} bit ${tl.rir_bit}</span>` +
+      (tl.rir_layout_warning
+        ? `<div class="bad" style="margin-top:3px">⚠ RIR control-row region ` +
+          `(rows 0–7) — check DEBUGCTRL before burning</div>` : "") + `</div>`;
     const strip = `<div class="frow" style="margin-top:10px">` +
       `<span class="pill ${j.window_ok ? "okl" : ""}">burn window ${j.window_ok ? "open" : "closed"} — not required for preview</span>` +
       `<span class="pill warnl">arm pending — auto-armed at burn (SENSE_CTRL)</span>` +
@@ -3589,7 +3677,7 @@ LIVEBOOT = r"""
     return `<div class="verdict ${vcls}" style="padding:8px 12px;margin-top:8px">` +
       `<b>${esc(j.verdict)} (preview)</b> — read-only, zero latching writes (row reads use the read command) · ` +
       `${esc(j.bdf || "")} · ${esc(j.ts || "")}</div>` +
-      rowsHtml + colHtml + plHtml + hzHtml +
+      rowsHtml + colHtml + plHtml + hzHtml + tlHtml +
       (j.predicted ? `<div style="margin-top:8px"><b>predicted effect:</b> ${esc(j.predicted)}</div>` : "") +
       strip;
   }
@@ -3675,6 +3763,15 @@ LIVEBOOT = r"""
           : "OK — every touched plane keeps its defective units masked"}</b>` +
         `</div>` : "";
     const did = j.die_id;
+    const tl2 = j.two_layout;
+    const tl2Block = tl2
+      ? `<div class="note" style="margin-top:6px">two-layout check ` +
+        `<span class="pill warnl">The Lab · unverified here</span> — ` +
+        `if RWL were 1 this word = RIR write to row ${tl2.rir_row} ` +
+        `bit ${tl2.rir_bit}` +
+        (tl2.rir_layout_warning
+          ? `<div class="bad">⚠ RIR control-row region (rows 0–7) — ` +
+            `check DEBUGCTRL before burning (burn check)</div>` : "") + `</div>` : "";
     const didBlock = did ? `<div class="${did.ok ? "ok" : "bad"}" style="margin-top:6px">` +
       `<b>identity: ${did.ok
         ? "OK — sn-" + esc(did.serial || "") + (did.checked_against
@@ -3687,7 +3784,7 @@ LIVEBOOT = r"""
       `<div>row ${j.row} on <span class="mono">${esc(j.bdf || targetBdf)}</span> currently reads ` +
       `<span class="mono">${fmt(j.current)}</span> · ` +
       `rows to burn: <span class="mono">${(j.rows_to_burn || [row]).join(", ")}</span></div>` +
-      plnBlock + polBlock + didBlock +
+      plnBlock + polBlock + didBlock + tl2Block +
       `<div>purity (0→1 superset): <b class="${j.pure_0to1 ? "ok" : "bad"}">${j.pure_0to1 ? "OK" : "FAIL"}</b></div>` +
       `<div class="guardlist">${guards}</div>` +
       (pending ? `<div class="guardlist">${pending}</div>` : "") +
@@ -3780,6 +3877,17 @@ LIVEBOOT = r"""
   async function pollGlitch() {
     try { setCampaignUI(await jget("/api/glitch/status")); } catch (e) {}
   }
+  // task 51: Lab in-window single-pulse preset — fills the campaign inputs
+  // ONLY (never starts a campaign). t_dip +50 us maps to the console's
+  // delay field; v_restore 750 / t_restore -20 have no console inputs —
+  // the firmware's post-dip restore is fixed (docs/PROTOCOL.md invariants).
+  $("t51-lab-preset").onclick = () => {
+    $("gc-vdip").value = 365; $("gc-delay").value = 50;
+    $("gc-pw").value = 196;   $("gc-pulses").value = 1;
+    $("t51-preset-note").textContent =
+      "Lab preset filled (v_dip 365, delay +50, pw 196, pulses 1) — " +
+      "v_restore 750 / t_restore -20 have no console inputs; start manually.";
+  };
   $("gc-start").onclick = async () => {
     const mode = $("gc-mode").value;
     const adaptive = $("gc-strategy").value === "adaptive";
@@ -3914,6 +4022,12 @@ LIVEBOOT = r"""
   // ---------- GPU pane ----------
   $("tab-gpu").innerHTML = `
     <div class="card" id="gpu-banner"><div class="note">loading…</div></div>
+    <div class="card" id="t51-gpu-readouts" style="margin-top:12px">
+      <h3>Allspark readouts <span class="note">(The Lab / allspark
+        community claims — read-only, never a burn gate)</span></h3>
+      <div id="t51-gpu-readouts-body" class="note">awaiting first live poll
+        (/api/live readouts)…</div>
+    </div>
     <div class="card" style="margin-top:12px">
       <div class="flexline" style="margin:0 0 6px 0">
         <h3 style="margin:0">Live monitor</h3>
