@@ -447,7 +447,9 @@ burn-on-goldilocks mode creates that state on the selected GPU.
 - **Burn queue**: all queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement
-  policy). The queue renders as the SAME table shape as the burn lists —
+  policy). FF words carry a `two-step: inert → arm` note (each burns as
+  the chain=0 word verified, then the chain arm — see "Two-step FF
+  burn"). The queue renders as the SAME table shape as the burn lists —
   `# | Word | Target row | Field | Status | Via | action` — so what the
   queue displays IS what it will burn. A queued word already EFFECTIVE
   under last-wins is highlighted
@@ -628,6 +630,13 @@ row field shows the zone verdict for whatever row you type.
      from the intent — advisory only, never a gate; effects are relative
      to the burned row's effective winner (baseline stated) and every burn
      row (mirror included) is analyzed; skipped above 12 delta bits;
+   - FF records (chain field nonzero) additionally show the **two-step
+     sequence** — `two-step: inert 0x… (Δ …) → arm chain Δ 0x…` (step A
+     word/delta with the chain bits cleared, step B chain delta only) —
+     plus a note (`hazards.two_step_note`) that the executor burns
+     two-step, so a partial step-A landing stays chain=0 (ignored by the
+     fuse walk) and the enumerated chain-armed partial-landing hazards
+     cannot arm;
    - the **predicted effect** line when decodable (e.g. `FBP_DISABLE data
      0x4290 → 0x4200 (unmasks FBP1/FBP4)`) — `STATUS_OPT_*` shadows update
      only after a power cycle;
@@ -659,7 +668,9 @@ row field shows the zone verdict for whatever row you type.
    Goldilocks it burns the records in-process: each burn re-checks the
    driver-unbound state, journal, GPIO19 preflight and window, runs the
    SENSE_CTRL arm sequence, the EN=1 + GPIO19/TRIGGER program bracket with
-   `CMD_WRITE` of the **delta**, and read-back verify logged as
+   `CMD_WRITE` of the **delta** (FF records burn **two-step**: the word
+   with chain bits cleared verified first, then the chain bits — see
+   "Two-step FF burn"), and read-back verify logged as
    `row N: VERIFY OK` (a row already latched by an earlier aborted run
    logs `ALREADY BURNED` and still counts as success). The campaign ends
    only when EVERY record succeeds AND — for ≥2-record burns — the whole
@@ -765,11 +776,27 @@ server-side immediately before `CMD_WRITE`:
    journal `command_may_be_issued`; raise `EN_SW_OVERRIDE = 1` with
    read-back check (no retry); `GPIO19` high + `TRIGGER (0xD604)` pulse
    (masked write `0x30FF`, poll `TRIGGER` bit0 clear ≤2 s); `FUSEADDR = row`,
-   `FUSEWDATA = delta` (**delta = value & ~current**, not the full value —
+   `FUSEWDATA = delta` (**delta = target & ~current**, not the full value —
    same as the reference), `FUSECTRL = CMD_WRITE`, poll to idle; then in
    `finally`: `GPIO19` low + `TRIGGER` pulse, restore the saved `GPIO` and
    `EN_SW_OVERRIDE` values. `GPIO`/`TRIGGER`/`EN=1` writes exist ONLY in
    this bracket.
+
+   **Two-step FF burn** (razk-proven partial-landing protection —
+   evidence `60-gpu2-burn-truth.md` §2–3: razk-batch2 burns every FF
+   record as two steps on one row; the console's own hazard engine shows
+   why, `61-hp-console-validation.md` D4): for a record whose chain
+   field `word[4:0]` is nonzero, the bracket runs TWICE on the same row.
+   Step A latches `value & ~0x1F` — the word with the chain bits cleared;
+   chain=0 is NULL, the fuse walk ignores the row, so any partial landing
+   of step A stays **inert** — read-back must equal the step-A word or the
+   burn STOPS (`VERIFY FAIL — step A …; STOP, no arm step`; the arm step
+   is never issued). Step B then latches only the chain bits
+   (`C & ~row_after_A`), read-back must equal the final word or the burn
+   STOPS with the data complete but the record unarmed. Each step
+   journals its own `command_may_be_issued` before `EN_SW_OVERRIDE = 1`
+   and `verified` after its read-back matches. Words with chain field 0
+   (FPF/column writes) keep the single-write path.
 10. **Read-back verify** with `EN_SW_OVERRIDE` cleared for reads, then a
     journal `verified` event.
 11. **Whole-image verify** after a multi-record burn (≥2 rows succeeded,
@@ -997,9 +1024,9 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | POST | `/api/glitch/stop` | stop campaign |
 | POST | `/api/revert` | manual VRM hand-back — closes a held window (refused while a campaign owns the pico) |
 | GET | `/api/burn/check?row=&value=&mirror=&bdf=` | dry burn check: window checks (`window_ok`/`guards`) + `arm_pending` (EFP/PROGRAM_DIS/SBFE/WDATA_SECURE/FUSEWDATA_PLM, `ok: null` — auto-armed at burn via SENSE_CTRL) + `policy` verdict + `pure_0to1` + `two_layout` (RIR-layout decode of the candidate word: `rir_enabled`/`rir_row`/`rir_bit`/`rir_targets_control_rows_0_7`/`rir_layout_warning` — WARNING only, never a gate; [The Lab / allspark, unverified on our silicon]) |
-| POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`, `two_layout` (RIR-layout decode + `rir_layout_warning` when the word read as an RIR record lands enabled in control rows 0–7 — warning only, never a gate; [The Lab / allspark, unverified on our silicon]); stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
+| POST | `/api/burn/preview` | **read-only** burn preview (same body as `/api/burn` minus token/confirm; no window/arm needed, works in mock): `verdict` (`SAFE TO BURN`/`WILL BE INERT`/`IMPOSSIBLE`/`ALREADY BURNED`), `rows[]` (`before`/`delta`/`after` + FF decode before/after; FF records also `two_step`: `step_a_word`/`step_a_delta`/`step_b_delta` + inert-then-arm note), `collisions` (same-key records + LAST-WINS verdict), `hazards` (partial-landing subsets per burn row, mirror included, capped at 12 delta bits; effects relative to the burned row's effective winner; FF records also `two_step_note` stating step-A partials stay chain=0/inert), `predicted` effect line, `window_ok`/`arm_pending`/`journal_uncertain`, `two_layout` (RIR-layout decode + `rir_layout_warning` when the word read as an RIR record lands enabled in control rows 0–7 — warning only, never a gate; [The Lab / allspark, unverified on our silicon]); stored as `last-preview.json`; `VERIFY OK` burns add `after_state` (readback + post-burn collision rescan) |
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
-| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; **identity gate re-checked at execution** — `identity gate: …` refuses before any write; window+arm checks land in `guards`; journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
+| POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; **identity gate re-checked at execution** — `identity gate: …` refuses before any write; window+arm checks land in `guards`; FF records burn **two-step** — inert chain=0 word verified, then chain bits (report `steps[]` lists each step's `word`/`delta`/`readback`); journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` (two-step: `step A … STOP, no arm step` leaves the record inert) / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN", bdf?, dump?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`) **and on the identity gate** (serial readable + live die-ID rows 8–15 match `dump` — a dumps-relative dir, else the newest same-serial dump; see "Dump identity"): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; identity failure → error `identity gate: …`, no token; success adds `bdf` + `checks` dict + `die_id` verdict |
 | POST | `/api/dumps/dedupe` | `{apply?}` — drop saved dumps whose **fuse content** is identical to another dump of the same card: same serial + same rows dict (timestamps/dmesg/lspci ignored). Each identical group keeps its **oldest** dump; anything different — one differing row, another card's serial, a dump without a rows dict — is kept. Dry-run by default; `apply: true` deletes. Never touches `stock.json`; the die-ID gate still resolves (the kept dump carries the same rows). GUI: **Dedupe** button in the Saved dumps picker (dry-run panel → confirm) |
 | POST | `/api/pico/flash` | `{port?, uf2?}` — flash firmware into the Pico 2 from the console: sends `b` to the pico port (the firmware's own BOOTSEL reboot; skipped when a BOOTSEL drive is already up), waits for the RP2350/RPI-RP2 mass-storage, mounts it, copies the `.uf2` (drive auto-detaches, board reboots), then **reads the firmware banner back** over the port and reports `fw_marker`. The console host needs no toolchain — build the `.uf2` on a workstation and drop it at `<repo>/firmware/build/pwmvid.uf2` (or the state dir); `uf2` overrides the path. GUI: **⚡ Flash Pico 2** button next to the pico port dropdown |

@@ -3002,7 +3002,9 @@ LIVEBOOT = r"""
           `<td class="mono">#${i + 1}</td>` +
           `<td class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</td>` +
           `<td>${rowCell}</td>` +
-          `<td class="note">${esc(f.key)}${f.field === "DEVID" ? ` → 0x${f.devid.toString(16).toUpperCase()}` : ""}</td>` +
+          `<td class="note">${esc(f.key)}${f.field === "DEVID" ? ` → 0x${f.devid.toString(16).toUpperCase()}` : ""}` +
+          (ffDecode(q.word).ch && !ffDecode(q.word).iff
+            ? `<br><span class="note">two-step: inert → arm</span>` : "") + `</td>` +
           `<td>${statusCell}</td>` +
           `<td class="note">${esc(q.src)}</td>` +
           `<td><button class="btn" data-q-del="${i}">✕</button></td></tr>`;
@@ -3619,6 +3621,11 @@ LIVEBOOT = r"""
       `<div style="margin-top:8px"><b class="mono">row ${r.row}</b> ` +
       `<span class="pill${r.row_verdict === "SAFE TO BURN" ? " okl" : r.row_verdict === "ALREADY BURNED" ? " warnl" : " badl"}">${esc(r.row_verdict)}</span></div>` +
       `<div class="mono">${fmt(r.before)} <b class="warn">Δ ${fmt(r.delta)}</b> → ${fmt(r.after)}</div>` +
+      (r.two_step
+        ? `<div class="note">two-step: inert <span class="mono">${fmt(r.two_step.step_a_word)}</span> ` +
+          `(Δ <span class="mono">${fmt(r.two_step.step_a_delta)}</span>) → arm chain Δ ` +
+          `<span class="mono">${fmt(r.two_step.step_b_delta)}</span> — ${esc(r.two_step.note)}</div>`
+        : "") +
       bitStrip(r.after, r.delta) +
       `<table><tr><th></th><th>word</th><th>FF decode</th></tr>` +
       `<tr><td>before</td><td class="mono">${fmt(r.before)}</td><td>${decodeSpan(r.decode_before)}</td></tr>` +
@@ -3662,7 +3669,8 @@ LIVEBOOT = r"""
         `<span class="note">${(hz.hazards || []).length} hazard · ${hz.benign || 0} benign · ${hz.inert || 0} inert subset(s)</span>` +
         (hz.hazards || []).map(x =>
           `<div class="warn" style="margin-top:3px">⚠ ${x.row !== undefined && (j.rows || []).length > 1 ? `row ${x.row} ` : ""}partial Δ <span class="mono">${fmt(x.subset)}</span> ` +
-          `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") + `</div>`;
+          `lands <span class="mono">${fmt(x.word)}</span> (${decodeSpan(x.decode)}) — ${esc(x.effect)}</div>`).join("") +
+        (hz.two_step_note ? `<div class="note" style="margin-top:3px">${esc(hz.two_step_note)}</div>` : "") + `</div>`;
     const tl = j.two_layout || {};
     const tlHtml = `<div style="margin-top:8px"><b>two-layout check</b> ` +
       `<span class="pill warnl">The Lab · unverified here</span><br>` +

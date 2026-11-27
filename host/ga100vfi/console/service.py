@@ -1023,6 +1023,11 @@ def arm_window(rd, wr):
 def burn_execute(rd, wr, row, value, old, bdf, journal=None,
                  ack_uncertain=False) -> dict:
     """Guarded single-row burn mirroring ga100_burn.program per row.
+    FF records (chain field bits 0-4 nonzero) burn TWO-STEP like razk:
+    step A latches the word with chain bits cleared (chain=0 = inert),
+    verifies, then step B ORs in only the chain bits and verifies — a
+    partial landing never arms a record. Non-FF words (chain field 0)
+    keep the single latching write.
     Returns report dict. NEVER retries. Order: driver-unbound, journal
     uncertainty, GPIO19 preflight, window+arm, row read/old-match,
     fsync'd journal, EN=1 raise, GPIO19-high + TRIGGER bracket around
@@ -1073,47 +1078,74 @@ def burn_execute(rd, wr, row, value, old, bdf, journal=None,
             return rep
         delta = value & ~cur & 0xFFFFFFFF     # ref writes the delta, not the value
         rep["delta"] = delta
-        if journal:
-            # synced BEFORE FUSE_EN can be raised (ref program())
-            journal_append(journal, "command_may_be_issued", bdf=bdf,
-                           row=row, before=cur, delta=delta, after=value)
-        wr(EN_SW_OVERRIDE, 1)                 # ref write_checked(EN, 1)
-        en_rb = rd(EN_SW_OVERRIDE)
-        if en_rb != 1:
-            rep["result"] = (f"ABORT — EN_SW_OVERRIDE did not latch: "
-                             f"requested 1, read 0x{en_rb:08X}")
-            return rep
-        gpio_touched = True
-        try:
+        # TWO-STEP FF burn (razk-proven, evidence 60 §2: every FF record in
+        # razk-batch2 is two steps on one row). Chain field = bits 0-4;
+        # chain=0 is NULL — the fuse walk ignores the row, so a step-A word
+        # is INERT. Step A lands the word with the chain bits cleared and
+        # verifies; step B ORs in ONLY the chain bits and verifies. A
+        # partial landing can therefore never arm a garbage record
+        # (evidence 61 D4: single-write partial 0x201 = chain+block with
+        # data 0x0000 unmasks dead FBPA22/23 — the Nov-24 brick). Non-FF
+        # records (chain field 0: FPF/column writes) keep the single write.
+        chain = value & 0x1F
+        targets = [value & ~0x1F, value] if chain else [value]
+        expected = cur
+        rep["steps"] = []
+        for k, want in enumerate(targets):
+            step = "AB"[k] if chain else ""
+            sdelta = want & ~expected & 0xFFFFFFFF
+            if journal:
+                # synced BEFORE FUSE_EN can be raised (ref program())
+                journal_append(journal, "command_may_be_issued", bdf=bdf,
+                               row=row, before=expected, delta=sdelta,
+                               after=want)
+            wr(EN_SW_OVERRIDE, 1)             # ref write_checked(EN, 1)
+            en_rb = rd(EN_SW_OVERRIDE)
+            if en_rb != 1:
+                rep["result"] = (f"ABORT — EN_SW_OVERRIDE did not latch: "
+                                 f"requested 1, read 0x{en_rb:08X}")
+                return rep
+            gpio_touched = True
             try:
-                _gpio_strobe(rd, wr, saved_gpio, True)
-                wr(FUSECTRL, 0)
-                wr(FUSEADDR, row)
-                wr(FUSEWDATA, delta)
-                wr(FUSECTRL, CMD_WRITE)
-                if not _fusectrl_idle(rd, 2.0):
-                    rep["result"] = "ABORT — CMD_WRITE did not return to IDLE"
-                    return rep
-            finally:
-                _gpio_strobe(rd, wr, saved_gpio, False)
-        except RuntimeError as e:
-            rep["result"] = f"ABORT — {e}"
-            return rep
-        wr(EN_SW_OVERRIDE, 0)
-        time.sleep(0.05)
-        rb = read_row_via(rd, wr, row)
-        rep["readback"] = rb
-        if rb == value:
-            rep["result"] = "VERIFY OK"
+                try:
+                    _gpio_strobe(rd, wr, saved_gpio, True)
+                    wr(FUSECTRL, 0)
+                    wr(FUSEADDR, row)
+                    wr(FUSEWDATA, sdelta)
+                    wr(FUSECTRL, CMD_WRITE)
+                    if not _fusectrl_idle(rd, 2.0):
+                        rep["result"] = "ABORT — CMD_WRITE did not return to IDLE"
+                        return rep
+                finally:
+                    _gpio_strobe(rd, wr, saved_gpio, False)
+            except RuntimeError as e:
+                rep["result"] = f"ABORT — {e}"
+                return rep
+            wr(EN_SW_OVERRIDE, 0)
+            time.sleep(0.05)
+            rb = read_row_via(rd, wr, row)
+            rep["readback"] = rb
+            rep["steps"].append({"step": step, "word": want,
+                                 "delta": sdelta, "readback": rb})
+            if rb != want:
+                # STOP, no retry (ref program readback gate). A failed
+                # step A leaves chain=0 — the record stays INERT and the
+                # arm step is never issued.
+                rep["result"] = (
+                    f"VERIFY FAIL — readback does not match" if not chain
+                    else f"VERIFY FAIL — step {step} readback 0x{rb:08X} "
+                         f"!= 0x{want:08X}; STOP, no "
+                         + ("arm step" if k == 0 else "retry"))
+                return rep
             if journal:
                 journal_append(journal, "verified", bdf=bdf, row=row,
-                               word=value)
-            # predicted-vs-actual: re-read the burned row and re-run the
-            # last-wins collision scan AFTER verify (read-only here — the
-            # task-08 write sequence above is unchanged)
-            rep["after_state"] = burn_after_state(rd, wr, row, value)
-        else:
-            rep["result"] = "VERIFY FAIL — readback does not match"
+                               word=want)
+            expected = want
+        rep["result"] = "VERIFY OK"
+        # predicted-vs-actual: re-read the burned row and re-run the
+        # last-wins collision scan AFTER verify (read-only here — the
+        # write sequence above is unchanged in kind)
+        rep["after_state"] = burn_after_state(rd, wr, row, value)
         return rep
     finally:
         if gpio_touched:                      # ref finally: restore GPIO19
@@ -1802,6 +1834,11 @@ def burn_preview(rd, row, value, mirror):
             time.sleep(0.05)
     key = ff_key(value)
     collisions = _ff_collisions(pool, key, set(rows))
+    # Two-step executor semantics (mirrors burn_execute, razk-proven):
+    # FF records land as step A (word with chain bits cleared — chain=0
+    # is NULL, ignored by the fuse walk, so a partial landing is INERT)
+    # verified, then step B (chain bits only) verified.
+    chain = value & 0x1F
     row_entries = []
     for r in rows:
         before = befores[r]
@@ -1814,10 +1851,20 @@ def burn_preview(rd, row, value, mirror):
             rv = "WILL BE INERT"            # a later record already wins
         else:
             rv = "SAFE TO BURN"
-        row_entries.append({"row": r, "before": before, "delta": delta,
-                            "after": value, "row_verdict": rv,
-                            "decode_before": ff_decode_if(r, before),
-                            "decode_after": ff_decode_if(r, value)})
+        entry = {"row": r, "before": before, "delta": delta,
+                 "after": value, "row_verdict": rv,
+                 "decode_before": ff_decode_if(r, before),
+                 "decode_after": ff_decode_if(r, value)}
+        if chain:
+            inert_word = value & ~0x1F
+            after_a = before | (inert_word & ~before & 0xFFFFFFFF)
+            entry["two_step"] = {
+                "step_a_word": inert_word,
+                "step_a_delta": inert_word & ~before & 0xFFFFFFFF,
+                "step_b_delta": chain & ~after_a & 0xFFFFFFFF,
+                "note": "two-step: inert chain=0 word first, verified, "
+                        "then chain bits arm the record"}
+        row_entries.append(entry)
     rvs = [e["row_verdict"] for e in row_entries]
     if "IMPOSSIBLE" in rvs:
         verdict = "IMPOSSIBLE"
@@ -1847,6 +1894,16 @@ def burn_preview(rd, row, value, mirror):
         hazards["hazards"].extend(hz["hazards"])
         hazards["benign"] += hz["benign"]
         hazards["inert"] += hz["inert"]
+    if chain:
+        # The enumeration above assumes ONE write of the full delta. The
+        # executor burns two-step, so the residual partial after step A
+        # always has chain=0 — ignored by the fuse walk (inert); the
+        # chain-armed-with-missing-data subsets listed above cannot arm.
+        hazards["two_step_note"] = (
+            "burned two-step (inert chain=0 word verified, then chain "
+            "bits only): a partial step-A landing stays chain=0 and is "
+            "ignored by the fuse walk — the chain-armed partial-landing "
+            "hazards above cannot arm")
     predicted = None
     label = ff_block_label(*key) or FF_BLOCK_NAMES.get(key)
     if label:
