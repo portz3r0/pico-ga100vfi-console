@@ -41,6 +41,16 @@ Endpoints:
   POST /api/burn/queue_start {records[], <same params as /api/glitch/start>} — ONE request: runs the arm gate (Goldilocks + identity vs newest dump), mints the token, then starts the burn-mode campaign with those records + token. Refuses an empty queue. Returns {started, records, token_ttl, token} or a precise error — the arm->start TTL race cannot happen here.
   GET  /api/driver         driver/modules/blacklist state
   POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
+  GET  /api/vbios/list     roms in rom_dir + saved backups + driver + nvflash info
+  GET  /api/vbios/browse?dir=  file-picker listing: subdirs + *.rom (size+md5)
+  POST /api/vbios/backup   nvflash --save -> {ok, path, md5} or precise error
+  POST /api/vbios/flash    {rom, confirm:true, protectoff} — backup-if-not-fresh
+                           (<24h for this serial), optional --protectoff, then
+                           nvflash -4 -5 <rom>; refuses while a campaign runs
+                           or ANY nvidia kernel MODULE is loaded (nvflash
+                           requires nvidia/nvidia_uvm/nvidia_modeset/
+                           nvidia_drm UNLOADED — device-unbound alone is not
+                           enough — owner, 2026-11-27)
   GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
   GET  /api/gpus/all     every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF
   GET  /api/gpu            nvidia-smi + lspci link state (?bdf= any GPU on the host)
@@ -129,6 +139,9 @@ CFG = {
     "state_dir": os.path.expanduser("~/ga100-fuse-view"),
     "html": None,
     "mock": None,
+    # vbios flash phase (task 70) — ROM picker default dir + nvflash override
+    "rom_dir": "/home/administrator/nvidia",
+    "nvflash_path": None,
     # burn placement policy (see docs/CONSOLE.md — the Nov-16 brick rules)
     "ff_buffer": 4,        # empty rows between last boot FF and first burn
     "ff_tail_reserve": 12, # revert/correction space at the end of the FF region
@@ -3107,6 +3120,309 @@ def driver_op_api(body):
     return {"error": f"unknown op {op!r}"}
 
 
+# ---------------------------------------------------------------- vbios flash
+# Task 70: the post-DEVID flash phase, living beside the fuse gates. nvflash
+# FAILS with the nvidia driver bound — the gate below refuses while a driver
+# is bound to the device; the Unload driver action runs the same full unload
+# fuse work requires (sysfs unbind + rmmod of the nvidia modules).
+# (owner, 2026-11-27). The binary is VENDORED in the repo
+# (host/bin/nvflash); mock mode never executes it.
+VBIOS_FRESH_S = 24 * 3600           # a backup newer than this counts as fresh
+VBIOS_PROMPT_ANSWERS = "y\n" * 16   # nvflash prompts; stdin is not interactive
+VBIOS_FLASH_TIMEOUT_S = 120
+VBIOS_SAVE_TIMEOUT_S = 60
+VBIOS_POST_NOTE = ("After a VBIOS flash the card often needs a COLD BOOT "
+                   "(PSU off) to attach — missing lspci/nvidia-smi output "
+                   "here is NOT proof of failure.")
+
+_nvflash_version_cache: dict = {}
+
+
+def nvflash_bin():
+    """nvflash to use: CFG nvflash_path override -> vendored
+    host/bin/nvflash -> system PATH."""
+    if CFG["nvflash_path"]:
+        return CFG["nvflash_path"]
+    vendored = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "bin", "nvflash")
+    if os.access(vendored, os.X_OK):
+        return vendored
+    return shutil.which("nvflash")
+
+
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def nvflash_info():
+    """Path + md5 + version line of the resolved nvflash. Version is cached
+    per path and NEVER executed in mock mode."""
+    nv = nvflash_bin()
+    if not nv:
+        return {"found": False, "path": None}
+    info = {"found": True, "path": nv}
+    if CFG["mock"]:
+        info["mock"] = True
+        return info
+    if nv not in _nvflash_version_cache:
+        out = sh([nv, "--version"], timeout=15) or ""
+        _nvflash_version_cache[nv] = out.splitlines()[0] if out else ""
+    info["version"] = _nvflash_version_cache[nv]
+    try:
+        info["md5"] = md5_of(nv)
+    except OSError:
+        pass
+    return info
+
+
+def vbios_backups_dir():
+    return os.path.join(CFG["state_dir"], "vbios-backups")
+
+
+def _rom_info(path):
+    return {"name": os.path.basename(path), "path": path,
+            "size": os.path.getsize(path), "md5": md5_of(path)}
+
+
+def _rom_dir_entries(d):
+    """*.rom files in d with size+md5, name-sorted; unreadable files skipped."""
+    roms = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return roms
+    for n in names:
+        p = os.path.join(d, n)
+        if n.lower().endswith(".rom") and os.path.isfile(p):
+            try:
+                roms.append(_rom_info(p))
+            except OSError:
+                continue
+    return roms
+
+
+def vbios_browse_api(qdir):
+    """GET /api/vbios/browse — file-picker listing. Navigation is within the
+    whole filesystem; '..' is resolved by abspath, never by string splice."""
+    d = os.path.abspath(os.path.expanduser(qdir or CFG["rom_dir"]))
+    if not os.path.isdir(d):
+        return {"error": f"{d} is not a directory"}
+    dirs = []
+    try:
+        for n in sorted(os.listdir(d)):
+            if not n.startswith(".") and os.path.isdir(os.path.join(d, n)):
+                dirs.append(n)
+    except OSError as e:
+        return {"error": f"{d}: {e}"}
+    parent = os.path.dirname(d)
+    return {"dir": d, "parent": parent if parent != d else None,
+            "dirs": dirs, "roms": _rom_dir_entries(d)}
+
+
+def vbios_list_api():
+    """GET /api/vbios/list — ROMs in the configured dir, saved backups
+    (newest first), driver state summary, nvflash resolution."""
+    if CFG["mock"]:
+        drv = {"bdf": CFG["bdf"], "bound": None, "mock": True}
+    else:
+        st = driver_state()
+        drv = {k: st[k] for k in ("bdf", "bound", "loaded")}
+    backups = []
+    bd = vbios_backups_dir()
+    try:
+        for n in sorted(os.listdir(bd), reverse=True):
+            p = os.path.join(bd, n)
+            if n.endswith(".rom") and os.path.isfile(p):
+                try:
+                    backups.append({"name": n, "md5": md5_of(p),
+                                    "when": datetime.fromtimestamp(
+                                        os.path.getmtime(p)
+                                    ).isoformat(timespec="seconds")})
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return {"rom_dir": CFG["rom_dir"],
+            "roms": _rom_dir_entries(CFG["rom_dir"]),
+            "backups": backups, "driver": drv, "nvflash": nvflash_info(),
+            "campaign_running": bool(GLITCH["running"])}
+
+
+def _nvflash_run(argv, timeout):
+    """nvflash with an explicit argv list (no shell); prompts answered 'y'
+    on stdin. Returns (combined_output, returncode); rc -1 on timeout/exec
+    failure with the partial output in the text."""
+    try:
+        p = subprocess.run(argv, shell=False, capture_output=True, text=True,
+                           input=VBIOS_PROMPT_ANSWERS, timeout=timeout)
+        return (p.stdout + p.stderr).strip(), p.returncode
+    except subprocess.TimeoutExpired as e:
+        partial = str(e.stdout or "") + str(e.stderr or "")
+        return f"<<TIMEOUT after {timeout}s — partial output:\n{partial}>>", -1
+    except OSError as e:
+        return f"<<{argv}: {e}>>", -1
+
+
+def _backup_sane(path):
+    """None when the saved ROM looks real (non-empty, not all-00, not
+    all-FF); the refusal reason otherwise."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"backup unreadable: {e}"
+    if not data:
+        return "backup is empty (0 bytes)"
+    if set(data) == {0}:
+        return "backup is all-00 — not a VBIOS image"
+    if set(data) == {0xFF}:
+        return "backup is all-FF — not a VBIOS image"
+    return None
+
+
+def vbios_backup_run(bdf, journal):
+    """nvflash --save into <state_dir>/vbios-backups/<serial>-<stamp>.rom.
+    The vbios_backup journal event is fsync'd BEFORE the command runs (same
+    discipline as fuse writes). Returns (rom_info, None) or (None, reason)."""
+    serial, _src = card_serial(bdf)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    os.makedirs(vbios_backups_dir(), exist_ok=True)
+    path = os.path.join(vbios_backups_dir(),
+                        f"{serial or 'noserial'}-{stamp}.rom")
+    journal_append(journal, "vbios_backup", bdf=bdf, dest=path)
+    if CFG["mock"]:
+        with open(path, "wb") as f:          # canned image, no subprocess
+            f.write(b"\x55\xaa" * 512)
+    else:
+        nv = nvflash_bin()
+        if not nv:
+            return None, ("nvflash not found — vendored host/bin/nvflash "
+                          "missing and no nvflash_path/PATH entry")
+        out, rc = _nvflash_run([nv, "--save", path], VBIOS_SAVE_TIMEOUT_S)
+        if rc != 0 or not os.path.exists(path):
+            tail = "\n".join(out.splitlines()[-15:])
+            return None, f"nvflash --save failed (rc {rc}):\n{tail}"
+    bad = _backup_sane(path)
+    if bad:
+        return None, f"backup verification failed: {bad}"
+    return _rom_info(path), None
+
+
+def _fresh_backup(serial):
+    """Newest backup of this serial younger than VBIOS_FRESH_S, or None."""
+    bd = vbios_backups_dir()
+    prefix = f"{serial or 'noserial'}-"
+    best, best_mtime = None, 0.0
+    try:
+        for n in os.listdir(bd):
+            if not (n.startswith(prefix) and n.endswith(".rom")):
+                continue
+            p = os.path.join(bd, n)
+            mtime = os.path.getmtime(p)
+            if time.time() - mtime < VBIOS_FRESH_S and mtime > best_mtime:
+                best, best_mtime = p, mtime
+    except OSError:
+        return None
+    try:
+        return _rom_info(best) if best else None
+    except OSError:
+        return None
+
+
+def vbios_backup_api():
+    """POST /api/vbios/backup — manual 'Save current VBIOS'."""
+    bdf, err = resolve_target()
+    if bdf is None:
+        return {"error": err}
+    entry, bad = vbios_backup_run(bdf, _journal_path())
+    if bad:
+        return {"ok": False, "error": f"backup failed: {bad}"}
+    return {"ok": True, "path": entry["path"], "md5": entry["md5"]}
+
+
+def vb_post_verify(bdf):
+    """Best-effort 'did the card come back' after a flash. nvidia-smi is
+    skipped while the module is absent (NVML would auto-load the driver)."""
+    if CFG["mock"]:
+        return {"lspci": "03:00.0 0302: 10de:20b5 (rev a1)",
+                "nvidia_smi": "name, memory.total [MiB]\n"
+                              "NVIDIA A100 80GB HBM2, 81920 MiB",
+                "note": VBIOS_POST_NOTE, "mock": True}
+    slot = bdf.split(":", 1)[1] if bdf.count(":") == 2 else bdf
+    lspci = sh(["lspci", "-n", "-s", slot], timeout=15)
+    if os.path.exists("/sys/module/nvidia"):
+        smi = sh(["nvidia-smi", "--query-gpu=name,memory.total",
+                  "--format=csv"], timeout=15)
+    else:
+        smi = ("nvidia-smi skipped — driver not loaded "
+               "(NVML would auto-load it)")
+    return {"lspci": lspci, "nvidia_smi": smi, "note": VBIOS_POST_NOTE}
+
+
+def vbios_flash_api(body):
+    """POST /api/vbios/flash — the end-to-end flash phase: fresh backup
+    (refusing the flash if save/verify fails), optional --protectoff, then
+    `nvflash -4 -5 <rom>`. Guards: confirm, rom exists, no campaign running,
+    driver NOT bound (nvflash fails with the driver bound — owner rule;
+    INVERTED from the first brief). Mock mode: canned outputs, no subprocess."""
+    if not body.get("confirm"):
+        return {"error": "confirm required — flashing rewrites the SPI VBIOS "
+                         "(irreversible-ish; board-id mismatch from nvflash "
+                         "is expected on a rebranded card)"}
+    rom = body.get("rom") or ""
+    if not rom.lower().endswith(".rom") or not os.path.isfile(rom):
+        return {"error": f"rom {rom!r} is not an existing *.rom file"}
+    if GLITCH["running"]:
+        return {"error": "glitch campaign running — the card must be idle "
+                         "for a flash"}
+    bdf, err = resolve_target(body.get("bdf"))
+    if bdf is None:
+        return {"error": err}
+    bound = driver_of(bdf)
+    if bound:
+        return {"error": f"driver '{bound}' is bound to {bdf} — nvflash fails "
+                         "with the nvidia driver bound; unload the driver "
+                         "first (Unload driver button / Drivers tab)"}
+    if not CFG["mock"] and not nvflash_bin():
+        return {"error": "nvflash not found — vendored host/bin/nvflash "
+                         "missing and no nvflash_path/PATH entry"}
+    journal = _journal_path()
+    serial, _src = card_serial(bdf)
+    backup = _fresh_backup(serial)
+    if backup is None:
+        fresh, bad = vbios_backup_run(bdf, journal)
+        if bad:
+            return {"ok": False, "error": f"refusing flash — backup failed: {bad}"}
+        backup = fresh
+    protectoff = bool(body.get("protectoff"))
+    if protectoff:
+        journal_append(journal, "vbios_flash", bdf=bdf, rom=rom,
+                       step="protectoff")
+        if CFG["mock"]:
+            out, rc = "mock: protectoff done", 0
+        else:
+            out, rc = _nvflash_run([nvflash_bin(), "--protectoff"],
+                                   VBIOS_SAVE_TIMEOUT_S)
+        if rc != 0:
+            return {"ok": False, "error": "nvflash --protectoff failed — "
+                    "flash NOT attempted", "output_tail": out,
+                    "backup": {"path": backup["path"], "md5": backup["md5"]}}
+    journal_append(journal, "vbios_flash", bdf=bdf, rom=rom, step="flash")
+    if CFG["mock"]:
+        out, rc = "mock: flash complete", 0
+    else:
+        out, rc = _nvflash_run([nvflash_bin(), "-4", "-5", rom],
+                               VBIOS_FLASH_TIMEOUT_S)
+    return {"ok": rc == 0, "output_tail": out,
+            "protectoff": protectoff,
+            "backup": {"path": backup["path"], "md5": backup["md5"]},
+            "post_verify": vb_post_verify(bdf)}
+
+
 # ---------------------------------------------------------------- gpu info
 GPU_FIELDS = ["name", "driver_version", "memory.total", "memory.used",
               "utilization.gpu", "utilization.memory",
@@ -3940,6 +4256,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")
+            elif path == "/api/vbios/list":
+                self._send(200, json.dumps(vbios_list_api(), default=str),
+                           "application/json")
+            elif path == "/api/vbios/browse":
+                self._send(200, json.dumps(vbios_browse_api(qs.get("dir")),
+                                           default=str), "application/json")
             elif path == "/api/gpu":
                 self._send(200, json.dumps(gpu_info(qs.get("bdf")),
                                            default=str), "application/json")
@@ -4006,6 +4328,10 @@ class Handler(BaseHTTPRequestHandler):
                 resp = pico_flash_api(body)
             elif path == "/api/driver/op":
                 resp = driver_op_api(body)
+            elif path == "/api/vbios/backup":
+                resp = vbios_backup_api()
+            elif path == "/api/vbios/flash":
+                resp = vbios_flash_api(body)
             elif path == "/api/bound_dump":
                 code, resp = bound_dump_api()
                 return self._send(code, json.dumps(resp, default=str),
@@ -4101,6 +4427,12 @@ def main(argv=None) -> int:
                     help="rows reserved for re-disabling bad SMs")
     ap.add_argument("--mock", default=None,
                     help="serve a dump.json instead of a real card (testing)")
+    ap.add_argument("--rom-dir", default=None,
+                    help="default directory for the VBIOS flash ROM picker "
+                         "(default: /home/administrator/nvidia)")
+    ap.add_argument("--nvflash-path", default=None,
+                    help="nvflash binary override (default: vendored "
+                         "host/bin/nvflash, else nvflash from PATH)")
     a = ap.parse_args(argv)
 
     if a.bdf:
@@ -4135,6 +4467,10 @@ def main(argv=None) -> int:
                   f"Target selector", flush=True)
 
     CFG["mock"] = a.mock
+    if a.rom_dir:
+        CFG["rom_dir"] = a.rom_dir
+    if a.nvflash_path:
+        CFG["nvflash_path"] = a.nvflash_path
     CFG["ff_buffer"] = a.ff_buffer
     CFG["ff_tail_reserve"] = a.ff_tail_reserve
     CFG["ff_sm_reserve"] = a.ff_sm_reserve

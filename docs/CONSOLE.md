@@ -60,6 +60,8 @@ Useful flags:
 | `--poll` | `1.0` | server-side probe interval (seconds) |
 | `--rows` | `0-487` | row range for full dumps |
 | `--ff-buffer` / `--ff-tail-reserve` / `--ff-sm-reserve` | 4 / 12 / 16 | burn placement policy zones |
+| `--rom-dir` | `/home/administrator/nvidia` | default directory for the VBIOS flash ROM picker |
+| `--nvflash-path` | vendored `host/bin/nvflash` | nvflash binary override (else nvflash from PATH) |
 | `--mock` | — | serve a recorded `dump.json` instead of a real card (see Testing) |
 
 For a permanent install see [the systemd unit](#systemd-example) below —
@@ -487,6 +489,30 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   duplicate custom row before burning`), enforcing **one word, one row**
   (fuses OR; sharing a row corrupts both). Queue entries are optionally
   mirrored (mirror is opt-in, off by default); **clear queue** empties it.
+- **VBIOS flash** (directly under the Burn queue card, task 70): the
+  post-DEVID flash phase, living beside the fuse gates. Header row shows
+  the **driver pill** (from `/api/driver` state via `/api/vbios/list`) —
+  nvflash **fails with the nvidia driver bound**, so a bound driver
+  refuses the flash and reveals an **Unload driver** button (reuses
+  `POST /api/driver/op`); the **nvflash pill** shows the resolved binary
+  (vendored `host/bin/nvflash` → `--nvflash-path` → PATH) with its
+  version. **📁 Choose ROM…** opens a file-picker popup over
+  `GET /api/vbios/browse` (default dir `--rom-dir`); the selected ROM's
+  path + size + md5 render on the card. **💾 Save current VBIOS** runs
+  `nvflash --save` into `<state-dir>/vbios-backups/<serial>-<stamp>.rom`
+  and verifies it (non-empty, not all-00/all-FF) before reporting the
+  md5. **⚡ Flash selected ROM** confirms (irreversible-ish; a board-id
+  mismatch prompt from nvflash is EXPECTED on a rebranded card and is
+  auto-answered `y`), then runs the whole phase server-side: fresh backup
+  (<24 h for this serial is reused; a failing save/verify REFUSES the
+  flash) → optional `--protectoff` (checkbox, off by default — owner:
+  not required) → `nvflash -4 -5 <rom>` (120 s timeout). Every step is
+  journalised (`vbios_backup`/`vbios_flash`) with the same fsync-before-
+  command discipline as fuse writes. After the flash the card shows a
+  best-effort **post-flash verify** (`lspci -n -s` + `nvidia-smi`); the
+  card may need a COLD BOOT to attach — absence is not failure. A
+  non-empty burn queue is a warning in the confirm dialog, never a
+  refusal (flashing does not burn fuses).
 - **Glitch campaign**: `v_dip mV`, `pulses`, `pw µs`, `gap µs`, `delay`,
   `max attempts`, a **v_dip strategy** selector (`fixed v_dip` or the
   default `adaptive 3D (v_dip · delay · pw)` with `adaptive v min mV` /
@@ -1073,6 +1099,10 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | POST | `/api/pico/flash` | `{port?, uf2?}` — flash firmware into the Pico 2 from the console: sends `b` to the pico port (the firmware's own BOOTSEL reboot; skipped when a BOOTSEL drive is already up), waits for the RP2350/RPI-RP2 mass-storage, mounts it, copies the `.uf2` (drive auto-detaches, board reboots), then **reads the firmware banner back** over the port and reports `fw_marker`. The console host needs no toolchain — build the `.uf2` on a workstation and drop it at `<repo>/firmware/build/pwmvid.uf2` (or the state dir); `uf2` overrides the path. GUI: **⚡ Flash Pico 2** button next to the pico port dropdown |
 | GET | `/api/driver` | driver state |
 | POST | `/api/driver/op` | `blacklist\|unblacklist\|load\|unload` (`blacklist`/`unload` need `confirm: true`) |
+| GET | `/api/vbios/list` | VBIOS flash card state: `roms[]` (`path`/`size`/`md5`) in `rom_dir`, `backups[]` (`name`/`md5`/`when`, newest first, from `<state-dir>/vbios-backups/`), `driver` summary (`bdf`/`bound`), `nvflash` resolution (`found`/`path`/`version`/`md5`; version never executed in mock), `campaign_running` |
+| GET | `/api/vbios/browse?dir=` | file-picker listing: `{dir, parent, dirs[], roms[{name,path,size,md5}]}` — subdirs + `*.rom` only; navigable across the filesystem, `..` resolved by `abspath`; `error` on a missing dir |
+| POST | `/api/vbios/backup` | manual **Save current VBIOS**: `nvflash --save <state-dir>/vbios-backups/<serial>-<stamp>.rom`, verified non-empty and not all-00/all-FF → `{ok, path, md5}` or precise error; `vbios_backup` journal event fsync'd BEFORE the command |
+| POST | `/api/vbios/flash` | `{rom, confirm: true, protectoff?}` — end-to-end flash phase: fresh backup (a `<serial>-*.rom` newer than 24 h is reused, else saved+verified — flash REFUSES if backup fails), optional `nvflash --protectoff` (NOT default — owner: not required for this card), then `nvflash -4 -5 <rom>` (prompts auto-answered `y` on stdin, 120 s timeout) → `{ok, output_tail, backup:{path,md5}, post_verify}`. Refuses without `confirm`, on a missing/non-`.rom` path, while a campaign runs, and while the nvidia driver is **BOUND** (nvflash fails with the driver bound — flash requires it unbound, same as fuse work; owner, 2026-11-27). `post_verify` = `lspci -n -s` + `nvidia-smi --query-gpu=name,memory.total` best-effort (nvidia-smi skipped while the module is absent; the card may need a COLD BOOT to attach — absence is not failure). `vbios_backup`/`vbios_flash` journal events fsync'd before each command. Mock mode: canned outputs, no subprocess. GUI: **VBIOS flash** card |
 | GET | `/api/gpu` | nvidia-smi + lspci link state (`?bdf=` any GPU on the host) |
 | GET | `/api/dmesg` | live GPU-relevant dmesg tail (nvidia/NVRM/Xid + card slot) |
 | GET | `/api/bound_dump/preflight` | driver-bound capture preflight (pure reads): `{conditions[], all_ok}`; each condition `{name, ok, value, expected, hint}`; `503 {"error": ...}` when BAR0 is unopenable; mock mode returns a synthetic `all_ok` block flagged `"mock": true` |

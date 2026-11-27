@@ -2509,6 +2509,33 @@ LIVEBOOT = r"""
       </div>
       <div id="cq-decode" class="note"></div>
     </div>
+    <div class="card" id="vb-card" style="margin-top:12px">
+      <h3>VBIOS flash <span class="note">(post-DEVID phase — nvflash runs with
+        the nvidia driver <b>UNBOUND</b> (it fails with the driver bound); a
+        board-id mismatch prompt from nvflash is <b>expected</b> on a rebranded
+        card and is auto-answered <code>y</code>. A verified backup of the
+        current VBIOS is always saved before a flash.)</span></h3>
+      <div class="frow">
+        <span class="pill" id="vb-driver">driver: …</span>
+        <button class="btn danger" id="vb-unload" style="display:none">Unload driver</button>
+        <span class="pill" id="vb-nvflash">nvflash: …</span>
+      </div>
+      <div class="frow" style="margin-top:8px">
+        <button class="btn" id="vb-pick">📁 Choose ROM…</button>
+        <span class="note" id="vb-rom">no ROM selected</span>
+      </div>
+      <div class="frow" style="margin-top:8px">
+        <button class="btn" id="vb-backup" title="nvflash --save into the state dir; verified non-empty and not all-00/FF">💾 Save current VBIOS</button>
+        <label class="checkline" title="optional — NOT required for this card's flash (owner, 2026-11-27); tick only if nvflash reports protected regions">run nvflash --protectoff first</label>
+        <input type="checkbox" id="vb-protectoff">
+        <button class="btn danger" id="vb-flash" disabled>⚡ Flash selected ROM</button>
+        <button class="btn" id="vb-refresh" title="re-read driver state, nvflash, backups">⟳</button>
+      </div>
+      <div class="note" id="vb-backupinfo" style="margin-top:6px"></div>
+      <div class="note" id="vb-warn" style="margin-top:4px"></div>
+      <div class="logbox" id="vb-log" style="margin-top:8px">— vbios flash log —</div>
+      <div class="note" id="vb-post" style="margin-top:6px"></div>
+    </div>
     <div class="card" id="t51-neverwrite" style="margin-top:12px">
       <h3>Never-write reference <span class="note">(The Lab / allspark
         community claims — read-only, never a burn gate)</span></h3>
@@ -3977,6 +4004,156 @@ LIVEBOOT = r"""
   };
   setInterval(pollGlitch, 1000);
   pollGlitch();
+
+  // ---------- VBIOS flash card (task 70) ----------
+  // Post-DEVID flash phase beside the burn queue. nvflash FAILS with the
+  // nvidia driver bound — flash requires the driver UNBOUND (owner rule,
+  // same as fuse work). The ROM picker is a file-picker popup over
+  // /api/vbios/browse; a verified backup is always saved before a flash.
+  let vbRom = null;            // selected {path,size,md5}
+  let vbDriverBound = null;    // last known bound driver (null = none)
+  function vbWarn(msg, cls) {
+    const el = $("vb-warn"); el.textContent = msg;
+    el.className = "note " + (cls || "");
+  }
+  function vbGate() {
+    const reason = !vbRom ? "choose a ROM first"
+      : vbDriverBound ? "driver '" + vbDriverBound + "' bound — unload it first (nvflash fails with the driver bound)"
+      : campaignRunning ? "campaign running — card busy"
+      : "";
+    const f = $("vb-flash");
+    f.disabled = !!reason;
+    f.title = reason || "backup (if not fresh) → nvflash -4 -5 " + vbRom.path;
+    $("vb-unload").style.display = vbDriverBound ? "" : "none";
+    if (burnQueue.length) {   // warn, never refuse: flash is a separate phase
+      $("vb-flash").title = (f.title ? f.title + " · " : "") +
+        "note: burn queue holds " + burnQueue.length + " record(s) — flashing does not burn fuses";
+    }
+  }
+  async function vbRefresh() {
+    try {
+      const j = await jget("/api/vbios/list");
+      vbDriverBound = (j.driver && j.driver.bound) || null;
+      const dp = $("vb-driver");
+      dp.textContent = vbDriverBound
+        ? "driver: " + vbDriverBound + " BOUND — flash refused"
+        : "driver: unbound — flash allowed";
+      dp.className = "pill " + (vbDriverBound ? "badl" : "okl");
+      const nv = j.nvflash || {};
+      const np = $("vb-nvflash");
+      np.textContent = nv.found
+        ? "nvflash: " + nv.path + (nv.version ? " · " + nv.version : "")
+        : "nvflash: NOT FOUND — flash disabled";
+      np.className = "pill " + (nv.found ? "okl" : "badl");
+      const b = (j.backups || [])[0];
+      $("vb-backupinfo").textContent = b
+        ? "latest backup: " + b.name + " · md5 " + b.md5 + " · " + b.when +
+          " (a backup newer than 24 h for this serial counts as fresh — a flash reuses it)"
+        : "no VBIOS backup saved yet — a flash saves and verifies one first";
+      vbGate();
+    } catch (e) {}
+  }
+  function vbModal() {
+    let m = $("vb-modal");
+    if (m) return m;
+    m = document.createElement("div");
+    m.id = "vb-modal";
+    m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.65);" +
+      "display:none;z-index:99;align-items:center;justify-content:center";
+    m.innerHTML = `<div class="card" style="width:min(720px,92vw);max-height:80vh;display:flex;flex-direction:column;margin:0">
+      <div class="frow" style="align-items:center">
+        <b>Choose ROM</b>
+        <span class="note" id="vb-bdir" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <button class="btn" id="vb-bup">↑ parent</button>
+        <button class="btn" id="vb-bclose">✕ close</button>
+      </div>
+      <div id="vb-blist" style="overflow:auto;max-height:60vh;margin-top:8px"></div></div>`;
+    m.onclick = (ev) => { if (ev.target === m) m.style.display = "none"; };
+    document.body.appendChild(m);
+    m.querySelector("#vb-bclose").onclick = () => { m.style.display = "none"; };
+    return m;
+  }
+  async function vbBrowse(dir) {
+    const m = vbModal();
+    m.style.display = "flex";
+    const j = await jget("/api/vbios/browse" +
+                         (dir ? "?dir=" + encodeURIComponent(dir) : ""));
+    $("vb-bdir").textContent = j.dir || j.error || "";
+    $("vb-bup").disabled = !j.parent;
+    if (j.parent) $("vb-bup").onclick = () => vbBrowse(j.parent);
+    const rows = [];
+    if (j.error) rows.push(`<div class="note">${esc(j.error)}</div>`);
+    for (const d of (j.dirs || []))
+      rows.push(`<div class="dumptrow" data-bdir="${esc(d)}">📁 ${esc(d)}/</div>`);
+    for (const r of (j.roms || []))
+      rows.push(`<div class="dumptrow mono" data-brom="${esc(r.path)}" ` +
+        `data-bsize="${r.size}" data-bmd5="${esc(r.md5)}">💾 ${esc(r.name)} ` +
+        `<span class="note">${r.size} B · md5 ${esc(r.md5)}</span></div>`);
+    const list = $("vb-blist");
+    list.innerHTML = rows.join("") ||
+      `<div class="note">no subdirectories, no *.rom files here</div>`;
+    list.querySelectorAll("[data-bdir]").forEach(
+      el => el.onclick = () => vbBrowse(j.dir + "/" + el.dataset.bdir));
+    list.querySelectorAll("[data-brom]").forEach(el => el.onclick = () => {
+      vbRom = {path: el.dataset.brom, size: +el.dataset.bsize,
+               md5: el.dataset.bmd5};
+      $("vb-rom").innerHTML = `<b>${esc(vbRom.path)}</b> · ${vbRom.size} B · ` +
+        `md5 ${esc(vbRom.md5)}`;
+      m.style.display = "none";
+      vbGate();
+    });
+  }
+  $("vb-pick").onclick = () => vbBrowse("");
+  $("vb-refresh").onclick = vbRefresh;
+  $("vb-unload").onclick = async () => {
+    $("vb-log").textContent = "unloading nvidia stack…";
+    const j = await jpost("/api/driver/op", {op: "unload", confirm: true});
+    $("vb-log").textContent = (j.log || [j.error || "done"]).join("\n");
+    vbRefresh();
+    renderDrivers();
+  };
+  $("vb-backup").onclick = async () => {
+    $("vb-backup").disabled = true;
+    $("vb-log").textContent = "saving current VBIOS (nvflash --save)…";
+    try {
+      const j = await jpost("/api/vbios/backup", {});
+      $("vb-log").textContent = j.error
+        ? j.error
+        : "backup saved + verified: " + j.path + "\nmd5 " + j.md5;
+      vbWarn(j.error ? "backup FAILED: " + j.error : "", j.error ? "warn" : "");
+    } finally { $("vb-backup").disabled = false; vbRefresh(); }
+  };
+  $("vb-flash").onclick = async () => {
+    if (!vbRom) return;
+    const q = burnQueue.length
+      ? `\nNOTE: the burn queue holds ${burnQueue.length} record(s) — ` +
+        `flashing does NOT burn fuses.`
+      : "";
+    if (!confirm(`Flash ${vbRom.path} into the card with nvflash -4 -5?\n\n` +
+      `This rewrites the SPI VBIOS — irreversible-ish (a bad flash needs a\n` +
+      `recovery boot). A board-id mismatch prompt from nvflash is EXPECTED\n` +
+      `on a rebranded card; the console auto-answers 'y'.\n` +
+      `A fresh backup is saved and verified first — the flash REFUSES if that\n` +
+      `fails. The card may need a COLD BOOT (PSU off) to attach afterwards.${q}`)) return;
+    const btn = $("vb-flash"); btn.disabled = true;
+    $("vb-log").textContent = "flashing — nvflash running (up to 120 s)…";
+    try {
+      const j = await jpost("/api/vbios/flash",
+                            {rom: vbRom.path, confirm: true,
+                             protectoff: $("vb-protectoff").checked});
+      $("vb-log").textContent = (j.output_tail || j.error || "no output") +
+        (j.backup ? `\n\nbackup: ${j.backup.path}\nmd5 ${j.backup.md5}` : "");
+      if (j.post_verify) $("vb-post").innerHTML =
+        `<b>post-flash verify</b> (best effort)<br>` +
+        `<pre class="mono" style="white-space:pre-wrap">${esc((j.post_verify.lspci || "") + "\n" + (j.post_verify.nvidia_smi || ""))}</pre>` +
+        `<span class="note">${esc(j.post_verify.note || "")}</span>`;
+      vbWarn(j.ok ? "flash done — cold-boot the card to attach the new VBIOS"
+                  : (j.error || "flash FAILED — read the output above"),
+             j.ok ? "okl" : "warn");
+    } finally { vbRefresh(); }
+  };
+  vbRefresh();
+  setInterval(() => { if (!document.hidden) vbRefresh(); }, 5000);
 
   // ---------- Drivers pane ----------
   $("tab-drivers").innerHTML = `
