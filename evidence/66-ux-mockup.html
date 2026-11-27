@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Task 66 mockup — Burn workspace (redesign proposal)</title>
+<style>
+  /* palette + type lifted from the live console (gui.py :root) */
+  :root {
+    --bg: #0d1117; --bg-deep: #090c10;
+    --card: #151a21; --card-hi: #1a2029;
+    --border: #27303b; --border-soft: #1e252d;
+    --foreground: #e6edf3; --muted-foreground: #919ba6; --fg-subtle: #66707b;
+    --accent: #4cc2ff;
+    --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--foreground); margin: 0;
+         font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+          font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 18px 22px 60px; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-end;
+            gap: 16px; padding-bottom: 12px; margin-bottom: 12px;
+            border-bottom: 1px solid var(--border); }
+  h1 { font-size: 19px; font-weight: 700; margin: 0 0 3px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted-foreground); font-size: 12px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+       color: var(--fg-subtle); margin: 30px 0 10px; display: flex; align-items: center; gap: 9px; }
+  h2::before { content: ""; width: 3px; height: 13px; border-radius: 2px; background: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--border-soft);
+          border-radius: 10px; padding: 12px 14px; margin-top: 12px; }
+  .card h3 { font-size: 13px; margin: 0 0 8px; }
+  .note { color: var(--muted-foreground); font-size: 11.5px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+
+  /* ---- the ONE authoritative window-state strip (sticky) ---- */
+  .wstrip { position: sticky; top: 0; z-index: 30; display: flex; align-items: center;
+            gap: 14px; padding: 9px 14px; margin: 0 -4px 4px;
+            background: var(--bg-deep); border: 1px solid var(--border);
+            border-radius: 10px; }
+  .wstrip.open   { border-color: rgba(63,185,80,.55);
+                   box-shadow: inset 3px 0 0 var(--ok); }
+  .wstrip.fading { border-color: rgba(210,153,34,.55);
+                   box-shadow: inset 3px 0 0 var(--warn); }
+  .wstrip.closed { border-color: var(--border);
+                   box-shadow: inset 3px 0 0 var(--fg-subtle); }
+  .wstate { font-weight: 700; font-size: 14px; letter-spacing: .02em; }
+  .wstrip.open .wstate { color: var(--ok); }
+  .wstrip.fading .wstate { color: var(--warn); }
+  .wstrip.closed .wstate { color: var(--muted-foreground); }
+  .wpoll { color: var(--fg-subtle); font-size: 11px; margin-left: auto; }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+          border: 1px solid var(--border); border-radius: 99px; padding: 3px 10px;
+          color: var(--muted-foreground); white-space: nowrap; }
+  .pill.okl { border-color: rgba(63,185,80,.5); color: var(--ok); }
+  .pill.warnl { border-color: rgba(210,153,34,.5); color: var(--warn); }
+  .pill.badl { border-color: rgba(248,81,73,.5); color: var(--bad); }
+  .tag { display: inline-block; font-size: 10.5px; border: 1px solid var(--border);
+         border-radius: 5px; padding: 1px 6px; color: var(--muted-foreground); }
+  .tag.ok-tag { border-color: rgba(63,185,80,.5); color: var(--ok); }
+  .tag.warn-tag { border-color: rgba(210,153,34,.5); color: var(--warn); }
+  .tag.bad-tag { border-color: rgba(248,81,73,.5); color: var(--bad); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--fg-subtle); font-weight: 600; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  tr.qrow-pending td { opacity: .55; }
+  .btn { font: inherit; font-size: 12px; color: var(--foreground); background: var(--card-hi);
+         border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  .btn.go { border-color: rgba(76,194,255,.55); color: var(--accent); font-weight: 600; }
+  .btn.danger { border-color: rgba(248,81,73,.55); color: var(--bad); font-weight: 700; }
+  .btn.big { font-size: 14px; padding: 10px 18px; border-radius: 10px; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; }
+  .frow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+  input.phrase { font: inherit; background: var(--bg-deep); color: var(--foreground);
+                 border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; width: 110px; }
+  .ttl { font-weight: 700; color: var(--warn); }
+  details.manual { margin-top: 14px; border: 1px dashed var(--border); border-radius: 10px;
+                   padding: 8px 14px; color: var(--muted-foreground); }
+  details.manual summary { cursor: pointer; font-size: 12px; }
+  .logbox { background: var(--bg-deep); border: 1px solid var(--border-soft); border-radius: 8px;
+            font-size: 11px; color: var(--muted-foreground); padding: 8px 10px; margin-top: 8px;
+            max-height: 110px; overflow: auto; white-space: pre; }
+  .caption { font-size: 11px; color: var(--fg-subtle); margin: 4px 2px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div>
+      <h1>GA100 Fuse Console — <span style="color:var(--accent)">Burn</span> workspace</h1>
+      <div class="sub">task 66 redesign mockup · static · one window truth · one burn action</div>
+    </div>
+    <span class="pill">target <b class="mono" style="margin-left:4px">0000:01:00.0</b> · sn-1A2B3C</span>
+  </div>
+
+  <!-- ============ STATE A: window OPEN, queue ready, armed ============ -->
+  <h2>State A — window open · armed · launch</h2>
+
+  <!-- THE single authoritative indicator: live register poll, sticky -->
+  <div class="wstrip open" style="margin-top:0">
+    <span class="wstate">● WINDOW OPEN</span>
+    <span class="note mono">dsov=0 · crc=0x55 · FUSECTRL_PLM open · WDATA_PLM open</span>
+    <span class="pill okl mono">armed <span class="ttl">87 s</span></span>
+    <span class="wpoll mono">live poll 1.2 s ago · /api/live</span>
+  </div>
+  <p class="caption">One indicator, sticky, from the live register poll. The campaign's
+  "HELD" flag is demoted to a log event; the GPU-selector badge and arm tooltip no
+  longer claim window truth.</p>
+
+  <div class="card">
+    <h3>Burn queue <span class="note">— the only thing that burns; every row must pass
+      Check + Preview before launch is enabled</span></h3>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Word</th><th>Target row</th><th>Field</th>
+        <th>Pre-flight</th><th>Burn result</th><th></th>
+      </tr></thead>
+      <tbody class="mono">
+        <tr>
+          <td>#1</td><td>0x13130101</td><td>row 224</td>
+          <td class="note">GPC_DISABLE · two-step: inert → arm</td>
+          <td><span class="tag ok-tag">✓ checked</span> <span class="tag ok-tag">✓ previewed</span></td>
+          <td><span class="ok" style="font-weight:700">VERIFY OK</span></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>#2</td><td>0x13070002</td><td>row 225</td>
+          <td class="note">FBP_DISABLE</td>
+          <td><span class="tag ok-tag">✓ checked</span> <span class="tag ok-tag">✓ previewed</span></td>
+          <td><span class="ok" style="font-weight:700">VERIFY OK</span></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>#3</td><td>0x13080010</td><td>row 226 + mirror 227</td>
+          <td class="note">FBPA_DISABLE</td>
+          <td><span class="tag ok-tag">✓ checked</span> <span class="tag warn-tag">⚠ edited — re-preview</span></td>
+          <td><span class="warn" style="font-weight:700">ALREADY BURNED</span></td>
+          <td><button class="btn">✕</button></td>
+        </tr>
+        <tr class="qrow-pending">
+          <td>#4</td><td>0x13080020</td><td>row 228</td>
+          <td class="note">FBPA_DISABLE</td>
+          <td><span class="tag ok-tag">✓ checked</span> <span class="tag ok-tag">✓ previewed</span></td>
+          <td>pending</td>
+          <td><button class="btn">✕</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="caption">Pre-flight badges bind to (row, value) — editing or re-allocating a
+    row clears that row's badges. Burn result column is fed by <span class="mono">stats.burned</span>
+    (already on /api/glitch/status today; the GUI just never renders it).</p>
+
+    <div class="frow">
+      <button class="btn">✓ Check &amp; preview all</button>
+      <button class="btn">⤓ add from suggested / advanced…</button>
+      <button class="btn">clear queue</button>
+      <span class="pill">4 records · rows 224–228 · budget 31 free</span>
+    </div>
+
+    <div class="frow" style="border-top:1px solid var(--border-soft); padding-top:12px">
+      <label class="note">arm phrase</label>
+      <input class="phrase mono" value="BURN">
+      <button class="btn danger big">⚡ Arm &amp; burn queue (4 records)</button>
+      <span class="pill okl mono">armed 87 s</span>
+    </div>
+    <p class="caption">ONE action: server-side arm + validate + start burn campaign in a
+    single call — the 120 s arm→start race is gone; the TTL pill (shown while armed via
+    the standalone fallback) mirrors the strip above. Disabled until every row carries
+    both pre-flight badges and the strip reads OPEN. Click → irreversible-burn confirm
+    listing rows/values.</p>
+
+    <details class="manual">
+      <summary>Manual burn — direct rows &lt;222 / IFF words (drawer, off the happy path)</summary>
+      <div class="frow">
+        <span class="note mono">row 216 · 0x00000001 · mirror off</span>
+        <button class="btn">Check</button><button class="btn">Preview</button>
+        <button class="btn danger">Burn now (manual)</button>
+      </div>
+      <p class="caption">"Burn now" survives only here, where the queue path can't go;
+      it can no longer be mistaken for "burn my queue".</p>
+    </details>
+
+    <details style="margin-top:10px">
+      <summary class="note" style="cursor:pointer">campaign log (drawer)</summary>
+      <div class="logbox mono">[41] cooldown 10s (VRM rest)
+[42] GOLDILOCKS — burning records now (same process, no further restore)
+    row 224: VERIFY OK
+    row 225: VERIFY OK
+    row 226: ALREADY BURNED
+>>> all records final — window held, image verify OK</div>
+    </details>
+  </div>
+
+  <!-- ============ STATE B: window FADING ============ -->
+  <h2>State B — window fading (pre-warning the hardware gives and the old UI hides)</h2>
+  <div class="wstrip fading" style="margin-top:0">
+    <span class="wstate">◐ WINDOW FADING</span>
+    <span class="note mono">dsov flapped 0→2 in last 3 polls · crc still 0x55</span>
+    <span class="pill warnl mono">armed <span class="ttl">23 s</span></span>
+    <span class="wpoll mono">live poll 0.8 s ago</span>
+  </div>
+  <p class="caption">Derived server-side from poll history. Launch stays enabled (the
+  campaign re-glitches if it decays) but the strip turns amber so the operator stops
+  starting new side quests.</p>
+
+  <!-- ============ STATE C: window CLOSED / decayed mid-flow ============ -->
+  <h2>State C — window decayed before launch (the degradation path)</h2>
+  <div class="wstrip closed" style="margin-top:0">
+    <span class="wstate">○ WINDOW CLOSED</span>
+    <span class="note mono">FUSECTRL_PLM · WDATA_PLM — link faded after held campaign</span>
+    <span class="pill badl mono">arm expired</span>
+    <span class="wpoll mono">live poll 1.5 s ago</span>
+  </div>
+  <div class="card">
+    <div class="frow" style="margin-top:0">
+      <button class="btn go big">▶ Re-glitch to open window</button>
+      <button class="btn danger big" disabled>⚡ Arm &amp; burn queue (4 records)</button>
+      <span class="note">queue + pre-flight badges preserved — nothing to redo</span>
+    </div>
+    <p class="caption">One click starts the classify+hold campaign (params remembered);
+    when the strip flips green the launch button re-enables. The operator never leaves
+    this screen. If decay happens <i>after</i> launch, the burn campaign itself keeps
+    firing attempts until every record verifies — decay becomes the campaign's problem.</p>
+  </div>
+
+  <!-- ============ old vs new, for reference ============ -->
+  <h2>Reference — the four old indicators this replaces</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3 class="note">as-is (four sources, three freshnesses)</h3>
+      <div class="frow" style="margin-top:0">
+        <span class="pill okl">window HELD open — verify/burn now</span>
+        <span class="pill">burn window closed (FUSECTRL_PLM)</span>
+        <span class="pill okl">● Goldilocks — glitch window</span>
+        <span class="pill">selected GPU not Goldilocks — glitch first</span>
+      </div>
+      <p class="caption">campaign flag @1 s (stale-true) · live poll @2 s · /api/gpus
+      on-demand-only (arbitrarily stale) · arm tooltip (same stale source).</p>
+    </div>
+    <div class="card">
+      <h3 class="note">to-be (one source, mirrored nowhere else)</h3>
+      <div class="wstrip open" style="position:static;margin-top:0">
+        <span class="wstate">● WINDOW OPEN</span>
+        <span class="wpoll mono">live poll 1.2 s ago</span>
+      </div>
+      <p class="caption">Every gate survives — phrase, Goldilocks arm gate, identity
+      gate, per-record guards, plane gate, journal ack, irreversible confirm. Only the
+      choreography is removed.</p>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
