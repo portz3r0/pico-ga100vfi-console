@@ -3,7 +3,7 @@
 
 Contract under test (service.rebrand_plan / rebrand_words):
   a. word arithmetic is ground truth per SKU (evidence/44 for 80GB, the
-     reference card's fused word for 40GB) — exact hex asserted, chain 2,
+     80GB data word from evidence/44) — exact hex asserted, chain 2,
      offsets 37/38, bit 5 (IFF) clear;
   b. mock-mode plan returns exactly 2 records, DEVIDA first, rows strictly
      increasing, every placement passing ff_policy against the same mock
@@ -53,13 +53,8 @@ class WordsTest(unittest.TestCase):
         self.assertEqual(w["DEVIDA"], 0x416A0942)
         self.assertEqual(w["DEVIDB"], 0x416A0982)
 
-    def test_40gb_exact_hex(self):
-        w = dict(S.rebrand_words("40"))
-        self.assertEqual(w["DEVIDA"], 0x20F10942)
-        self.assertEqual(w["DEVIDB"], 0x20F10982)
-
     def test_field_layout_both_skus(self):
-        for sku in ("80", "40"):
+        for sku in ("80",):
             words = S.rebrand_words(sku)
             self.assertEqual([n for n, _ in words], ["DEVIDA", "DEVIDB"])
             for name, w in words:
@@ -108,8 +103,8 @@ class PlanMockTest(unittest.TestCase):
         self._assert_legal(plan)
 
     def test_deterministic(self):
-        a = S.rebrand_plan("40")
-        b = S.rebrand_plan("40")
+        a = S.rebrand_plan("80")
+        b = S.rebrand_plan("80")
         self.assertEqual(a, b)
 
     def test_rows_follow_block_last_wins_not_hardcoded(self):
@@ -146,7 +141,7 @@ class WiringTest(unittest.TestCase):
             src = f.read()
         # SKU dropdown is the normal path, 80GB default, custom fallback
         self.assertIn("A100 80GB PCIe (0x20B5)", src)
-        self.assertIn("A100 40GB PCIe (0x20F1)", src)
+        self.assertNotIn("A100 40GB PCIe", src)  # owner: unproven data word, removed
         self.assertIn('id="plan-rebrand-sku"', src)
         self.assertIn('<option value="80" selected>', src)
         self.assertIn('id="plan-devid-wrap" style="display:none"', src)

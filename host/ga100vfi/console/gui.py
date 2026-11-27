@@ -2397,7 +2397,6 @@ LIVEBOOT = r"""
         <div class="field"><label>A100 rebrand SKU</label>
           <select id="plan-rebrand-sku">
             <option value="80" selected>A100 80GB PCIe (0x20B5)</option>
-            <option value="40">A100 40GB PCIe (0x20F1)</option>
             <option value="custom">custom…</option>
           </select></div>
         <div class="field" id="plan-devid-wrap" style="display:none"><label>custom DEVID (hex, e.g. 0x20B5)</label>

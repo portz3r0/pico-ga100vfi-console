@@ -1404,16 +1404,17 @@ def ff_policy(layout, row, mirror=False, value=None):
 
 # ---------------------------------------------------------------- task 69: A100 rebrand quick-add
 # DEVID FF records (chain 2): DEVIDA = fuse offset 37, DEVIDB = offset 38;
-# word = data16<<16 | offset<<6 | chain. The data16 words are ground truth,
-# not a shared formula: 80GB is evidence/44 (data = devid<<1 = 0x416A ->
-# 0x416A0942 / 0x416A0982); 40GB is the reference card's fused data word
-# 0x20F1 (-> 0x20F10942 / 0x20F10982). Rows are never hardcoded — the plan
-# picks the first legal rows from the LIVE layout through ff_policy
-# (per-block last-wins, blank target, IFF refusal all encoded there).
+# word = data16<<16 | offset<<6 | chain. The data16 word is ground truth
+# from evidence/44: data = devid<<1 = 0x416A -> 0x416A0942 / 0x416A0982.
+# Only SKUs whose data word is PROVEN are offered (owner decision: the
+# 40GB 0x20F1 entry was removed — its data-field encoding was never
+# verified end-to-end, and a wrong DEVID word is an OTP brick).
+# Rows are never hardcoded — the plan picks the first legal rows from
+# the LIVE layout through ff_policy (per-block last-wins, blank target,
+# IFF refusal all encoded there).
 REBRAND_DEVID_OFFS = (("DEVIDA", 37), ("DEVIDB", 38))
 REBRAND_SKUS = {
     "80": {"label": "A100 80GB PCIe (0x20B5)", "devid": 0x20B5, "data": 0x416A},
-    "40": {"label": "A100 40GB PCIe (0x20F1)", "devid": 0x20F1, "data": 0x20F1},
 }
 
 
