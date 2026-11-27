@@ -18,3 +18,4 @@ goldilocks.jsonl
 
 # per-run campaign telemetry (holds the card serial, as goldilocks.jsonl)
 telemetry/
+tools/
