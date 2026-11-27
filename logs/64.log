@@ -1,0 +1,16 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+TASK64_DONE
+
+1. Plane-gate verdict: PASS, 0 violations — every final DISABLE plane equals this die's DEFECTIVE register exactly (GPC 0x0, TPC only GPC0=0x02/GPC5=0x01, FBP 0x840, FBPA/FBIO/ROP_L2 0xC03000, PES/NVLINK/SYS_PIPE 0); no dead unit enabled; live shadows corroborate unit-for-unit.
+2. PREMISE CORRECTION: the burn landed rows 294–312 (19 FF records) + 484–487 + 6 FPF = 29 rows, not 301–312; factory stream ends at 293 (proven by diffing the 19:44 pre-burn vs 21:40 post-burn dumps).
+3. off5–12 verdict: NOT omitted — they were burned (rows 294–300) with correct per-die defective-only words (off11 0x1000 keeps GPC0·TPC1 dead, off14 0x0008 keeps GPC5·TPC0 dead); zero under-delivered capacity (0 recoverable, 124/124 SM, 10/10 FBP).
+4. SS0/SS1 verified executed: 0x0082381C=0x88888888, 0x00823820=0x00000008, IFF_RECORD 0x01FB01E4 → start 484.
+5. DEVID gap confirmed: off37/38 winners still factory 0x41840942/0x41840982 → DEVIDA 0x20C2 (shadow 0x8204D8 + PCI id agree); column fuses + gen4 words landed.
+6. 10240 arithmetic CONFIRMED from dump's own data: live_fbp 10 × 1024 MiB/FBP (CMP VBIOS table) = 10240 MiB.
+7. Plan: /home/raza/nvidia/pico-ga100vfi/plans/hp-075-a100-complete.md — rows 313/314 (0x416A0942/0x416A0982), two-step inert→armed, ff_policy COMPLIANT verified programmatically (bit5 clear, block-37/38 last rows 286/287, inside pool truncated at 484).
+8. Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/64-hp075-audit.md.
+9. Stock VBIOS for …075: none on HP, repo's evidence/37 rom is card2's — plan mandates nvflash dump of …075's own CMP VBIOS before flashing; Goldilocks profile from …075's own goldilocks.jsonl entries (v_dip 300–306, delay 117, pw 198, revert 0).
+10. Top risk: off26 unnamed word cleared 0x0101→0x0000 (bit0 untested by batch2; empirically stable) — plus loud caveat: no-POST after the DEVID burn on CMP VBIOS is expected, not a brick.

@@ -1,0 +1,151 @@
+{
+  "mode": "unlock",
+  "verified": true,
+  "defects_source": "/home/raza/nvidia/pico-ga100vfi/evidence/56-our-defects.json",
+  "word_changes": [
+    {
+      "word": "OPT_FBIO_DISABLE",
+      "chain": 1,
+      "bits": [
+        83,
+        106
+      ],
+      "current": "0xC0330C",
+      "target": "0xC03000"
+    },
+    {
+      "word": "OPT_FBPA_DISABLE",
+      "chain": 1,
+      "bits": [
+        107,
+        130
+      ],
+      "current": "0x330C",
+      "target": "0xC03000"
+    },
+    {
+      "word": "OPT_TPC_DISABLE_GPC0",
+      "chain": 1,
+      "bits": [
+        187,
+        194
+      ],
+      "current": "0x1",
+      "target": "0x0"
+    },
+    {
+      "word": "OPT_TPC_DISABLE_GPC2",
+      "chain": 1,
+      "bits": [
+        203,
+        210
+      ],
+      "current": "0xFF",
+      "target": "0x0"
+    },
+    {
+      "word": "OPT_TPC_DISABLE_GPC3",
+      "chain": 1,
+      "bits": [
+        211,
+        218
+      ],
+      "current": "0x1",
+      "target": "0x0"
+    },
+    {
+      "word": "OPT_TPC_DISABLE_GPC6",
+      "chain": 1,
+      "bits": [
+        235,
+        242
+      ],
+      "current": "0x1",
+      "target": "0x0"
+    },
+    {
+      "word": "OPT_TPC_DISABLE_GPC7",
+      "chain": 1,
+      "bits": [
+        243,
+        250
+      ],
+      "current": "0xFF",
+      "target": "0x10"
+    }
+  ],
+  "records": [
+    {
+      "chain": 1,
+      "block": 5,
+      "old_data": "0x9867",
+      "new_data": "0x8007",
+      "encoded": "0x80070141",
+      "row": 306
+    },
+    {
+      "chain": 1,
+      "block": 6,
+      "old_data": "0x6601",
+      "new_data": "0x0601",
+      "encoded": "0x06010181",
+      "row": 307
+    },
+    {
+      "chain": 1,
+      "block": 7,
+      "old_data": "0x0198",
+      "new_data": "0x0180",
+      "encoded": "0x018001C1",
+      "row": 308
+    },
+    {
+      "chain": 1,
+      "block": 8,
+      "old_data": "0x0010",
+      "new_data": "0x0016",
+      "encoded": "0x00160201",
+      "row": 309
+    },
+    {
+      "chain": 1,
+      "block": 11,
+      "old_data": "0x0800",
+      "new_data": "0x0000",
+      "encoded": "0x000002C1",
+      "row": 310
+    },
+    {
+      "chain": 1,
+      "block": 12,
+      "old_data": "0xFFF8",
+      "new_data": "0x07F8",
+      "encoded": "0x07F80301",
+      "row": 311
+    },
+    {
+      "chain": 1,
+      "block": 13,
+      "old_data": "0x000F",
+      "new_data": "0x0000",
+      "encoded": "0x00000341",
+      "row": 312
+    },
+    {
+      "chain": 1,
+      "block": 14,
+      "old_data": "0x0800",
+      "new_data": "0x0000",
+      "encoded": "0x00000381",
+      "row": 313
+    },
+    {
+      "chain": 1,
+      "block": 15,
+      "old_data": "0xC7F8",
+      "new_data": "0xC080",
+      "encoded": "0xC08003C1",
+      "row": 314
+    }
+  ]
+}

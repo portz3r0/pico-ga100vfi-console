@@ -1,0 +1,16 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+TASK62_DONE
+
+1. Plan delivered: `/home/raza/nvidia/pico-ga100vfi/plans/hp-9272-plan.md` — proposal only, zero writes (git shows only the pre-existing TASKS.md modification; derivation artifacts in `/tmp/gpu2/t62.py` + `t62_out.txt`).
+2. **52 steps** (6 FPF column + 42 FF two-step + 4 IFF), same count as batch2, geometry re-based: FF rows **301–321** (first blank after factory 300), IFF macro rows 484–487 (legal: blank, below start 488; burning bit5 rows there moves the walk start to 484 — proven on the bench card).
+3. Target: **DEVIDA/B 0x20B5, 126 SM, 80 GB** (10 FBP), Gen4 words + SS0/SS1 written; predicted POST identity `ff6d9562…` (replay-verified strict-addition against the Nov-26 image).
+4. Per-die recompute diverges from batch2 exactly where the die differs: off12 = **0x0000** (not 0x0022), off13 = **0x0800** (not 0x0000 — keeps dead GPC4·TPC0 masked; batch2's word ported here would have bricked).
+5. Console cross-check: **9 AGREE (word-exact), 0 value DIFFER, 22 records MISSING-CONSOLE** (off7 + 6 FF + 5 ch2 + 6 FPF + 4 IFF), 0 missing on my side; row assignments differ for the shared 9 (placement-only).
+6. Console defect D1 adjudicated against the console: my independent defect-map derivation requires off7 = 0x018001C1 for the FBPA unlock to complete.
+7. Plane gate passes on the final image: FBPA/FBIO/ROP_L2 = 0xC03000, FBP = 0x840, TPC = 0x01@GPC4 only — no defective unit newly enabled; no bit5 in FF words; RCHK copied (10 bits, delta + undo columns).
+8. **Top risk (R1): off26 is a per-die word** — HP factory 0x0001 vs card2's 0x0100; batch2's 0x0000 clears a bit never tested on this die. Gated by the SW-IFF A/B in §6; fallback = leave unburned. off9/off27/ch2-39/47/49 proven SKU-constant (factory winners identical on both dies).
+9. Second real risk (R2): CP-plane TPC bits (console's live 70-SM shadow vs OPT-derived 74 implies CP masks TPC0 on GPC3/GPC5) — post-burn SM may land at 122, not 126; §6.4 audit settles it before burn; safe either way.
+10. SW-IFF protocol specified (§6, 8 steps, nothing executed); execution needs the signed ga100_burn path — the console can't express two-step or IFF rows (D3/D4).

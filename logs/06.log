@@ -1,0 +1,17 @@
+Task 06 complete.
+
+Change (host/ga100vfi/console/service.py only, commit aa942db, pushed 32d6563..aa942db to fuse-console, no force):
+- SMI_FIELDS: dropped multiprocessor_count; all 11 other fields kept.
+- Added SMI_SM_NOTE constant, appended as last line of nvidia_smi_txt() output: "# SM count: see live_snapshot.json / interpretation.txt (SM count is a CUDA/NVML attribute, not an nvidia-smi query field)".
+- Failure branch untouched.
+
+Gate results (full detail in /home/raza/nvidia/pico-ga100vfi/evidence/06-smi-field-fix.md):
+- py_compile: COMPILE_OK.
+- Direct new-argv query on this host: nvidia-smi fails rc=9, no traceback; function-level run (module guard stubbed, since /sys/module/nvidia is absent here) prints "0000:01:00.0: nvidia-smi unavailable: NVIDIA-SMI has failed..." plus the note line — BRANCH_OK.
+- Grep sanity on committed file: multiprocessor_count -> 0 hits; note line -> 1 hit.
+- Mock :8795 with temp state dir: GET / 200, GET /api/support_bundle 200, support/nvidia_smi.txt present with the correct branch text for this host ("driver unbound — nvidia-smi not applicable" — the early return fires before any nvidia-smi call when the module is absent). Killed by PID 2408851, port confirmed free.
+- Field cross-check: nvidia-smi exists here but --help-query-gpu also requires the driver, so vocabulary check impossible on this host; deferred to AI2 redeploy.
+
+Flagged, not edited (scope): docs/CONSOLE.md:358 still lists "SM count" as a queried field in the nvidia_smi.txt description — needs a doc follow-up.
+
+SMI_DONE

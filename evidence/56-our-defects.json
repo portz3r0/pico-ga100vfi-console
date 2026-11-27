@@ -1,0 +1,268 @@
+{
+  "script_version": "our-live-probe-1",
+  "target": "0000:3b:00.0",
+  "status": "ok",
+  "complete": true,
+  "access_policy": "read_only",
+  "registers": [
+    {
+      "name": "PMC_BOOT_0",
+      "offset": "0x000000",
+      "value": "0x170000A1",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_GPC_DISABLE",
+      "offset": "0x820350",
+      "value": "0x00000086",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_GPC_DEFECTIVE",
+      "offset": "0x8205C4",
+      "value": "0x00000002",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBP_DISABLE",
+      "offset": "0x820364",
+      "value": "0x00000852",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBP_DEFECTIVE",
+      "offset": "0x8205CC",
+      "value": "0x00000840",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBPA_DISABLE",
+      "offset": "0x820368",
+      "value": "0x00C0330C",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBPA_DEFECTIVE",
+      "offset": "0x8205D0",
+      "value": "0x00C03000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBIO_DISABLE",
+      "offset": "0x82036C",
+      "value": "0x00C0330C",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_FBIO_DEFECTIVE",
+      "offset": "0x8205D4",
+      "value": "0x00C03000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_ROP_L2_DISABLE",
+      "offset": "0x8202C4",
+      "value": "0x00C0330C",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_ROP_L2_DEFECTIVE",
+      "offset": "0x8205C8",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PES_DISABLE",
+      "offset": "0x820380",
+      "value": "0x00000002",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PES_DEFECTIVE",
+      "offset": "0x8205D8",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_SYS_PIPE_DISABLE",
+      "offset": "0x820384",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_SYS_PIPE_DEFECTIVE",
+      "offset": "0x8205DC",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_NVLINK_DISABLE",
+      "offset": "0x820684",
+      "value": "0x00000007",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_NVLINK_DEFECTIVE",
+      "offset": "0x82068C",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PCIE_DEVIDA",
+      "offset": "0x8204D8",
+      "value": "0x000020C2",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PCIE_DEVIDB",
+      "offset": "0x82056C",
+      "value": "0x000020C2",
+      "second_read_matches": true
+    },
+    {
+      "name": "PCIE_MAGIC_BITS_D",
+      "offset": "0x820520",
+      "value": "0x16680000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_DISABLE_GEN3_SPEED",
+      "offset": "0x820250",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PCIE_BOOT_GEN23_DISABLE",
+      "offset": "0x82057C",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_PCIE_BOOT_GEN3_DISABLE",
+      "offset": "0x820580",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "CRC_STATUS",
+      "offset": "0x820070",
+      "value": "0x00000055",
+      "second_read_matches": true
+    },
+    {
+      "name": "DSOV",
+      "offset": "0x820084",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "EFP",
+      "offset": "0x820078",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "SBFE",
+      "offset": "0x821108",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC0",
+      "offset": "0x820760",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC1",
+      "offset": "0x820764",
+      "value": "0x000000FF",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC2",
+      "offset": "0x820768",
+      "value": "0x000000FF",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC3",
+      "offset": "0x82076C",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC4",
+      "offset": "0x820770",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC5",
+      "offset": "0x820774",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC6",
+      "offset": "0x820778",
+      "value": "0x00000001",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_DISABLE_GPC7",
+      "offset": "0x82077C",
+      "value": "0x000000FF",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC0_DEFECTIVE",
+      "offset": "0x8205C8",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC1_DEFECTIVE",
+      "offset": "0x820508",
+      "value": "0x000000FF",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC2_DEFECTIVE",
+      "offset": "0x82050C",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC3_DEFECTIVE",
+      "offset": "0x820514",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC4_DEFECTIVE",
+      "offset": "0x820564",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC5_DEFECTIVE",
+      "offset": "0x8205AC",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC6_DEFECTIVE",
+      "offset": "0x820B84",
+      "value": "0x00000000",
+      "second_read_matches": true
+    },
+    {
+      "name": "OPT_TPC_GPC7_DEFECTIVE",
+      "offset": "0x820B80",
+      "value": "0x00000010",
+      "second_read_matches": true
+    }
+  ],
+  "interpretation": "live defect/disable snapshot for per-die ff_derive"
+}

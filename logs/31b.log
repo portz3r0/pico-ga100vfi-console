@@ -1,0 +1,7 @@
+Diff reviewed clean (no debug leftovers, no id renames; ffDecode.blk matches server mask). Gates re-run on my own servers: py_compile/imports/node --check clean; PRE 6/6 on base 85b8984; AFTER t31.js 20/20; t27 20/20, t28 13/13, t30 20/20; fingerprint 4620be9b2088 ≠ 972778473048, VERSION 0.3.0; all servers killed.
+host/tests triage: v31 vs /tmp/v31base outputs byte-identical → all 5 failures PRE-EXISTING (burn_execute 'bdf' signature drift ×3, test_verify8 KeyError, test_task17 needs a card at fixed BDF); none introduced, none fixed.
+docs/CONSOLE.md per-block section written (block=bits[15:6], strictly-after rule, per-word refusal, clamped display zones) + stale "no free row in burn zone" wording corrected; evidence written to /home/raza/nvidia/pico-ga100vfi/evidence/31-per-block-placement.md and copied into the worktree.
+Committed on v31: 269b0bf "console: per-block last-wins FF placement; already-burned cards no longer collapse the burn zone" (4 files, +360/-80).
+Push FAILED — no credentials: HTTPS has no helper/token ("could not read Username"), SSH key rejected by GitHub (publickey denied). ls-remote confirms fork/main still at 85b8984. Branch v31 + worktree /tmp/v31 left in place; main NOT re-pointed; primary tree untouched (fuse-console).
+BLOCKS_INCOMPLETE
+- git push fork v31:main (needs GitHub credentials for user portz3r0; then ls-remote verify, branch -f main v31, worktree remove /tmp/v31)

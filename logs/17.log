@@ -1,0 +1,12 @@
+All gates closed. Final summary:
+
+TASK 17 done — user guide rewritten against ce7a6f1, docs only.
+- docs/CONSOLE.md rewritten (839 lines): current UI (frozen topbar, vertical tab rail, right status rail, 860px fallback, Support bundle), two operating modes (unbound = live+glitch/burn; bound = paused + guarded capture with preflight/consent/UNVERIFIED), DEFECTIVE-vs-recoverable semantics (FF TPC_DEFECT_FF words = defects; 0x820760/0x820C38 runtime/SKU words are not; ceiling = FF words, headroom = ceiling − sm_now), end-to-end unlock workflow, support-bundle provenance, troubleshooting rows quoting real error literals.
+- README.md quickstart fixed: `python3 -m ga100vfi.console` / `.fusedump` (no such cli subcommands), unlock framing, file tree.
+- Label gate: 455 backtick spans in CONSOLE.md checked vs gui.py/service.py/guarded.py/fusedump.py (+adaptive.py for outcome vocab) — 0 misses, 4 justified non-label notes.
+- Mock click-through verified (live/preflight/glitch/driver/arm/ff-layout/support_bundle) — excerpts in evidence.
+- Fingerprint re-verified 8bf8e2a2ed3f, VERSION 0.3.0, no .py touched.
+- Commit 3bdc1b3 pushed fork v17:main fast-forward (ce7a6f1..3bdc1b3), ls-remote verified; local main = 3bdc1b3; worktree /tmp/v17 removed; mock server stopped.
+- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/17-userguide.md (+ check_labels.py).
+- Note: docs/USER-GUIDE.md still has the old `ga100vfi console` invocation — out of scope, flagged in evidence.
+GUIDE_DONE

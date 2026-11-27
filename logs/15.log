@@ -1,0 +1,10 @@
+Task 15 complete.
+
+- gui.py only (+25/-10): livebar moved into `<aside class="siderail" id="siderail">` as third child of .layout; .siderail sticky 380px rail (320px ≤1200px); #livebar no longer sticky; 860px media query un-sticks rail with order tabs→siderail→content; `:empty` hides rail in static builds.
+- Gates on mock-served page (port 8796): 200; parser proves .layout children = nav.tabs, main.content, aside.siderail with #livebar inside siderail and all 4 tabpanes in main; /api/live 200; node --check OK; ids intact; server killed.
+- Bug caught by mock gate and fixed pre-commit: a CSS comment containing the literal `__LIVEBAR__` got the livebar HTML injected into `<style>` (2× id="livebar" in page).
+- Fingerprint 4c44059b43db → 281fde1a32ad, version 0.3.0.
+- Commit 4028120 pushed fork v15:main (no force), ls-remote confirms fork/main = 4028120; local main fast-forwarded to v15; worktree removed; primary tree untouched (pwmvid.c still dirty).
+- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/15-right-rail.md
+
+RRAIL_DONE

@@ -1,0 +1,8 @@
+TASK 11 complete. Commit a12be09 "console: driver-bound guarded fuse dump with preflight consent (UNVERIFIED)" — fork/main verified at a12be09 via ls-remote (fast-forward, no force); local main = v11; worktree /tmp/v11 removed; primary tree untouched (only pre-existing dirty pwmvid.c).
+- guarded.py ports ga100_dump.py Bar/physical_mode/row verbatim; fidelity check: all 13 constants OK, 6 methods + physical_mode IDENTICAL, 18 allowlist cases equal — FIDELITY: PASS.
+- service.py: paused snapshot gains manual_dump_available/paused_hint/last_dump_age_s; GET /api/bound_dump/preflight (mock block flagged "mock": true); POST /api/bound_dump saves dump.json + driver_bound/verified:false, 409+conditions on refusal; bundle interpretation flags UNVERIFIED.
+- gui.py: paused banner + consent panel (conditions + fixed action list, Confirm gated on all_ok) + result panel with UNVERIFIED (driver bound) badge; served HTML contains all required strings.
+- Gates: py_compile + imports OK; mock console on port 43403 checked then killed; TPC replay 70/126 unchanged; version_info 0.3.0, fingerprint c3218843a4d8 (≠ 675bd9d3c868); no conflict markers; clean status.
+- Deviations from the reference (return-shape only) listed in /home/raza/nvidia/pico-ga100vfi/evidence/11-bound-capture.md.
+- Not hardware-verified: mock/build only; live driver-bound capture run needs owner's OK.
+BOUND_DONE

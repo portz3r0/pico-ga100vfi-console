@@ -1,0 +1,10 @@
+All gates complete; servers are down (both ports refuse connections), worktrees removed, primary tree untouched (fuse-console @ 320c85c, pwmvid.c still dirty).
+
+Task 34 summary:
+- Fix: `openPicker()` now `scrollIntoView({behavior:'smooth',block:'start'})` + `#dumppicker{scroll-margin-top:calc(var(--sticktop)+8px)}`; closePicker unchanged; Back-to-current measured 0px delta (left alone); long lists already scroll internally via `.scroll` (430px, ~12 rows) — no change needed; one CONSOLE.md sentence; VERSION stays 0.3.0.
+- Playwright (45 seeded dumps, mock console): BEFORE picker_top -2444.5 (off-screen above viewport, heading -2418.6 vs header bottom 82.5); AFTER picker box 90.5–592.5 intersects viewport, heading 116.4 below header 82.5; internal scroll works (1833>428) without moving the page; close delta 28px (Chromium scroll-anchoring settle at doc top; closePicker adds no scroll — reproduced with pure display toggle); 0 JS errors both runs.
+- Gates: py_compile all host py OK, imports OK, node --check OK, fingerprint dda39a2011d5 → 9603b36401b1.
+- Commit df83382 on v34 with the exact message; `git push fork v34:main` FAILED — no GitHub credentials (ls-remote read works, fork/main still 12d7b10); branch -f main v34 done; worktrees /tmp/v34 + /tmp/v34base removed.
+- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/34-picker-visibility.md
+
+PICKER_DONE

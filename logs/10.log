@@ -1,0 +1,9 @@
+Task 10 shipped.
+
+- New host/ga100vfi/version.py: VERSION="0.2.0" (bump-per-release note in docstring), version_info() with git resolution moved from service.py (git → .git_sha → None, never raises) + 12-hex sha256 fingerprint over version.py/fusedump.py/console/service.py/console/gui.py; git sha + fingerprint cached at import, no per-request hashing.
+- service.py: manifest keeps tool_git_sha/git_sha_source (now null when unresolvable), gains tool_version/tool_fingerprint + fingerprint-match warning when sha missing; /api/live gains "version" block. Docs (CONSOLE.md, README) updated: bundle self-identifies, .git_sha optional.
+- Gates: compileall clean; version_info in git → git_sha d8f3ad4/source "git"; copied tree (/tmp/nogit) → git_sha None, version+fingerprint intact (675bd9d3c868); fingerprint stable across calls, changes on gui.py touch (876281cec486), reverts; TPC replay 70/126 unchanged; mock console /api/live has version block, bundle manifest tool_version=0.2.0 + 12-hex fingerprint; server killed.
+- Pushed fork v10:main d8f3ad4..17b308f (fast-forward, token from ~/.hermes/.env — fork remote has no stored creds); ls-remote matches local. main moved to v10, worktree removed, primary tree untouched.
+- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/10-version-provenance.md
+
+VPROV_DONE

@@ -1,0 +1,14 @@
+Parent delta analysis — evidence at /home/raza/nvidia/pico-ga100vfi/evidence/08-parent-delta.md
+
+1. Parent gained exactly ONE commit we lack: 8be8296 "adaptive: 3D CRC-guided (v_dip, delay, pw) planner and opt-in telemetry" (tagged v0.1.0), a direct child of our merge base e1ebd97. We carry 68 commits parent lacks.
+2. Headline: our main:adaptive.py is BYTE-IDENTICAL to the parent's — commit 945712d already ported the 3D planner; the merge adopts adaptive.py trivially.
+3. But we ported the planner without its companions: our cli.py, sim.py, docs/ADAPTIVE.md are still merge-base 1D versions; telemetry.py is absent entirely.
+4. Semantic check: our cli.py --adaptive still works (new Planner keeps 1D compat: next_mv(), record(int) -> seed arm) but runs degraded — 4-outcome taxonomy, no 3D bounds flags, no timeline safety checks, no telemetry/share.
+5. glitch.py change is additive (Report.echo field); console and adaptive never read it — zero behavioural impact on our paths. Console does not import cli.py.
+6. Conflict surface: merge-tree dry run conflicts ONLY in .gitignore and README.md, both trivial keep-both hunks (README host/ tree listing; gitignore appended lines). AGENTS.md auto-merges.
+7. Parent touches nothing we own exclusively: no console/, fusedump.py, or docs/CONSOLE.md changes.
+8. Recommendation: MERGE NOW — one merge commit, resolve two trivial conflicts; the merge also repairs our internal inconsistency (3D planner vs 1D cli/sim/docs) and reduces future conflict surface against a fast-moving tagged release.
+9. Post-merge validation is sim-only (`python -m ga100vfi.sim 400`); no glitch campaign. `ga100vfi share` does outbound uploads — owner-OK-gated.
+10. Read-only honored: fetch was the only write; no worktree created (git worktree list clean), branch still fuse-console, main still 9b8e306, firmware/pwmvid.c untouched.
+
+ANALYZE_DONE

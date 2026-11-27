@@ -1,0 +1,15 @@
+Task 04 complete.
+
+Changes (host/ga100vfi/console/service.py only, stdlib only):
+- `_repo_git_sha()` replaced by `_git_sha_and_source()`: resolves sha via `git -C <package-dir>/../.. rev-parse HEAD` (package location, not CWD; argv list, 5 s timeout), falls back to `<package-dir>/.git_sha` deploy artifact, then "unknown". Manifest now carries `tool_git_sha` + `git_sha_source` ("git" | "file" | "unknown").
+- `support_bundle()` appends "no complete dumps found in state dir (dump.json missing in all dump dirs)" to `manifest.warnings` when zero dump dirs are found.
+
+Gate evidence (full log in /home/raza/nvidia/pico-ga100vfi/evidence/04-bundle-polish.md):
+- py_compile: PASS.
+- Mock instance :8793, temp state dir, no dumps: GET / -> 200; bundle -> 200 with `tool_git_sha = ffbd97d2fd3dc062f72435a1538e379d40726ab5` (== local HEAD), `git_sha_source = git`, zero-dumps warning present.
+- Production shape: package copied to /tmp/pkg_nogit (no .git above), fake `.git_sha` written -> helper returned `('0123456789abcdef0123456789abcdef01234567', 'file')`.
+- Instance killed by PID 2384492, port confirmed closed.
+
+Commit d41de67 `console: support bundle — package-relative git sha + zero-dumps warning` pushed ffbd97d..d41de67 to fuse-console (no force). Note: docs/CONSOLE.md's manifest description is generic and stays accurate; the task's hard rule kept docs out of this commit. Pre-existing uncommitted firmware/pwmvid.c change was left untouched.
+
+POLISH_DONE

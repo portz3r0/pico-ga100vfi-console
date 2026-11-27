@@ -1,0 +1,6 @@
+gui.py: STALE state from /api/live serial vs displayed dump serial; card-less/different-card → header prefixed "SAVED DUMP OF" + suffix, #dumpsrc strip with serial+dump ts, #dumpwrap dimmed (opacity .75 + amber left rule); card-less banner no longer blanks panels. Case A unchanged. CONSOLE.md paragraph added; no service.py change needed.
+Gates: py_compile + imports OK; node --check OK; real card-less run (:56481, seeded sn-1234567890123) — playwright 12/12 PASS (strip text w/ serial, SAVED DUMP OF prefix, stale class + 0.75 opacity + rgb(210,153,34) border, panels not blanked); cases A/C verified via intercepted /api/live (8/8 PASS); mock console unaffected; fingerprint 82c6ecf13cf5 (was cb4f684e2375), version 0.3.0.
+Shipped: commit d07a24f, pushed fork v22:main fast-forward (no force), ls-remote main = d07a24fed0c84429428223ff59e661fa5e18d0ed; local main = d07a24f; worktree /tmp/v22 removed; primary tree untouched (only pre-existing pwmvid.c dirty); servers killed.
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/22-stale-labels.md
+Limit: A/C DOM checks used route-intercepted /api/live (no GA100 on this box); case B fully real.
+LABELS_DONE

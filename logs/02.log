@@ -1,0 +1,14 @@
+Task 02 complete. Summary:
+
+```
+Support bundle shipped: GET /api/support_bundle -> tar.gz (application/gzip, attachment filename ga100-fuse-support-<UTC>.tar.gz), built fully in memory, 500+JSON on failure.
+Members under support/: manifest.json, console.log + goldilocks.jsonl (tail 2 MiB), last-preview.json, newest-5 dumps (dump.json + hex window, oldest first, overflow -> manifest.truncated), live_snapshot.json (same code path as /api/live via extracted live_snapshot()), system.txt (lspci -vv GA100 stanzas + dmesg tail 200 via sh()), interpretation.txt (re-run tpc_summary per dump: totals, per-GPC lines, defect-word source, ceilings, crc_ok, fingerprint).
+UI: header "Support bundle" link in gui.py with the exact contract tooltip; no tracked live.html exists (generated at startup), so gui.py is the single HTML source.
+Docs: CONSOLE.md "Submitting a support bundle" section + API table row; README feature bullet; service.py route docstring synced.
+Gates: py_compile OK; mock service on :8791 with seeded /tmp/bundle-state; curl 200 + headers + tar listing all members; manifest passes json.tool; interpretation.txt asserts sm_max=126 and "defect source: FF words from hex window (0x8205ac)"; dashboard HTML contains the button; newest-5 rotation + truncated verified with 7 seeded dirs; test server killed by PID (port free).
+Commit ffbd97d "console: support bundle — one-click logs + dumps + interpretation trace" (4 files, +269/-13).
+Pushed ceb4ea9..ffbd97d to fuse-console (no force); ls-remote confirms ffbd97d2fd3dc062f72435a1538e379d40726ab5.
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/02-support-bundle.md (incremental, all gate outputs).
+Not deployed; AI2 untouched; firmware/pwmvid.c pre-existing dirt left alone.
+BUNDLE_DONE
+```

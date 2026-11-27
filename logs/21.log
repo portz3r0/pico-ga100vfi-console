@@ -1,0 +1,6 @@
+Startup refusal replaced: no GA100 + no --bdf → stderr warning + serve with bdf=None; explicit --bdf validated via require_ga100 at startup (typo still exits 1, verified: `no GA100 at 0000:99:00.0 (found nothing…)`, exit=1). Fixed card-less stragglers (dmesg_tail 500, gpu_info "None is not a GPU", bogus default_note); gui.py shows a verdict-styled card-less banner that self-clears on the first good poll; CONSOLE.md updated (startup note, flags table, systemd example drops --bdf, troubleshooting row).
+Acceptance on this card-less box: server stayed up; /api/live → `{"error": "no GA100 present on this host"}`; /api/bound_dump/preflight → 409 same error; /api/gpus → `{"gpus": [], "default": null}`; /api/support_bundle → valid tar.gz, manifest `"bdfs": []`, `current_card.serial_source: "no-card"`; mock console unaffected; py_compile/imports/node --check clean.
+Fingerprint 25547f23f35f → cb4f684e2375, version 0.3.0. Commit a78f6b6 pushed fork v21:main (fast-forward, no force), ls-remote verified; local main = a78f6b6; worktree removed; primary tree untouched.
+Note: AI2's unit still pins --bdf — it will exit loudly until the card is present or the unit drops --bdf (owner action, no AI2 access).
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/21-cardless-boot.md
+CARDLESS_DONE

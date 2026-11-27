@@ -1,0 +1,8 @@
+Captured 5 fresh shots from live AI2 console (playwright 1600x1000 dsf=2 → 3200x2000, GET-only route guard, zero non-GETs): explorer, capture-consent (preflight panel open, "Capture now" never clicked), glitch, drivers, gpuinfo.
+Replaced console-explorer/glitch-burn/drivers/gpu.png + added console-capture-consent.png (referenced in CONSOLE.md); kept wiring/waveform/telemetry/old sub-state shots; README provenance caption updated (was "mock mode").
+Scrub: 0 13-digit serials existed in any /api body (serials null while driver bound); 8x "/home/raza" → "/home/USER" in /api/gpu before render; raw bodies + replacement log in evidence.
+Gates: all PNGs 3200x2000, 599KB–1.1MB, pixel variance 21.7–30.4; all doc image refs resolve; fingerprint re-read live = 8bf8e2a2ed3f; no .py changes.
+Pushed fork v18:main fast-forward d89f072..0a19bff (no force), ls-remote verified; local main = 0a19bff; worktree /tmp/v18 removed; primary tree untouched (pwmvid.c still dirty).
+Limitation noted in evidence: USER-GUIDE's console-armed/check-panel/preview shots still show old chrome (those states need POSTs, forbidden here); full-frame vision on 3 shots timed out — verified via DOM assertions + right-rail crop vision instead.
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/18-screenshots.md
+SHOTS_DONE

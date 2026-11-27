@@ -1,0 +1,38 @@
+ Then here's where we actually are — the unlock is now computable rather than speculative, and I found two traps on the way.
+
+ The FF map is confirmed on your die. Reconstructing every chain-1 floorsweep from the row image I banked reproduces the BAR0 values I measured independently — FBIO 0xC0330C, FBPA 0xC0330C, FBP 0x852, ROP_L2 0xC0330C, PES 0x3803F, GPC 0x23, NVLINK 0x7,
+ SYS_PIPE 0xFE, TPC masks ff ff 01 00 00 ff 01 01 = 37 TPC = 74 SM. That's the differential cross-SKU mapping Kate's researcher built, re-derived from one card and checked against a second, unrelated read path.
+
+ Trap one — the rir tool is not safe to use here. Its --write-rir reads and writes FUSEADDR 0..7, and on this card those addresses return 0x53557c3d — Kate's control-row value, with rows coming in identical PRI/RED pairs. So its "RIR" aperture is
+ addressing main rows 0–3, the one region with "basically no remedy," not the TSMC repair macro. I won't run --write-rir against this card, and I'd be careful with it on any card.
+
+ Trap two — blocks are shared, so records must be merged. FBPA and FBIO both live partly in block 6, and block 8 holds both FBPA bits and GPC. Emit one record per word means the later record silently reverts the earlier, because last-wins is per block,
+ not per option word. My first composition did exactly that — it would have emitted block6 = 0x6601 for FBIO immediately after block6 = 0x0601 for FBPA, undoing the memory unlock. The planner has to merge all edits per block into one record.
+
+ Phase-1 memory records as they come out (targets set from *_DEFECTIVE, not guessed — 20 FBPA is exactly the defective-consistent value):
+
+ ┌───────┬───────────────┬────────────────┬────────────┬──────────────────────────────────────────────────────────────┐
+ │ block │ current       │ target         │ record     │ why                                                          │
+ ├───────┼───────────────┼────────────────┼────────────┼──────────────────────────────────────────────────────────────┤
+ │ 5     │ 0x9867        │ 0x8007         │ 0x80070141 │ FBIO: release subpartitions 2,3,8,9                          │
+ ├───────┼───────────────┼────────────────┼────────────┼──────────────────────────────────────────────────────────────┤
+ │ 6     │ 0x6601        │ 0x0601         │ 0x06010181 │ FBPA bits and FBIO bit13 merged                              │
+ ├───────┼───────────────┼────────────────┼────────────┼──────────────────────────────────────────────────────────────┤
+ │ 7     │ 0x0198        │ 0x0180         │ 0x018001C1 │ FBPA                                                         │
+ ├───────┼───────────────┼────────────────┼────────────┼──────────────────────────────────────────────────────────────┤
+ │ 19    │ 0x4290        │ 0x4200         │ 0x420004C1 │ FBP 0x852→0x840, FBPs 1 and 4                                │
+ ├───────┼───────────────┼────────────────┼────────────┼──────────────────────────────────────────────────────────────┤
+ │ 20/21 │ 0x1986/0x0060 │ merging ROP_L2 │ pending    │ ROP/L2 must follow FBPA or the partitions come back unusable │
+ └───────┴───────────────┴────────────────┴────────────┴──────────────────────────────────────────────────────────────┘
+
+ About eight rows out of 195. Then phase 2 is GPC 0x23→0x00 plus TPC masks, with GPC0 staying at 0x10 to leave the defect-flagged TPC off — 126 SM, not 128.
+
+ Two things genuinely still unknown, and I'd rather name them than paper over them. SENSE_CTRL's FUSECTRL value isn't in any public header — Kate's trick (re-sense restores every control-row option except DSOV, so ENABLE_FUSE_PROGRAM returns to 1 while
+ SBFE can then be shadowed to 0, plus clearing OPT_SECURE_FUSE_WDATA_WR_SECURE at 0x0082048C to open the FUSEWDATA PLM) is the arming path, but the encoding we derive by observation at Goldilocks. And NVDEC/NVJPG/OFA have no published FF location —
+ they're not in chain 1's known ranges, so without a second SKU's row dump I can't plan them honestly; I'd leave them out of the first burn rather than guess at chain-2 blocks.
+
+ One correction to my own earlier pessimism worth flagging: Gen3 and Gen4 are plain FF bits (chain 2 block 39 for Gen3 — bit 1 or 9 still ambiguous — block 47 bit 3 for Gen4, block 49 bits 6/7 for boot policy), and she reports them training and fully
+ functional. Since your card already has the decoupling-cap mod, Gen4 is in scope after memory and SMs are banked, though it pays nothing on pve1's x8 slot.
+
+ Next: read the remaining *_DEFECTIVE words for PES and ROP_L2, write ff-plan.py with the merge rule and a hard refusal on any block whose value I can't fully account for, then ff-burn.py that will only write rows ≥293 and only after verifying Goldilocks
+ + armed state. Nothing gets written until that plan is printed and you've seen it.

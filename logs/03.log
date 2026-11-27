@@ -1,0 +1,12 @@
+TASK 03 verification summary
+1. Commit scope: HEAD=ffbd97d touches only README/docs/gui.py/service.py; parent == ceb4ea9. PASS
+2. Launched own mock instance (port 8792, fresh /tmp state dir, 6 seeded dumps). PASS
+3. Endpoint: 200 application/gzip, UTC attachment filename, all contract members under support/. PASS
+4. Cap+window: 6 dumps -> newest 5 kept, oldest dropped and named in manifest.truncated; 35 MiB -> 21.4 MiB with both drops recorded. PASS
+5. interpretation.txt: sm_max=126 for card1 + "defect source: FF words from hex window (0x8205ac)", matches my offline tpc_summary. PASS
+6. Edge cases: empty state dir 200+warnings; corrupt dump 200+warning (no 500); concurrent GET both 200; dashboard link present; 0 members outside support/. PASS
+7. Secret scan: 0 hits for khankhan/GITHUB_TOKEN; service.py reads no env. PASS
+8. Docs: CONSOLE.md "Submitting a support bundle" + README bullet present. PASS
+9. Findings: 2 informational only (verbatim dmesg/log leak path; corrupt dumps consume a newest-5 slot). VERDICT: PASS
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/03-verify-bundle.md
+VERIFY_DONE

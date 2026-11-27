@@ -1,0 +1,8 @@
+Evidence written: /home/raza/nvidia/pico-ga100vfi/evidence/29-ff-tools-compare.md (repos untouched; the pre-existing pwmvid.c modification is not mine).
+Their planner: offline derive→check→burn→verify with FF fields set to DEFECTIVE masks (FBIO/FBPA/GPC/PES/FBP/ROP_L2/TPC×8), fingerprinted baselines, prefix-resume, plus PCIe Gen3/4 records and a %smid SM-coverage stress; encoding/last-wins/TPC-defect words match ours exactly.
+WE-BETTER: burn gates (journal, token, GPIO19, driver-unbound, LOADER/SWIFF/IFF), zone reserves, EN_SW_OVERRIDE-aware dumps, hard identity gate, burn-time verify.
+THEY-BETTER: plan field breadth (we burn only GPC/FBP/FBPA), post-cold-boot plan verifier, row-content fingerprint, PCIe unlock + pcie_state gate, sm_stress post-unlock proof, offline tests, module_blacklist quarantine finding.
+Key adjudications: their FBIO(83-106)/FBPA(107-130) split is consistent with our own FBPA≠FBIO shadow divergence — our evidence-45 "single field feeds all three" claim is wrong and FBPA bits 22/23 stay uncorrected by our plan; their 0x8205C8=TPC_GPC0_DEFECTIVE confirms our fleet table and exposes our evidence-45 ROP_L2 mislabel; their ff_dump ignores EN_SW_OVERRIDE (garbage-dump gap); their SENSE_CTRL=3 caution is answered by our executed burns.
+Top proposals: P1 sm_stress port, P2 complete memory-plane FF fields (gated, all-or-nothing with PES/ROP_L2 per their GSP-boot rule), P3 offline plan+fingerprint verifier, P4 gated PCIe Gen3/4 plan, P5 kernel module_blacklist, P6 server-side DEVID refusal.
+UNVERIFIED: their 0x8205E8 ROP_L2, 0x820838 TPC ctrl, PCIe block mapping, mirror necessity; kate-land options JSON URL now 404s.
+COMPARE_DONE

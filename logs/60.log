@@ -1,0 +1,18 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+Evidence file complete: `/home/raza/nvidia/pico-ga100vfi/evidence/60-gpu2-burn-truth.md`
+
+TASK60_DONE
+
+1. Plan: razk-batch2.bin = GA100PLN v2, 52 steps = 31 logical writes (6 FPF DEVID column bits rows 2/3/6/7/48/49, 21 FF records rows 326–346 two-step inert→armed, 4 IFF rows 484–487 SS0/SS1 WRITE_DW), 78 COND, 10 RCHK, signature verified against the shipped pub key; BASE→POST replay exact.
+2. Order rule: ga100_burn.py `program()` burns strictly in plan order (`:364`) — column fuses first (6/7, 48/49, 2/3), then FF ascending, IFF last; phases live in the planner, not the executor; vGPU/OpenGL/FP64/TTU columns are not in this plan.
+3. ACTUAL delta: 0 rows — the "post" dump (HP card …9272, 03:00.0) contains none of the plan's records; rows 326–346/484–487 blank, DEVIDA still 0x20C2, IFF_RECORD factory.
+4. The pre/post pair is TWO DIFFERENT CARDS: plan BASE == pre dump (card2 die at 41:00.0, IDV2 cc49e39f); 141 of 143 pre→post diffs are bit-clears — impossible for one die.
+5. The HP card was never burned: no ga100_burn run in bash_history, no journal, factory FF stream to row 300, live lspci still 10de:20c2.
+6. HP card profile: boot 74 SM/64 GB, potential 126 SM/80 GB (only GPC4·TPC0 defective), FF blank zone 301–487 — batch2's card2-encoded FF data would enable that dead TPC on this die (brick class).
+7. Top-3 gaps vs our records: (a) HP bench host + its unburned …9272 card absent from the skill entirely; (b) no record that GPU2/'s "pre/post" are different dies (any before/after claim built on them is wrong); (c) RCHK also protects the undo-bit columns (20/21, 28/29 pairs) — our rule says delta bits only; bonus gap: the private plan_sign.key now sits on the HP.
+8. HP driver state for next task: nvidia loaded but 03:00.0 UNBOUND, nvidia-smi "No devices", link degraded to Gen1 2.5 GT/s, Nov-26 probe logs say config space dead after glitch shots — cold boot needed.
+9. READ-ONLY held: no writes to HP, no git ops; local artifacts in /tmp/gpu2/ (parse.py, parse_out.txt).
+10. Caveat: a partial post-Nov-26 FF burn can't be excluded offline (needs a glitch-window read), but no DEVID change and zero journal evidence says nothing landed.

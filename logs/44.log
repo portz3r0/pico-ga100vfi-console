@@ -1,0 +1,9 @@
+TASK44 done — committed `6811a67`, not pushed. HP bench untouched.
+
+**The brief's ground truth was wrong.** Decoding the signed plans: rows 308–324/326–346 are the **chain-1** records (final words `0x80070141…`, chain=1). The "chain-0 mirrors" are the plans' **two-stage burn intermediates** — `ga100_burn.py:322` writes one CMD_WRITE per STEP delta: first data+block with chain bits zero, then the chain bits. No chain-0 FF record exists in 222–487 in either plan's BASE/POST, both pre-burn dumps, GPU1's post-burn dump, or the mock card. Adding chain-0 steps would have demanded 16 phantom OTP burns on the golden cards themselves.
+
+Deliverable instead: golden recipe confirmed complete as-is + record corrected.
+- `host/tests/test_chain0_golden.py` — replay: chain-1 derivation == burned words, PROPOSE == stepped sets (17/16 blocks), chain-0 sets == {} both sides, GPU1 planes anchored to real dump shadow, golden completeness (16 common blocks, batch2 data, batch1 other_burns, blk17 note-only).
+- `advanced_unlocks.py` — comment-only "NO CHAIN-0 MIRROR STEPS" block; gui.py untouched.
+- Gates: a) new test green; b) test_perdie_capture green; c) mock :8799 (pid 3525350 killed, port down) — 35/35b/35c all PASS, queue unchanged at 21 rows, no threshold edits; d) served page `node --check` PASS.
+- `evidence/44-chain0-golden.md` ends `TASK44_DONE`; commit message deviates from the brief's mandated one because "add chain-0 mirror records" would have been a false claim.

@@ -1,0 +1,19 @@
+Task 05 complete. Commit 32d6563 on fuse-console, pushed d41de67..32d6563 (no force).
+
+Changes (host/ga100vfi/console/service.py + docs/CONSOLE.md only):
+
+1. lspci matcher — `system_txt()` now runs `lspci -nn -vv` and matches stanza first lines on `[10de:20c2]`/`[10de:20b5]`/`[10de:2082]`. Split/match extracted to `lspci_ga100_stanzas(text)` (same splitting as before); "no stanzas" fallback kept.
+2. `support/nvidia_smi.txt` — new `nvidia_smi_txt(bdfs)` using the `/api/gpu` 8-hex-digit `--id=` form, the 12-field CSV query, 15 s timeout via `sh()`; module absent → "driver unbound — nvidia-smi not applicable"; failure/absence → "nvidia-smi unavailable: <reason>".
+3. Poll log — `log_message` skips GETs to /api/live, /api/glitch/status, /api/gpus (exact path, query stripped; /api/gpus/all still logged) and prints one "polling: N requests … in 300s" summary per window. One real bug caught by the first mock run: the stdlib format string quotes the request line (`"GET …`), so the predicate now uses `self.command`/`self.path` instead of parsing the message.
+
+Gate results (all real, this host — no GA100, nvidia module absent):
+- py_compile clean (after fixing a `\u`-in-bytes SyntaxWarning).
+- Matcher unit test on synthetic fixture: 2/2 GA100 stanzas matched ([10de:20b5] and [10de:20c2]), Intel and [10de:10fa] audio correctly excluded; live `lspci -nn -vv` parses, 0 matches as expected.
+- Mock :8794 bundle: system.txt prints the honest "(no GA100 device stanzas on this host)"; nvidia_smi.txt present with the unbound text; manifest lists the new member; GET / → 200.
+- Poll loop (10× /api/live + /api/full): console.log contains only `/`, `/api/support_bundle`, `/api/full` lines — zero poll lines. Summary branch forced in-process (POLL_SUMMARY_S=0): summary line + counter reset exercised.
+- Both mock instances killed by PID.
+
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/05-bundle-gaps.md
+Not hardware-verified (host-side gates only, per task rules).
+
+GAPS_DONE

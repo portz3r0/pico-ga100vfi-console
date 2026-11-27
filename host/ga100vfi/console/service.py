@@ -1009,6 +1009,21 @@ def arm_window(rd, wr):
     efp = rd(EFP)
     checks.append({"name": "EFP", "value": efp, "want": 1, "ok": efp == 1})
     pdis = rd(PROGRAM_DIS)
+    if pdis != 0:
+        # D5 (Allspark Part 3 §4, The Lab): the glitch can leave
+        # OPT_DIS_PROGRAM set. OPT_* are volatile shadows, host-writable
+        # under EN_SW_OVERRIDE and reverted by power cycle — restore it
+        # ONCE (never retry), re-read; if it stays set the abort stands.
+        en_saved = rd(EN_SW_OVERRIDE)
+        if en_saved != 1:
+            wr(EN_SW_OVERRIDE, 1)
+            time.sleep(0.05)
+        wr(PROGRAM_DIS, 0)
+        time.sleep(0.05)
+        pdis = rd(PROGRAM_DIS)
+        if en_saved != 1:
+            wr(EN_SW_OVERRIDE, en_saved)
+            time.sleep(0.05)
     checks.append({"name": "PROGRAM_DIS", "value": pdis, "want": 0, "ok": pdis == 0})
     if efp != 1 or pdis != 0:
         return False, checks

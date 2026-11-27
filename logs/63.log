@@ -1,0 +1,16 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+TASK63_DONE
+
+1. Pair lives in `burn_execute` (service.py:1081–1149): the existing program bracket now runs per target word — `targets = [value & ~0x1F, value]` when chain field `W & 0x1F` is nonzero, `[value]` otherwise; campaign burn-on-Goldilocks inherits it unchanged (loop at :2449 calls burn_execute per record).
+2. Step A latches `W & ~0x1F` (chain=0 = NULL, fuse walk ignores it), verifies; step B latches only `C & ~row_after_A`, verifies; each step journals `command_may_be_issued` before EN=1 and `verified` after its readback — mirroring ga100_burn.py:370–382 (journal-before-FUSE_EN, readback "STOP, no retry").
+3. STOP semantics: step-A readback mismatch ⇒ `VERIFY FAIL — step A …; STOP, no arm step` — step B never issued, row stays inert (chain field 0); step-B mismatch ⇒ STOP with data complete but unarmed; no retries anywhere.
+4. All existing guards preserved around the pair: driver-unbound, journal-uncertain/ack, GPIO19 preflight, arm_window, old-match, ALREADY-BURNED zero-write path, plane gate / bit5 / arm token / identity gate in burn_api outside, GPIO/TRIGGER/EN finally-restore. C==0 (FPF/column) keeps the exact single-write path.
+5. Preview honesty: FF rows gain `two_step` (step_a_word/step_a_delta/step_b_delta + inert-then-arm note) and hazards gain a one-line `two_step_note` (chain=0 partials ignored by the walk; chain-armed partials cannot arm) — hazard engine untouched; burn_preview_api/mock inherit. GUI: preview two-step line, hazard note, queue "two-step: inert → arm" tag.
+6. New tests host/tests/test_two_step_burn.py: 9/9 passed, run 3× identical — (a) exactly 2 CMD_WRITE brackets, WDATA #1 chain-clear / #2 chain-only, final row == W, journal cmd/verified per step; (b) sticky-bit step-A drop → 1 write only, row inert, campaign halts; (c) chain-bit drop → 2 writes, STOP, unarmed; (d) C==0 single write; (e) WriteSpy: preview zero latching writes, burn latching traffic only inside brackets + finally-restore tail.
+7. Suite parity: full 18-file suite failing set = test_burn_window, test_program_sequence, test_task17, test_verify6, test_verify8 — exactly the baseline 5; stash-compare confirmed each fails with the identical pre-existing error (old burn_execute call signature missing bdf; task17 8/13; verify8 KeyError 'result') with and without the change. Nothing worsened.
+8. Docs updated in the same commit per AGENTS.md lockstep: CONSOLE.md preview bullet, campaign step 4, new "Two-step FF burn" block, burn-queue bullet, `/api/burn/preview` + `/api/burn` API rows.
+9. Evidence: evidence/63-two-step-burn.md — razk lines mirrored (program() :349–397, batch2 52-step two-step record list), file:line citations for every change, test outputs, parity method.
+10. Commit 4d1215c on main (local only — no deploy/push/ssh; no hardware touched: tests/builds only, no flash/glitch/burn).

@@ -1,0 +1,17 @@
+Task 14 done: tabs moved to a sticky vertical left rail (190px, left-border
+active indicator) with .layout flex + <main class="content"> wrapping all 4
+tabpanes; @media 860px falls back to the horizontal sticky row. switchTab JS,
+tabpane ids, and backend untouched; gui.py only, no VERSION bump.
+Gates: py_compile + import OK; mock console on :8799 → / 200, /api/live 200;
+served-page parse proves nav.tabs first child of .layout and main.content
+wraps exactly the 4 panes; node --check on extracted script PASS; served CSS
+has flex-direction:column on .tabs, the 860px query, and no bottom-border
+indicator on .tab.on outside the media query.
+Fingerprint ea31e19599dc → 4c44059b43db, version 0.3.0.
+Commit 5920cf1 pushed fork v14:main non-force (f21dfdf..5920cf1), ls-remote
+verified; local main fast-forwarded to 5920cf1; worktree removed; primary
+tree's dirty pwmvid.c untouched. Evidence: evidence/14-vertical-tabs.md.
+VTABS_DONE
+
+⚠️ File-mutation verifier: 1 file edit(s) FAILED this turn despite any wording above that may suggest otherwise. Run `git status` or `read_file` to confirm what actually landed.
+  • `/tmp/v14/host/ga100vfi/host/ga100vfi/console/gui.py` — [patch] Failed to read file: `/tmp/v14/host/ga100vfi/host/ga100vfi/console/gui.py`

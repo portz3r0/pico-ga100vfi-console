@@ -1,0 +1,16 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+TASK61_DONE
+
+1. Evidence file: /home/raza/nvidia/pico-ga100vfi/evidence/61-hp-console-validation.md (220 lines, all sections complete; console source untouched).
+2. Live-state verdict: CORRECT on every checked row — BDF 03:00.0, serial …9272 (inforom), driver-unbound detected, GFW_BOOT=0x3FF "clean POST" + FEAT_READOUT_1=0x016DB6ED "throttled" populated (real reads; synthetic fallback is mock-only), shadow = the …9272 defect map (GPC_DIS 0x13, TPC_GPC4_DEF 0x1, FBP_DEF 0x840), never_write list present.
+3. window_ok=false is card state (DSOV=1, powered D0), Gen1 x4 link is post-glitch card state — not console bugs.
+4. Proposal: 9 records (rows 301–309) reproduced from the client planner and validated via 9 read-only POST /api/burn/preview (read-only verified: ReadOnlyFuse service.py:1500-1503 allows only FUSEADDR/EN_SW_OVERRIDE/CMD_READ): 8 SAFE, 1 RISKY, 0 WRONG.
+5. Critical per-die check passes: off13 0x08000341 keeps dead GPC4·TPC0 masked (preview after 0xE1); FF starts at 301 (not 326); FF_END=487 = IFF start −1; plane gate + bit5 rule fired correctly on all 9.
+6. Order verdict: FF ascending, per-block last-wins placement, no shared-word collisions — OK; no column fuses proposed (documented scope, OK-with-reason).
+7. Top defect D4: burns are SINGLE-STEP (burn_execute, service.py:1023) — razk's proven two-step inert-then-armed is absent; the console's own hazard panel lists the partial-landing subset (0x201 → unmasks dead FBPA22/23) that two-step prevents.
+8. D2 defect D1: FBPA unlock pair omits off7 (0x018001C1, already computed in pd[7]) — promised FBPA8/9 re-enable not delivered (preview plane after = 0xC03300 ≠ 0xC03000).
+9. D3: IFF macro rows 484–487 are display-only (gui.py:2880 + ff_policy bit5 ban) — razk SS0/SS1 step not expressible in this console; D2 cosmetic mislabel on GPC-unlock recs text.
+10. Cross-check §4: console dump vs Nov-26 bin = 0 differing rows across 0–487; occupied 222–300 (79), block-8 winner 0xF89E0201, DEVIDA 0x20C2, FPF rows verbatim plan-BASE — byte-exact. Verdict: trustworthy to PLAN this card; fix D1/D4 before trusting it to BURN.

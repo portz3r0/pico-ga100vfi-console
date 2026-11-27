@@ -1,0 +1,8 @@
+gui.py: INTENDED state now renders a "Proposed burns to reach INTENDED" panel — one PROPOSED-badged row per planner word (target row, 0x00000000→proposed hex, units re-enabled, mirror-row note), header "PROPOSED — not burned; irreversible OTP writes pending a Goldilocks campaign", "no burns proposed" line when planner is empty; hidden in STOCK/NOW.
+Single source: panel calls the same suggestPlan/ffEffect/existingRecordFor as the Suggested-burns card; "Queue these burns" shares the extracted queuePlanRecords() (same body plan-queue-all now uses) then switches to Glitch & Burn. Recompute triggers commented (state switch + every dump/poll refresh).
+Gates: py_compile/imports/node --check clean; Playwright (card-less, seeded 2-serial state dir) 21/21 PASS incl. planner-equality (panel words == #plan-rows words == __suggestPlan()), STOCK/NOW zero .prop-tag, queue-rows == 4 planner words, intended==now card shows no-burns line; servers killed.
+Mock console fine; fingerprint dc8893ae122e (was 67159c634301), VERSION still 0.3.0.
+Commit 1b487b2 on v26; main fast-forwarded; worktree removed; primary tree untouched.
+Push BLOCKED: no GitHub creds this session — fork/main still d551f0b; owner must run `git push fork v26:main` (fast-forward).
+Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/26-proposed-burns.md
+PROPOSED_DONE
