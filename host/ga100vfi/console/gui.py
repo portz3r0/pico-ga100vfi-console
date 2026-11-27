@@ -2378,7 +2378,7 @@ LIVEBOOT = r"""
         <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
         <button class="btn danger" id="gb-arm">Arm (120 s)</button>
         <span class="pill" id="gb-armstate">not armed</span>
-        <button class="btn danger" id="gb-burnnow" disabled>Burn now (burn window only)</button>
+        <button class="btn danger" id="gb-burnnow" disabled title="burns ONLY the single payload row above — does NOT burn the queue; to burn the queue use 'Arm & burn queue' on the Burn queue card">Burn payload row ONLY (standalone)</button>
         <span class="pill" id="gb-windowstate" title="read-only burn-window verdict from the live poller (window checks; EFP/WDATA_PLM auto-arm at burn)">window: …</span>
         <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
@@ -2447,21 +2447,6 @@ LIVEBOOT = r"""
       </div>
       <div id="adv-rows"></div>
     </div>
-    <div class="card" id="gb-queue" style="margin-top:12px">
-      <h3>Burn queue <span class="note">(all of these burn in one Goldilocks window)</span></h3>
-      <div id="queue-rows" class="queue-rows"></div>
-      <div class="frow" style="margin-top:8px; align-items:end">
-        <div class="field"><label>custom record — row</label>
-          <input type="number" id="cq-row" placeholder="row — first free FF row" min="222" max="487"></div>
-        <button class="btn" id="cq-firstfree" title="fill row with the first blank FF row (≥222) in the loaded dump">first free FF row</button>
-        <div class="field"><label>value (hex FF record)</label>
-          <input type="text" id="cq-value" placeholder="0x… FF record" class="mono" style="width:120px"></div>
-        <button class="btn" id="cq-add">+ Add custom record</button>
-        <label class="checkline"><input type="checkbox" id="cq-mirror"> mirror each</label>
-        <button class="btn" id="queue-clear">clear queue</button>
-      </div>
-      <div id="cq-decode" class="note"></div>
-    </div>
     <div class="card" id="gb-campaign" style="margin-top:12px">
       <h3>Glitch campaign</h3>
       <div class="frow">
@@ -2506,6 +2491,27 @@ LIVEBOOT = r"""
       </div>
       <div class="chips" id="gc-chips"></div>
       <div class="logbox" id="gc-log">— campaign log —</div>
+    </div>
+    <div class="card" id="gb-queue" style="margin-top:12px">
+      <h3>Burn queue — arm &amp; burn in one action <span class="note">(all queued records burn together in ONE Goldilocks window; <b>Arm &amp; burn queue</b> runs the arm gate and starts the burn campaign in ONE server call — no 120 s TTL race)</span></h3>
+      <div class="frow">
+        <button class="btn go" id="bq-armburn" disabled style="font-size:14px; padding:8px 18px">⚡ Arm &amp; burn queue (0)</button>
+        <button class="btn" id="bq-check" title="read-only per-record preview (guards, FF decode, last-wins collisions, hazards) for every queued row — works any time, no window/arm/token needed">Check queue</button>
+        <span class="pill" id="bq-window" title="authoritative burn-window verdict from the live register poll (/api/live window checks) — the campaign HELD chip and the payload-panel pill show this SAME state">burn window: …</span>
+        <span class="note" id="bq-reason"></span>
+      </div>
+      <div id="queue-rows" class="queue-rows"></div>
+      <div class="frow" style="margin-top:8px; align-items:end">
+        <div class="field"><label>custom record — row</label>
+          <input type="number" id="cq-row" placeholder="row — first free FF row" min="222" max="487"></div>
+        <button class="btn" id="cq-firstfree" title="fill row with the first blank FF row (≥222) in the loaded dump">first free FF row</button>
+        <div class="field"><label>value (hex FF record)</label>
+          <input type="text" id="cq-value" placeholder="0x… FF record" class="mono" style="width:120px"></div>
+        <button class="btn" id="cq-add">+ Add custom record</button>
+        <label class="checkline"><input type="checkbox" id="cq-mirror"> mirror each</label>
+        <button class="btn" id="queue-clear">clear queue</button>
+      </div>
+      <div id="cq-decode" class="note"></div>
     </div>
     <div class="card" id="t51-neverwrite" style="margin-top:12px">
       <h3>Never-write reference <span class="note">(The Lab / allspark
@@ -2558,6 +2564,17 @@ LIVEBOOT = r"""
   let gpuGoldilocks = false;      // arm gate: current poll of the SELECTED GPU only
   let targetBdf = null;
   let windowOk = false;           // live burn-window verdict (poller / fresh check)
+  // task 67 (UX66 F3): ONE authoritative burn-window state, computed once
+  // per /api/live poll and consumed by every window widget (bq-window pill,
+  // gb-windowstate pill, campaign HELD chip). OPEN = all window checks
+  // pass; FADING = DSOV still 0 but any other check fails (the decay the
+  // hardware shows in minutes); closed otherwise.
+  let windowState = {state: "n/a", bad: []};
+  let campaignRunning = false;    // gates Arm & burn while a campaign owns the card
+  let burnResults = null;         // row -> result from stats.burned (null = no burn campaign seen)
+  let burnPending = false;        // burn campaign running: queued rows without a result show pending
+  let burnResultsSig = "";
+  let queueVerdicts = {};         // "row:value" -> Check-queue preview verdict (UX66 F5-lite)
 
   // B6: the Check verdict binds to the exact payload — any edit to the burn
   // inputs invalidates it (the check IS the safety contract).
@@ -2979,7 +2996,7 @@ LIVEBOOT = r"""
     // task 35c: the INTENDED-state panel too (its rows now offset the queue).
     renderPlan(); renderAdvanced(); renderProposedBurns();
     const el = document.getElementById("queue-rows");
-    if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; return; }
+    if (!burnQueue.length) { el.innerHTML = `<span class="note">queue empty — add suggested or custom records</span>`; updateQueueCard(); return; }
     // task 27: show each entry's assigned row through the SAME allocator the
     // burn payload uses — what the queue displays IS what it will burn.
     const asg = assignRows(burnQueue);
@@ -2998,6 +3015,16 @@ LIVEBOOT = r"""
             : st && st.state === "superseded"
               ? `<span class="tag prop-tag">SUPERSEDED at row ${st.byRow}</span>`
               : `<span class="note">—</span>`;
+        // task 67 (UX66 F4): while/after a burn campaign the Status column
+        // shows the SERVER's per-record result (stats.burned) — the table
+        // the operator queued from IS the results table.
+        const res = a ? burnResultFor(a) : null;
+        // task 67 (UX66 F5-lite): Check-queue preview verdict, bound to the
+        // exact (row, word) — a re-allocation drops the stale verdict.
+        const vd = a ? queueVerdicts[a.row + ":" + q.word] : null;
+        const vdCell = vd
+          ? `<br><span class="tag ${vd === "SAFE TO BURN" ? "ok-tag" : "prop-tag"}" title="Check queue preview: ${esc(vd)}">preview: ${esc(vd)}</span>`
+          : "";
         return `<tr class="pbrow${st && st.state === "present" ? " qwarn" : ""}">` +
           `<td class="mono">#${i + 1}</td>` +
           `<td class="mono">0x${q.word.toString(16).toUpperCase().padStart(8, "0")}</td>` +
@@ -3005,12 +3032,32 @@ LIVEBOOT = r"""
           `<td class="note">${esc(f.key)}${f.field === "DEVID" ? ` → 0x${f.devid.toString(16).toUpperCase()}` : ""}` +
           (ffDecode(q.word).ch && !ffDecode(q.word).iff
             ? `<br><span class="note">two-step: inert → arm</span>` : "") + `</td>` +
-          `<td>${statusCell}</td>` +
+          `<td>${(res ? burnResultTag(res) : statusCell) + vdCell}</td>` +
           `<td class="note">${esc(q.src)}</td>` +
           `<td><button class="btn" data-q-del="${i}">✕</button></td></tr>`;
       }).join("") + `</tbody></table>`;
+    // verdicts bind to (row, word): prune entries the queue no longer holds
+    const live = new Set();
+    if (asg) asg.rows.forEach((a, i) => { if (a) live.add(a.row + ":" + burnQueue[i].word); });
+    Object.keys(queueVerdicts).forEach(k => { if (!live.has(k)) delete queueVerdicts[k]; });
     el.querySelectorAll("[data-q-del]").forEach(b => b.onclick = () => {
       burnQueue.splice(+b.dataset.qDel, 1); renderQueue(); });
+    updateQueueCard();
+  }
+  // task 67 (UX66 F4): map the assigned row (or its mirror) to the burn
+  // result reported by /api/glitch/status stats.burned.
+  function burnResultFor(a) {
+    if (!burnResults || a === null) return null;
+    const r = burnResults[a.row] !== undefined ? burnResults[a.row]
+              : (a.mirror ? burnResults[a.row + 1] : undefined);
+    if (r !== undefined && r !== null) return r;
+    return burnPending ? "pending" : null;
+  }
+  function burnResultTag(res) {
+    if (res === "pending") return `<span class="note">pending</span>`;
+    if (res === "VERIFY OK") return `<span class="tag ok-tag">VERIFY OK</span>`;
+    if (res === "ALREADY BURNED") return `<span class="tag prop-tag">ALREADY BURNED</span>`;
+    return `<b class="bad">${esc(String(res))}</b>`;   // ABORT … / VERIFY FAIL / …
   }
   // ---- shared free-row assignment (task 27, single source) ----
   // The layout rows are assigned against: the live card's FF layout when
@@ -3428,27 +3475,67 @@ LIVEBOOT = r"""
     const ab = $("gb-arm");
     ab.disabled = !gpuGoldilocks;
     ab.title = gpuGoldilocks ? "" : "selected GPU not Goldilocks — glitch first";
+    updateQueueCard();
+  }
+  // task 67 (UX66 F1/F6): the one-action burn button — label carries the
+  // queue size and, after a manual Arm, the remaining token seconds; the
+  // one-line refusal reason is visible next to it, not only in a tooltip.
+  function updateQueueCard() {
+    const btn = $("bq-armburn");
+    if (!btn) return;
+    let label = "⚡ Arm & burn queue (" + burnQueue.length + ")";
+    if (armToken && Date.now() < armExpiry)
+      label += " · armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
+    btn.textContent = label;
+    const reason = !burnQueue.length ? "queue empty — add records below"
+      : campaignRunning ? "campaign already running"
+      : !targetBdf ? "no GPU selected" : "";
+    btn.disabled = !!reason;
+    btn.title = reason || "arm (Goldilocks + identity gate) and start the " +
+      "burn campaign in ONE server call — irreversible OTP writes";
+    const r = $("bq-reason");
+    if (r) r.textContent = reason || r.textContent;   // keep success note when enabled
   }
   setInterval(updateArmState, 1000);
 
-  // Truthful burn-window indicator: /api/live carries the read-only window
-  // verdict computed by the server poller (window_ok + window_checks).
+  // Truthful burn-window indicator (UX66 F3): /api/live carries the
+  // read-only window verdict computed by the server poller (window_ok +
+  // window_checks). ONE poll computes windowState; every window widget
+  // renders from it — no second source of truth.
+  function windowPillView() {
+    const s = windowState.state;
+    if (s === "OPEN") return {t: "burn window: OPEN", c: "pill okl"};
+    if (s === "FADING") return {t: "burn window: FADING (" + windowState.bad.join(", ") + ")",
+                                c: "pill warnl"};
+    if (s === "n/a") return {t: "burn window: n/a", c: "pill warnl"};
+    return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : ""),
+            c: "pill"};
+  }
+  function renderWindowPills() {
+    const v = windowPillView();
+    for (const id of ["gb-windowstate", "bq-window"]) {
+      const el = $(id);
+      if (el) { el.textContent = v.t; el.className = v.c; }
+    }
+  }
   async function pollWindow() {
     try {
       const j = await jget("/api/live");
-      if (j.window_ok !== undefined) windowOk = !!j.window_ok;
-      const el = $("gb-windowstate");
       if (j.window_ok === undefined) {
-        el.textContent = "window: n/a"; el.className = "pill warnl";
-      } else if (windowOk) {
-        el.textContent = "● burn window open"; el.className = "pill okl";
+        windowState = {state: "n/a", bad: []};
+      } else if (j.window_ok) {
+        windowState = {state: "OPEN", bad: []};
       } else {
-        const bad = (j.window_checks || []).filter(c => !c.ok)
-          .map(c => c.name).join(", ");
-        el.textContent = "burn window closed" + (bad ? " (" + bad + ")" : "");
-        el.className = "pill";
+        const checks = j.window_checks || [];
+        // DSOV still 0 with other checks failing = the window is decaying
+        // (minutes-scale hardware drift), not closed — say so.
+        const dsovOk = checks.some(c => c.name === "DSOV" && c.ok);
+        windowState = {state: dsovOk ? "FADING" : "closed",
+                       bad: checks.filter(c => !c.ok).map(c => c.name)};
       }
+      windowOk = windowState.state === "OPEN";
     } catch (e) {}
+    renderWindowPills();
     updateArmState();
   }
   setInterval(pollWindow, 2000);
@@ -3746,7 +3833,14 @@ LIVEBOOT = r"""
     const j = await jget(`/api/burn/check?row=${row}&value=${encodeURIComponent(value)}&mirror=${mirror ? 1 : 0}&bdf=${encodeURIComponent(targetBdf || "")}`);
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; payloadChecked = null; return; }
     payloadChecked = {row, value, old: j.current, mirror, bdf: j.bdf || targetBdf};
-    windowOk = !!j.window_ok;
+    // A fresh check is a fresher reading of the SAME window checks — refresh
+    // the shared windowState (one variable), never fork a second truth.
+    const wc = j.guards || [];
+    windowState = j.window_ok ? {state: "OPEN", bad: []}
+      : {state: wc.some(g => g.name === "DSOV" && g.ok) ? "FADING" : "closed",
+         bad: wc.filter(g => !g.ok).map(g => g.name)};
+    windowOk = windowState.state === "OPEN";
+    renderWindowPills();
     updateArmState();   // re-evaluate Burn gating against the fresh check
     // window checks are hard pass/fail; arm_pending bits open at burn time
     // (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM) — amber.
@@ -3857,6 +3951,20 @@ LIVEBOOT = r"""
 
   // campaign
   function setCampaignUI(j) {
+    campaignRunning = !!j.running;
+    // task 67 (UX66 F4): feed the queue table's Status column from the
+    // server's per-record burn results (stats.burned) while/after a burn
+    // campaign — re-render only when the results actually change.
+    if (j.params && j.params.mode === "burn") {
+      const sig = JSON.stringify((j.stats || {}).burned || []) + (j.running ? "r" : "e");
+      if (sig !== burnResultsSig) {
+        burnResultsSig = sig;
+        burnResults = {};
+        ((j.stats || {}).burned || []).forEach(b => { burnResults[b.row] = b.result; });
+        burnPending = !!j.running;
+        renderQueue();
+      }
+    }
     $("gc-stop").disabled = !j.running;
     $("gc-start").disabled = !!j.running || !portOk;
     $("gc-revert").disabled = !!j.running || !j.window_held;
@@ -3865,6 +3973,11 @@ LIVEBOOT = r"""
     st.className = "pill " + (j.running || j.result === "goldilocks" ? "okl" :
                               j.error ? "badl" : "");
     const s = j.stats || {};
+    // UX66 F3: window_held is a campaign EVENT ("it chose not to revert"),
+    // not a live state — the chip says so and shows the LIVE window state
+    // from the same windowState the Burn queue pill renders.
+    const held = j.window_held
+      ? `<span class="pill ${windowState.state === "OPEN" ? "okl" : windowState.state === "FADING" ? "warnl" : ""}">campaign ended holding the window — ${esc(windowPillView().t)}</span>` : "";
     $("gc-chips").innerHTML =
       `<span class="pill">attempts <b>${s.attempts || 0}</b></span>` +
       `<span class="pill">valid <b>${s.valid || 0}</b></span>` +
@@ -3874,7 +3987,7 @@ LIVEBOOT = r"""
       `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
       (s.burn_aborts ? `<span class="pill warnl">burn aborts <b>${s.burn_aborts}</b> (not final — attempts keep firing)</span>` : "") +
       (s.image_verify ? `<span class="pill badl">${esc(s.image_verify)} — window NOT held</span>` : "") +
-      (j.window_held ? `<span class="pill okl">window HELD open — verify/burn now, then Revert VRM or cold-boot</span>` : "");
+      held;
     if ((j.log || []).length) {
       const logEl = $("gc-log");
       logEl.textContent = j.log.join("\n");
@@ -3898,10 +4011,11 @@ LIVEBOOT = r"""
       "Lab preset filled (v_dip 365, t_dip +50, pw 196, pulses 1) — " +
       "v_restore 750 / t_restore -20 have no console inputs; start manually.";
   };
-  $("gc-start").onclick = async () => {
-    const mode = $("gc-mode").value;
-    const adaptive = $("gc-strategy").value === "adaptive";
-    const body = {bdf: targetBdf || undefined, adaptive,
+  function campaignBody(mode) {
+    // one builder for every campaign start (gc-start + Arm & burn queue) —
+    // the burn queue campaign uses EXACTLY the visible campaign controls.
+    return {bdf: targetBdf || undefined,
+      adaptive: $("gc-strategy").value === "adaptive",
       min_v: +$("gc-vmin").value, max_v: +$("gc-vmax").value,
       v_dip: +$("gc-vdip").value, pulses: +$("gc-pulses").value,
       pw: +$("gc-pw").value, gap: +$("gc-gap").value, delay: +$("gc-delay").value,
@@ -3909,6 +4023,20 @@ LIVEBOOT = r"""
       cooldown_s: +$("gc-cooldown").value,
       max_attempts: +$("gc-max").value, port: $("gc-port").value, mode,
       no_revert: $("gc-hold").value === "hold"};
+  }
+  function burnQueueConfirmText(recs) {
+    return `Start glitching and BURN ${recs.length} queued record(s) on first Goldilocks?\n` +
+      "target " + targetBdf + " — rows " + recs.map(r => r.row).join(", ") +
+      " (rows auto-assigned in the safe zone)\n" +
+      "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
+      "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
+      "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
+      "permanently. Verify with Preview first. No responsibility is " +
+      "accepted by the developer.";
+  }
+  $("gc-start").onclick = async () => {
+    const mode = $("gc-mode").value;
+    const body = campaignBody(mode);
     if (mode === "burn") {
       if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
       let recs;
@@ -3929,18 +4057,16 @@ LIVEBOOT = r"""
       }
       body.records = recs;
       body.token = armToken;
-      if (!confirm((burnQueue.length
-        ? `Start glitching and BURN ${recs.length} queued record(s) on first Goldilocks?\n` +
-          "target " + targetBdf + " — rows " + recs.map(r => r.row).join(", ") +
-          " (rows auto-assigned in the safe zone)\n"
+      if (!confirm(burnQueue.length
+        ? burnQueueConfirmText(recs)
         : "Start glitching and BURN the payload on first Goldilocks?\n" +
           "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
-          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n") +
-        "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
-        "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
-        "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
-        "permanently. Verify with Preview first. No responsibility is " +
-        "accepted by the developer.")) return;
+          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
+          "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
+          "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
+          "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
+          "permanently. Verify with Preview first. No responsibility is " +
+          "accepted by the developer.")) return;
     } else if (!confirm("Start glitch campaign?\n" +
         "the pico on port " + $("gc-port").value + " dips NVVDD on " +
         (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
@@ -3948,6 +4074,43 @@ LIVEBOOT = r"""
     const j = await jpost("/api/glitch/start", body);
     if (j.error) alert(j.error);
     pollGlitch();
+  };
+  // task 67 (UX66 F1/F2): the one-action burn path — arm gate + burn
+  // campaign start in ONE server request (POST /api/burn/queue_start), so
+  // the 120 s arm-token TTL race across panels cannot happen. The confirm
+  // dialog stays the irreversible-OTP gate.
+  $("bq-armburn").onclick = async () => {
+    const recs = queueRecords();
+    if (!recs) return;
+    if (!confirm(burnQueueConfirmText(recs))) return;
+    const body = campaignBody("burn");
+    body.records = recs;
+    body.dump = HIST ? HIST.dir : "";   // identity gate source = the shown dump
+    const j = await jpost("/api/burn/queue_start", body);
+    if (j.error) { alert(j.error); return; }
+    $("bq-reason").textContent = "burn campaign started — " + j.records +
+      " record(s), arm token " + j.token_ttl + " s (consumed at start)";
+    armToken = j.token; armExpiry = Date.now() + j.token_ttl * 1000;
+    armRefusal = null; armDieId = null;
+    updateArmState();
+    pollGlitch();
+  };
+  // task 67 (UX66 F5-lite): per-record pre-flight over the EXISTING
+  // read-only preview endpoint — the queue, not the payload, gets checked.
+  $("bq-check").onclick = async () => {
+    const recs = queueRecords();
+    if (!recs) return;
+    const btn = $("bq-check");
+    btn.disabled = true;
+    for (const r of recs) {
+      const j = await jpost("/api/burn/preview",
+                            {row: r.row, value: r.value, mirror: r.mirror,
+                             bdf: targetBdf});
+      queueVerdicts[r.row + ":" + r.value] =
+        j.error ? "error: " + j.error : (j.verdict || "no verdict");
+      renderQueue();
+    }
+    btn.disabled = false;
   };
   $("gc-stop").onclick = () => jpost("/api/glitch/stop", {});
   $("gc-revert").onclick = async () => {

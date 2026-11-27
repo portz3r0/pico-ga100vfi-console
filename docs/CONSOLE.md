@@ -444,14 +444,27 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   any selection. Re-checking an already-present word queues it anyway; the
   queue row then carries the amber `⚠ already present — likely no-op
   (row N)` tag.
-- **Burn queue**: all queued records burn together inside **one**
+- **Burn queue — arm & burn in one action** (directly under the Glitch
+  campaign card): the burn workspace. Header row: **⚡ Arm & burn queue
+  (N)** (one click = `POST /api/burn/queue_start` — arm gate + burn
+  campaign start atomically; disabled with the one-line reason beside it
+  when the queue is empty, a campaign is running, or no GPU is
+  selected; after a manual Arm the label counts the token down),
+  **Check queue** (loops the read-only `/api/burn/preview` per queued
+  record and stamps `preview: <verdict>` on each row, bound to the exact
+  row+word), and the authoritative **burn window pill** (live register
+  verdict — the payload-panel pill and the campaign held-window chip
+  show this SAME state). All queued records burn together inside **one**
   Goldilocks window; rows are auto-assigned to free safe-zone rows at
   campaign start (the server re-validates every row against the placement
   policy). FF words carry a `two-step: inert → arm` note (each burns as
   the chain=0 word verified, then the chain arm — see "Two-step FF
   burn"). The queue renders as the SAME table shape as the burn lists —
   `# | Word | Target row | Field | Status | Via | action` — so what the
-  queue displays IS what it will burn. A queued word already EFFECTIVE
+  queue displays IS what it will burn; while/after a burn campaign the
+  Status column shows the server's per-record result (`VERIFY OK` green
+  · `ALREADY BURNED` amber · `ABORT …` red · `pending` dim). A queued
+  word already EFFECTIVE
   under last-wins is highlighted
   with the amber `⚠ already present — likely no-op (row N)` tag; a
   superseded word shows `SUPERSEDED at row N — needs re-burn`. Custom
@@ -526,15 +539,21 @@ The whole chase, in the order that actually works:
    words derived from this card's own defect masks; optionally **+ Queue
    DEVID A/B pair**). Review the queue table; every record burns in one
    window.
-6. **Arm.** Type `BURN` in the arm field and press **Arm (120 s)** — the
-   button is gated on the selected GPU's live Goldilocks state.
-7. **Glitch campaign in burn mode.** Mode **burn payload on first
-   Goldilocks**, **▶ Start campaign**. On the first Goldilocks the
-   campaign burns the queued records **in-process** (the PCIe window dies
-   seconds after the campaign loop returns — a separate burn call would
-   miss it), re-checking every guard before each `CMD_WRITE`. The run ends
-   only when every record verifies; the window is then held open
-   (`window HELD open — verify/burn now, then Revert VRM or cold-boot`).
+6. **Arm & burn.** On the **Burn queue** card press **⚡ Arm & burn
+   queue (N)** and confirm: one request runs the arm gate (Goldilocks +
+   identity), mints the token and starts the burn campaign — no 120 s
+   TTL race. (The manual path still works: type `BURN` in the arm field,
+   press **Arm (120 s)**, set the campaign mode to **burn payload on
+   first Goldilocks** and press **▶ Start campaign** within the TTL.)
+7. **Burn campaign runs.** On the first Goldilocks the campaign burns
+   the queued records **in-process** (the PCIe window dies seconds after
+   the campaign loop returns — a separate burn call would miss it),
+   re-checking every guard before each `CMD_WRITE`. The run ends only
+   when every record verifies; the window is then held open (chip
+   `campaign ended holding the window — burn window: OPEN` — the chip
+   echoes the LIVE window state, which starts decaying in minutes). The
+   queue table's Status column fills with the per-record results
+   (`VERIFY OK` green / `ABORT …` red / `pending` dim).
 8. **Cold boot and re-dump.** Power-cycle so the fuse controller replays
    the new FF chain, then **⟳ Run full dump** again (re-unload the driver
    first if it re-bound).
@@ -586,8 +605,9 @@ The whole chase, in the order that actually works:
    shot of the boot under the software override — which also poisons
    CMD_READ fuse reads for the die-ID gate and fusedump.
 5. **Goldilocks window hold (default):** the run ends with NVVDD still at
-   glitch voltage and the shadow registers writable — a `window HELD open
-   — verify/burn now, then Revert VRM or cold-boot` chip appears; close
+   glitch voltage and the shadow registers writable — a `campaign ended
+   holding the window — burn window: OPEN` chip appears (it echoes the
+   LIVE window pill, which decays on its own in minutes); close
    the window with **⟲ Revert VRM** or a cold boot. Choosing
    `auto-revert VRM` hands the VRM back on exit. Misses, stops, and errors
    always revert regardless — an interrupted run can never leave NVVDD low.
@@ -653,17 +673,25 @@ row field shows the zone verdict for whatever row you type.
    `WDATA_SECURE` and `FUSEWDATA_PLM` are shown amber as *arm pending* —
    they read closed outside a burn by design and are opened at burn time
    by the SENSE_CTRL arm sequence; they never block the check.
-2. Type `BURN` into the arm field and press **Arm (120 s)**. The button is
+2. **Queue path (the happy path):** queue the records, then press
+   **⚡ Arm & burn queue (N)** on the Burn queue card — one request arms
+   and starts (see step 6 of the end-to-end workflow). **Manual path:**
+   type `BURN` into the arm field and press **Arm (120 s)**. The button is
    disabled while the GPU in the target selector is not Goldilocks
    (tooltip `selected GPU not Goldilocks — glitch first`); the server
    re-runs the same 4-check pure-read at arm time and refuses with the
    failing checks named if the state changed between poll and arm. The arm
-   pill counts the token down (`● armed Ns`).
-3. Campaign card: mode **burn payload on first Goldilocks**. (The burn
-   runs *inside the campaign process* because the Goldilocks PCIe window
-   dies seconds after the campaign loop returns — a separate burn call
-   would miss it.)
-4. **▶ Start campaign**, confirm the dialog (it repeats the exact rows,
+   pill counts the token down (`● armed Ns`), and so does the
+   **Arm & burn queue** button label.
+3. Standalone single-row burn only: the payload card's **Burn payload row
+   ONLY (standalone)** button (demoted from "Burn now" — it burns the
+   single payload row, NEVER the queue; tooltip says so). For a campaign
+   burn of the payload without a queue: campaign card, mode **burn
+   payload on first Goldilocks**. (The burn runs *inside the campaign
+   process* because the Goldilocks PCIe window dies seconds after the
+   campaign loop returns — a separate burn call would miss it.)
+4. **▶ Start campaign** (manual path), confirm the dialog (it repeats the
+   exact rows,
    values, mirror and target). The campaign glitches; on the first
    Goldilocks it burns the records in-process: each burn re-checks the
    driver-unbound state, journal, GPIO19 preflight and window, runs the
@@ -695,7 +723,7 @@ row field shows the zone verdict for whatever row you type.
 | live bar pill (top of the status rail) | `● live — <time>` polling fine · `⏸ driver '<driver>' bound — raw BAR0 live view disabled (Drivers tab -> Unload nvidia stack to resume)` (paused, driver bound) · `⚠ service unreachable` page lost the server · `BAR0 unreadable — bus hung or PCIe link down (normal mid-glitch / after reset)` — **normal mid-glitch** |
 | activity feed | timestamped register changes; flashes the matching card |
 | target GPU pill (Glitch & Burn) | `● Goldilocks — glitch window` (4-check read-only approximation) · `locked (DSOV=<n>) — glitch first` · `⚠ <error>` · `no GA100 detected` |
-| burn window pill | `● burn window open` · `burn window closed (<failed checks>)` · `window: n/a` — read-only verdict from `/api/live` (`window_ok` + `window_checks`) |
+| burn window pill | `burn window: OPEN` · `burn window: FADING (<failed checks>)` (DSOV still 0 — the window is decaying) · `burn window: closed (<failed checks>)` · `burn window: n/a` — the ONE authoritative live verdict, computed once per `/api/live` poll (`window_ok` + `window_checks`) into a single client state; rendered on the Burn queue card and the Burn payload panel, and echoed by the campaign held-window chip — no widget keeps a private window truth |
 | serial pill | `SN <serial> · driver <name>` — identifies the physical card |
 | empty state (Fuse Explorer) | `No GA100 present — nothing live to show.` · `No dump yet for this card (serial X).` — dump-derived panels hidden until the card's own dump exists or the picker is used; carries the **Browse saved dumps** button |
 | Browsing saved dump strip | `Browsing saved dump — serial X, dumped <ts>` + **← Back to current** — shown while a dump picked from the Saved dumps list is on screen; panels dimmed, header meta prefixed `SAVED DUMP OF … — browsing saved dump` |
@@ -706,9 +734,12 @@ row field shows the zone verdict for whatever row you type.
 | budget pill | safe zone rows, free count, last boot FF row |
 | arm pill | `● armed Ns` (countdown) · `not armed` · red = refused (bad phrase or server Goldilocks refusal, failing checks named) — the refusal stays visible until the phrase is edited or an arm succeeds |
 | Arm button | disabled until the current poll of the **selected** GPU says Goldilocks (tooltip `selected GPU not Goldilocks — glitch first`); re-evaluated on poll refresh and GPU-dropdown change; the server re-runs the 4-check pure-read at arm time |
-| Burn now button | enabled only when checked **and** armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
+| Burn payload row ONLY (standalone) button | the demoted single-row burn (was "Burn now"): burns ONLY the payload row, never the queue — tooltip `does NOT burn the queue; to burn the queue use 'Arm & burn queue'`. Enabled only when checked **and** armed **and** the burn window verdict is open (`window_ok`; EFP/WDATA_PLM do not gate it) |
+| Arm & burn queue button | `⚡ Arm & burn queue (N)` on the Burn queue card — one click = `POST /api/burn/queue_start` (arm gate + burn campaign start in ONE request; after a manual Arm the label also counts the token down: `· armed Ns`). Disabled with the one-line reason shown beside it: `queue empty — add records below` · `campaign already running` · `no GPU selected` |
+| Check queue button | loops the read-only `/api/burn/preview` over every queued record and stamps each queue row with `preview: SAFE TO BURN` (green) / the other verdict (amber); the verdict binds to the exact (row, word) and disappears when the row is re-allocated |
+| queue Status column (burn results) | while/after a burn campaign the queue table shows the server's per-record outcome from `stats.burned`: `VERIFY OK` green · `ALREADY BURNED` amber · `ABORT …`/`VERIFY FAIL` red · `pending` dim (queued, not yet burned) — the table you queued from IS the results table |
 | campaign pill | `● running` · `goldilocks` · `stopped` / `exhausted` · `error` · `idle` |
-| stats chips | attempts / valid / lost / nack / poisoned / dsov=0 / goldilocks / burn aborts (not final — attempts keep firing) / image verify failed (window NOT held) / `window HELD open — verify/burn now, then Revert VRM or cold-boot` |
+| stats chips | attempts / valid / lost / nack / poisoned / dsov=0 / goldilocks / burn aborts (not final — attempts keep firing) / image verify failed (window NOT held) / `campaign ended holding the window — burn window: <OPEN|FADING (…)|closed (…)>` (an event + the LIVE window state, not a stale HELD claim) |
 | burn report | result line: `VERIFY OK` green · `ALREADY BURNED` amber (partial-run recovery, zero latching writes) · `ABORT` / `VERIFY FAIL` / `IMAGE VERIFY FAILED` red; journal-uncertain → explicit confirm before retrying with `ack_uncertain`; `VERIFY OK` adds `after_state` + the Predicted vs Actual table when a matching preview was run |
 
 ## Burn safety model (reference)
@@ -1028,6 +1059,7 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | GET | `/api/burn/last` | last stored preview + last burn report (`last-preview.json` / `last-burn.json` in the state dir) — the predicted-vs-actual store |
 | POST | `/api/burn` | burn (needs `confirm: true` + arm token + open burn window; **identity gate re-checked at execution** — `identity gate: …` refuses before any write; window+arm checks land in `guards`; FF records burn **two-step** — inert chain=0 word verified, then chain bits (report `steps[]` lists each step's `word`/`delta`/`readback`); journal at `<state-dir>/burn_journal.jsonl`; unresolved journal → `journal_uncertain` + ABORT unless `ack_uncertain: true`; results: `VERIFY OK` / `ALREADY BURNED` / `VERIFY FAIL` (two-step: `step A … STOP, no arm step` leaves the record inert) / `ABORT …` / `IMAGE VERIFY FAILED` (mirror pair)) |
 | POST | `/api/arm` | `{phrase: "BURN", bdf?, dump?}` → 120 s token **gated on the target GPU's Goldilocks state** (body `bdf` else `effective_bdf`; same 4-check pure-read as `/api/gpus`) **and on the identity gate** (serial readable + live die-ID rows 8–15 match `dump` — a dumps-relative dir, else the newest same-serial dump; see "Dump identity"): not Goldilocks → error `GPU <bdf> is not Goldilocks — failing: <checks>`, no token; identity failure → error `identity gate: …`, no token; success adds `bdf` + `checks` dict + `die_id` verdict |
+| POST | `/api/burn/queue_start` | **atomic arm + burn-campaign start in ONE request** (the arm→start TTL race cannot lose the window): `{records[], <same glitch params as /api/glitch/start>, dump?}` — refuses an empty queue (`queue is empty — queue records first …`) before any gate; then calls `/api/arm`'s path (Goldilocks 4-check + identity gate, mints the token — errors propagate verbatim) and `glitch_start` in `mode: burn` with the fresh token (its record validation, placement policy and identity re-check unchanged). Returns `{started, records, token_ttl, token}` or the precise gate error. GUI: **⚡ Arm & burn queue (N)** |
 | POST | `/api/dumps/dedupe` | `{apply?}` — drop saved dumps whose **fuse content** is identical to another dump of the same card: same serial + same rows dict (timestamps/dmesg/lspci ignored). Each identical group keeps its **oldest** dump; anything different — one differing row, another card's serial, a dump without a rows dict — is kept. Dry-run by default; `apply: true` deletes. Never touches `stock.json`; the die-ID gate still resolves (the kept dump carries the same rows). GUI: **Dedupe** button in the Saved dumps picker (dry-run panel → confirm) |
 | POST | `/api/pico/flash` | `{port?, uf2?}` — flash firmware into the Pico 2 from the console: sends `b` to the pico port (the firmware's own BOOTSEL reboot; skipped when a BOOTSEL drive is already up), waits for the RP2350/RPI-RP2 mass-storage, mounts it, copies the `.uf2` (drive auto-detaches, board reboots), then **reads the firmware banner back** over the port and reports `fw_marker`. The console host needs no toolchain — build the `.uf2` on a workstation and drop it at `<repo>/firmware/build/pwmvid.uf2` (or the state dir); `uf2` overrides the path. GUI: **⚡ Flash Pico 2** button next to the pico port dropdown |
 | GET | `/api/driver` | driver state |
@@ -1207,7 +1239,8 @@ mock server):
 | Campaign start refused: `burn mode needs at least one record (set + check the burn payload first)` | Queue records or Check the payload first. |
 | Campaign start refused: `burn placement policy: <issues>` | A queued row violates the zone rules (occupied / buffer / SM reserve / revert tail / outside FF region) or a value has bit 5 set (IFF). |
 | Arm refused: `GPU <bdf> is not Goldilocks — failing: <checks>` | The 4-check pure-read (dsov / crc_ok / priv_open / fpf_readable) failed on the selected GPU — glitch it to Goldilocks first. |
-| Burn now stays disabled | Not checked (`payload edited — re-check` means the check was invalidated by an edit), not armed, or the burn window pill says closed — run a glitch campaign first. |
+| Burn payload row ONLY (standalone) stays disabled | Not checked (`payload edited — re-check` means the check was invalidated by an edit), not armed, or the burn window pill says closed — run a glitch campaign first. To burn the QUEUE use **Arm & burn queue** — the standalone button never burns the queue. |
+| Arm & burn queue disabled | The one-line reason beside it names the cause: `queue empty — add records below` · `campaign already running` · `no GPU selected`. |
 | Check shows EFP/WDATA_PLM amber (arm pending) | Normal — they are auto-armed at burn via SENSE_CTRL; only the red window checks block. |
 | Check top-line says `REFUSED` | The burn window is closed (red window checks) — that's what the burn-on-first-Goldilocks campaign mode is for. |
 | Burn result `ABORT — uncertain burn state — resolve journal` | The burn journal has an unresolved `command_may_be_issued` — a previous CMD_WRITE may have latched without readback. Inspect `burn_journal.jsonl`; the GUI offers an explicit proceed-anyway (`ack_uncertain`). |

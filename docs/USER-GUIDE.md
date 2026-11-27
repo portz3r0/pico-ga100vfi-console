@@ -192,15 +192,15 @@ card serial, host name, IP addresses, username and home paths are masked.*
 | Preview burn (read-only) | see below — enabled on row+value alone, no window/arm/token |
 | Check row & guards | dry check: current row value, 0→1 purity, placement-policy verdict, window checks, arm-pending bits; enables Burn (with arm + open window) |
 | arm phrase + Arm (120 s) | type `BURN`, click Arm → countdown pill `● armed Ns`; wrong phrase → sticky red refusal until you edit the phrase; button disabled while the selected GPU is not Goldilocks (`selected GPU not Goldilocks — glitch first`) |
-| Burn now | enabled only when checked + armed + window open; double confirm; journal-uncertain → explicit ack dialog |
-| window pill | read-only burn-window verdict from the poller: `● burn window open` / `burn window closed (<failed bits>)` / `window: n/a` |
+| Burn payload row ONLY (standalone) | the demoted single-row burn (was "Burn now") — burns ONLY the payload row, never the queue (tooltip says so); enabled only when checked + armed + window open; double confirm; journal-uncertain → explicit ack dialog |
+| window pill | the ONE authoritative burn-window verdict from the live poller: `burn window: OPEN` / `burn window: FADING (<failed bits>)` (DSOV still 0, decaying) / `burn window: closed (<failed bits>)` / `burn window: n/a` — same state on the Burn queue card and in the campaign held-window chip |
 | Suggested burns | computes the minimum common unlock from this card's own shadow masks (GPC / TPC unlock words — chain1 offs 11–15 that differ from the per-GPC defective masks / FBP / FBPA-pair), rendered as the same table as the Proposed burns panel (`✓ \| Burn \| Word \| Target row \| Field \| Effect \| Status \| + queue`), each word decoded, with its concrete `Target row` (`row N`, `+ mirror N+1` when mirroring is on) from the same allocator the queue uses — queue-aware, and a word already queued shows `in queue — row shown there` (one word, one row); per-word selection checkboxes with LAST-WINS-aware `ALREADY PRESENT` / `SUPERSEDED` marking (already-present words default unticked, shared with the Proposed burns panel); `⤓ Queue all needed records` queues the selected words, `+ queue` a single word, or queue a DEVID A/B pair |
 | Advanced unlocks | optional permanent unlocks proven by executed burns with a `TESTED · EXTERNAL` / `TESTED · INTERNAL` badge — see below |
 | Tag legend | collapsible card explaining every badge (`PROPOSED`, `VERIFIED`/`UNVERIFIED`, `TESTED · EXTERNAL`/`INTERNAL`, `ALREADY PRESENT`, `PARTIALLY PRESENT`, `SUPERSEDED`, `MANUAL`, `NO FREE ROW`) and the two axes: TESTED = the burn was executed and cards worked; VERIFIED = we know what the word does |
-| Burn queue | records that all burn in **one** Goldilocks window, rendered as a table (`# \| Word \| Target row \| Field \| Status \| Via \| action`); rows assigned per-block last-wins in the safe zone (mirror consumes an even/odd pair) and shown per entry (`row N + mirror N+1`); a typed custom row is reserved before auto-allocation and a row claimed twice blocks the queue (`row(s) N claimed by two records`); a word whose block has no free row shows `NO FREE ROW (block b)`; a force-queued already-present word carries the amber tag `already present — likely no-op (row N)`; server re-validates every row |
+| Burn queue — arm & burn in one action | sits directly under the Glitch campaign card; **⚡ Arm & burn queue (N)** arms and starts the burn campaign in ONE request (`POST /api/burn/queue_start`, no 120 s TTL race; disabled with a one-line reason when queue empty / campaign running / no GPU), **Check queue** previews every queued record read-only and stamps `preview: <verdict>` per row. Records all burn in **one** Goldilocks window, rendered as a table (`# \| Word \| Target row \| Field \| Status \| Via \| action`); while/after a burn campaign the Status column shows the server's per-record result (`VERIFY OK` green / `ALREADY BURNED` amber / `ABORT …` red / `pending` dim); rows assigned per-block last-wins in the safe zone (mirror consumes an even/odd pair) and shown per entry (`row N + mirror N+1`); a typed custom row is reserved before auto-allocation and a row claimed twice blocks the queue (`row(s) N claimed by two records`); a word whose block has no free row shows `NO FREE ROW (block b)`; a force-queued already-present word carries the amber tag `already present — likely no-op (row N)`; server re-validates every row |
 | Glitch campaign | v_dip/pulses/pw/gap/delay/max attempts; strategy `fixed` or `adaptive` (3D CRC-guided search over v_dip/delay/pw — the fixed v_dip is ignored); pico port + rescan; mode `classify only` or `burn payload on first Goldilocks`; window dropdown `hold open — no revert` (default) / `auto-revert` |
 | ▶ Start / ■ Stop / ⟲ Revert VRM | Revert hands PMBus back, closing a held window (refused while a campaign owns the Pico) |
-| stats chips + log | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / `IMAGE VERIFY FAILED — window NOT held` / `window HELD open`; per-shot log lines |
+| stats chips + log | attempts / valid / lost / nack / dsov=0 / goldilocks / burn aborts / `IMAGE VERIFY FAILED — window NOT held` / `campaign ended holding the window — burn window: OPEN` (event + live state); per-shot log lines |
 
 **Check panel semantics.** The top line is `SAFE TO BURN` / `REFUSED`
 and keys off the **window checks only** — `DSOV=0`, `CRC_STATUS=0x55`,
@@ -361,7 +361,7 @@ shows lspci only.
    for an uncharacterised card. Start with mode **classify only** to
    find the window; every shot logs its outcome
    (`under`/`hit`/`over`/`lost`, `<< GOLDILOCKS` on a pass).
-6. **Read the verdict**: the window pill flips `● burn window open`,
+6. **Read the verdict**: the window pill flips `burn window: OPEN`,
    the campaign ends with `goldilocks YES` and (default) **holds the
    window open** — no VRM revert — so in-window work is possible.
    Misses/stops/errors always revert; an interrupted run never leaves
@@ -383,8 +383,11 @@ shows lspci only.
    one reporting an open burn window — mock mode refuses the real check
    server-side (correcting the earlier caption, which claimed Burn was
    disabled in this shot; it was not).*
-9. **Burn**: either **Burn now** (only inside a live window) or — the
-   normal path for a queue — set campaign mode **burn payload on first
+9. **Burn**: either **Burn payload row ONLY (standalone)** (only inside a
+   live window; never burns the queue) or — the
+   normal path for a queue — **⚡ Arm & burn queue (N)** (one request:
+   arm gate + campaign start) or, manually, set campaign mode **burn
+   payload on first
    Goldilocks** and start: the burn runs *inside the campaign process*
    on the first hit (the window dies seconds after the loop returns).
    Each record logs `row N: VERIFY OK` (or `ALREADY BURNED`); the
@@ -471,9 +474,9 @@ the task evidence; `service.py` = `host/ga100vfi/console/service.py`,
 | Decoded FF records | Explorer row table + burn payload decode line | `chain 1 · block 19 · FBP_DISABLE` | `IFF — REFUSED (bit 5 set)` in a proposed value |
 | Burn Preview | Glitch & Burn → Preview burn (read-only) | `SAFE TO BURN`, LAST-WINS *will win*, zero hazards, predicted effect matches intent | `WILL BE INERT` (lose to a later row), `IMPOSSIBLE`, amber hazard lines |
 | Advanced unlocks badges | Glitch & Burn → Advanced unlocks | `TESTED · EXTERNAL`/`INTERNAL` + `VERIFIED` step whose tested values match this card's silicon | `UNVERIFIED` step, `PARTIALLY PRESENT (k/n)`, `MANUAL` direct rows (outside the queue path) |
-| Window pill + `window_ok` | Glitch & Burn pill, from the poller | `● burn window open` | `burn window closed (CRC_STATUS)` names the failing bits |
+| Window pill + `window_ok` | Glitch & Burn pill, from the poller | `burn window: OPEN` | `burn window: closed (CRC_STATUS)` names the failing bits (`FADING` when DSOV is still 0) |
 | Classify verdicts | campaign log per shot; target pill | `<< GOLDILOCKS` (all five checks: dsov_zero, fpf_readable, dsov_settable, priv_mask_open, crc_valid) | `under`/`over`/`lost` lines; `hit` = DSOV cleared but another check failed |
-| Campaign log + verdict | Glitch & Burn log + stats chips + `result` | `goldilocks`, `window HELD open`, every `row N: VERIFY OK` | `exhausted`/`stopped`, `burn aborts` chip, `IMAGE VERIFY FAILED — window NOT held` |
+| Campaign log + verdict | Glitch & Burn log + stats chips + `result` | `goldilocks`, `campaign ended holding the window`, every `row N: VERIFY OK` | `exhausted`/`stopped`, `burn aborts` chip, `IMAGE VERIFY FAILED — window NOT held` |
 | `goldilocks.jsonl` | `<state-dir>/goldilocks.jsonl` | one JSON line per hit with the winning profile — replayable with `attempt` / `campaign --v-dip` | no line = no hit was ever real |
 | Readback `VERIFY OK` | burn report / campaign log | `VERIFY OK` (bit-exact readback with EN cleared) | `VERIFY FAIL — readback does not match` |
 | Predicted vs Actual | burn report after `VERIFY OK` (needs a prior Preview of the same payload) | both rows ✓ on readback and last-wins | any ✗ MISMATCH row — the image is not what you planned |

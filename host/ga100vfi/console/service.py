@@ -38,6 +38,7 @@ Endpoints:
   GET  /api/burn/last      last stored preview + burn report (state dir)
   POST /api/burn           {row, value, old, mirror, confirm, token, ack_uncertain}
   POST /api/arm            {phrase: "BURN", bdf?} -> 120s arm token; gated on the target GPU's Goldilocks state (4-check pure-read) — not Goldilocks -> error naming the failing checks, no token
+  POST /api/burn/queue_start {records[], <same params as /api/glitch/start>} — ONE request: runs the arm gate (Goldilocks + identity vs newest dump), mints the token, then starts the burn-mode campaign with those records + token. Refuses an empty queue. Returns {started, records, token_ttl, token} or a precise error — the arm->start TTL race cannot happen here.
   GET  /api/driver         driver/modules/blacklist state
   POST /api/driver/op      {op: blacklist|unblacklist|load|unload, confirm}
   GET  /api/gpus         all GA100s + live Goldilocks state (skips BAR0 state while nvidia is bound)
@@ -2262,6 +2263,36 @@ def arm_api(body):
                     "self-arm via SENSE_CTRL at execution"}
 
 
+def queue_start_api(body):
+    """POST /api/burn/queue_start — atomic arm + burn-campaign start.
+
+    The reliable burn path was a 4-click choreography across three panels
+    inside the 120 s token TTL (evidence/66-ux-review.md F1); every scroll
+    lost window. This composes the SAME gates in one request: arm_api owns
+    the Goldilocks 4-check + identity gate and mints the token; glitch_start
+    owns the record validation, placement policy and the campaign launch
+    (its burn branch re-checks the identity gate and token — unchanged).
+    Nothing is duplicated or weakened here; the TTL race simply cannot
+    happen because arm and start are the same request."""
+    recs = body.get("records") or []
+    if not recs:
+        return {"error": "queue is empty — queue records first (suggested "
+                         "burns or custom rows) before arming"}
+    arm = arm_api({"phrase": "BURN", "bdf": body.get("bdf"),
+                   "dump": body.get("dump")})
+    if "error" in arm:
+        return arm                       # precise arm-gate error, no token
+    start_body = dict(body)
+    start_body.update({"mode": "burn", "records": recs,
+                       "token": arm["token"]})
+    out = glitch_start(start_body)
+    if "error" in out:
+        return out                       # precise start error (running,
+                                         # params, policy, identity re-check)
+    return {"started": True, "records": out["records"],
+            "token_ttl": arm["expires_in"], "token": arm["token"]}
+
+
 # ---------------------------------------------------------------- glitch campaign
 GLITCH: dict = {"running": False, "log": [], "stats": {}, "params": None,
                 "error": None, "finished": None, "result": None,
@@ -3909,6 +3940,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = burn_preview_api(body)
             elif path == "/api/arm":
                 resp = arm_api(body)
+            elif path == "/api/burn/queue_start":
+                resp = queue_start_api(body)
             elif path == "/api/dumps/dedupe":
                 resp = dumps_dedupe(bool(body.get("apply")))
             elif path == "/api/pico/flash":

@@ -1,0 +1,15 @@
+  Warning: HERMES_CUSTOM_STRATA_AI2_API_KEY contained 1 non-ASCII character (U+2026 ('…')) — stripped so the key can be sent as an HTTP header.
+  This usually means the key was copy-pasted from a PDF, rich-text editor, or web page that substituted lookalike
+  Unicode glyphs for ASCII letters. If authentication fails (e.g. "API key not valid"), re-copy the key from the
+  provider's dashboard and run `hermes setup` (or edit the .env file in a plain-text editor).
+Committed 4bfc157 on main (not pushed); gui.py/service.py untouched, only the two new evidence files (mockup needed `git add -f` — repo `.gitignore` line 17 ignores `*.html`).
+
+UX66_DONE
+1. Journey map written: the race-proof burn path spans 3 panels (arm in `gb-burn` gui.py:2379, mode+start in `gb-campaign` 2493/2502, queue in `gb-queue` 2450) on one long tab, inside a 120 s token TTL (service.py:2258) and a minutes-long hardware window.
+2. Two CRITICAL findings: the correct sequence is discoverable nowhere (F1), and "Burn now" (`gb-burnnow` 2381) burns only the payload row, never the queue — a trap that spends the window (F2).
+3. HIGH: four window-state indicators with three freshnesses — campaign HELD chip (3877, campaign-end flag service.py:2546), live pill (2382, /api/live @2 s), `gb-gpustate` (on-demand-only poll, no interval, 3276/4231), arm tooltip (3430) (F3).
+4. HIGH: per-record VERIFY results exist server-side (`stats.burned` service.py:2474) but gui.py never renders them — proof lives only in the auto-scrolling `gc-log` (F4).
+5. Redesign: ONE Burn workspace; `⚡ Arm & burn queue` = server-side arm+validate+start in one call (kills the TTL race); ONE sticky window strip from the live register poll with OPEN/FADING/CLOSED; Check/Preview become per-queue-row pre-flight badges gating launch; results column from `stats.burned`; "Burn now" demoted to a manual-burn drawer; decay degrades to one "Re-glitch to open window" button with queue+badges preserved.
+6. All existing safety gates preserved (phrase, Goldilocks arm gate, identity gate, plane gate, journal ack, irreversible confirm) — choreography removed, not safety.
+7. Deliverables: /home/raza/nvidia/pico-ga100vfi/evidence/66-ux-review.md and /home/raza/nvidia/pico-ga100vfi/evidence/66-ux-mockup.html (dark, self-contained, shows open/fading/closed states, TTL countdown, results column, decayed state).
+8. No POSTs to the live bench console; live markup checked read-only via GET.
