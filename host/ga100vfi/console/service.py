@@ -1402,6 +1402,59 @@ def ff_policy(layout, row, mirror=False, value=None):
     return issues
 
 
+# ---------------------------------------------------------------- task 69: A100 rebrand quick-add
+# DEVID FF records (chain 2): DEVIDA = fuse offset 37, DEVIDB = offset 38;
+# word = data16<<16 | offset<<6 | chain. The data16 words are ground truth,
+# not a shared formula: 80GB is evidence/44 (data = devid<<1 = 0x416A ->
+# 0x416A0942 / 0x416A0982); 40GB is the reference card's fused data word
+# 0x20F1 (-> 0x20F10942 / 0x20F10982). Rows are never hardcoded — the plan
+# picks the first legal rows from the LIVE layout through ff_policy
+# (per-block last-wins, blank target, IFF refusal all encoded there).
+REBRAND_DEVID_OFFS = (("DEVIDA", 37), ("DEVIDB", 38))
+REBRAND_SKUS = {
+    "80": {"label": "A100 80GB PCIe (0x20B5)", "devid": 0x20B5, "data": 0x416A},
+    "40": {"label": "A100 40GB PCIe (0x20F1)", "devid": 0x20F1, "data": 0x20F1},
+}
+
+
+def rebrand_words(sku):
+    """[(name, word)] for a rebrand SKU, in burn order (DEVIDA, DEVIDB)."""
+    s = REBRAND_SKUS[sku]
+    return [(name, (s["data"] << 16) | (off << 6) | 2)
+            for name, off in REBRAND_DEVID_OFFS]
+
+
+def rebrand_plan(sku, bdf=None):
+    """Plan the DEVID A/B pair for a rebrand SKU: exact words + the first
+    legal FF rows (DEVIDA first, DEVIDB on the next legal row after it),
+    every placement validated through ff_policy before returning. This
+    PLANS queue entries only — burning still goes through the queue."""
+    sku = (sku or "80").strip()
+    if sku not in REBRAND_SKUS:
+        return {"error": f"unknown sku '{sku}' "
+                         f"(use {' or '.join(sorted(REBRAND_SKUS))})"}
+    L = ff_layout(bdf)
+    if "error" in L:
+        return {"error": L["error"]}
+    devid = REBRAND_SKUS[sku]["devid"]
+    records = []
+    taken = set()
+    prev_row = FF_START - 1
+    for name, value in rebrand_words(sku):
+        row = next((r for r in range(prev_row + 1, FF_END + 1)
+                    if r not in taken and not ff_policy(L, r, False, value)),
+                   None)
+        if row is None:
+            return {"error": f"no legal FF row for {name} "
+                             f"(0x{value:08X}) after row {prev_row} — "
+                             f"free space or shrink the queue"}
+        taken.add(row)
+        prev_row = row
+        records.append({"row": row, "value": value, "old": 0,
+                        "label": f"{name} → 0x{devid:04X}"})
+    return {"sku": sku, "devid": devid, "records": records}
+
+
 # ---------------------------------------------------------------- FF decode + read-only preview
 # Verified FF-record field map (same as the Explorer tab's JS ffDecode):
 #   chain = word[4:0], iff = bit 5, block = word[15:6], data = word[31:16]
@@ -3879,6 +3932,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(ff_layout(qs.get("bdf")),
                                            default=str),
                            "application/json")
+            elif path == "/api/rebrand/plan":
+                self._send(200, json.dumps(rebrand_plan(qs.get("sku"),
+                                                        qs.get("bdf")),
+                                           default=str), "application/json")
             elif path == "/api/driver":
                 self._send(200, json.dumps(driver_state(), default=str),
                            "application/json")

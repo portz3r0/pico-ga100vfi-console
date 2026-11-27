@@ -2394,8 +2394,14 @@ LIVEBOOT = r"""
         <span class="pill" id="plan-summary">…</span>
       </div>
       <div class="frow" style="margin-top:10px; align-items:end">
-        <div class="field"><label>optional: DEVID change (hex, e.g. 0x20B5)</label>
-          <input type="text" id="plan-devid" value="0x20B5" class="mono" style="width:100px"></div>
+        <div class="field"><label>A100 rebrand SKU</label>
+          <select id="plan-rebrand-sku">
+            <option value="80" selected>A100 80GB PCIe (0x20B5)</option>
+            <option value="40">A100 40GB PCIe (0x20F1)</option>
+            <option value="custom">custom…</option>
+          </select></div>
+        <div class="field" id="plan-devid-wrap" style="display:none"><label>custom DEVID (hex, e.g. 0x20B5)</label>
+          <input type="text" id="plan-devid" value="" class="mono" style="width:100px"></div>
         <button class="btn" id="plan-devid-add">+ Queue DEVID A/B pair</button>
         <span class="note" id="plan-devid-note"></span>
       </div>
@@ -3235,15 +3241,39 @@ LIVEBOOT = r"""
     el.value = String(r);
     el.dispatchEvent(new Event("input"));
   };
-  document.getElementById("plan-devid-add").onclick = () => {
-    let dv = parseInt(document.getElementById("plan-devid").value, 16);
+  // task 69: the SKU dropdown is the normal path — words AND rows come from
+  // the server plan (/api/rebrand/plan: live layout + ff_policy, DEVIDA
+  // first then DEVIDB on the next legal row). Typed hex survives only behind
+  // "custom…" as the advanced fallback (client-side encode, allocator rows).
+  const rebrandSku = $("plan-rebrand-sku");
+  rebrandSku.onchange = () => {
+    document.getElementById("plan-devid-wrap").style.display =
+      rebrandSku.value === "custom" ? "" : "none";
+  };
+  document.getElementById("plan-devid-add").onclick = async () => {
     const noteEl = document.getElementById("plan-devid-note");
-    if (isNaN(dv) || dv < 0x100 || dv > 0xFFFF) {
-      noteEl.innerHTML = `<span class="warn">invalid devid (use 0x100–0xFFFF, e.g. 0x20B5)</span>`; return; }
-    // data = devid << 1: the DATA word's low bit is always 0 by construction
-    // (the skill's reference encodes 0x20B5 -> data 0x416A directly).
-    queueAdd(encFF(2, 37, dv << 1), `DEVIDA → 0x${dv.toString(16).toUpperCase()}`);
-    queueAdd(encFF(2, 38, dv << 1), `DEVIDB → 0x${dv.toString(16).toUpperCase()}`);
+    const sku = rebrandSku.value;
+    let recs;
+    if (sku === "custom") {
+      let dv = parseInt(document.getElementById("plan-devid").value, 16);
+      if (isNaN(dv) || dv < 0x100 || dv > 0xFFFF) {
+        noteEl.innerHTML = `<span class="warn">invalid devid (use 0x100–0xFFFF, e.g. 0x20B5)</span>`; return; }
+      // data = devid << 1: the DATA word's low bit is always 0 by construction
+      // (the skill's reference encodes 0x20B5 -> data 0x416A directly).
+      recs = [{word: encFF(2, 37, dv << 1), label: `DEVIDA → 0x${dv.toString(16).toUpperCase()}`},
+              {word: encFF(2, 38, dv << 1), label: `DEVIDB → 0x${dv.toString(16).toUpperCase()}`}];
+    } else {
+      let plan;
+      try { plan = await jget(`/api/rebrand/plan?sku=${encodeURIComponent(sku)}`); }
+      catch (e) { noteEl.innerHTML = `<span class="warn">rebrand plan failed: ${esc(String(e))}</span>`; return; }
+      if (plan.error || !(plan.records || []).length) {
+        noteEl.innerHTML = `<span class="warn">rebrand plan: ${esc(plan.error || "no records")}</span>`; return; }
+      recs = plan.records.map(r => ({word: r.value, label: r.label, row: r.row}));
+    }
+    const dup = recs.filter(r => burnQueue.some(q => q.word === r.word));
+    if (dup.length) {   // TASK69-DUP: refuse to queue a DEVID pair twice
+      noteEl.innerHTML = `<span class="warn">DEVID pair already in queue (${dup.map(d => esc(d.label)).join(", ")}) — not added</span>`; return; }
+    for (const r of recs) queueAdd(r.word, r.label, r.row, false);
     note("DEVID pair queued — identity change takes effect at next cold boot", "okl");
   };
 

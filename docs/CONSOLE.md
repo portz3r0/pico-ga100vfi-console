@@ -347,11 +347,17 @@ burn-on-goldilocks mode creates that state on the selected GPU.
   beside **⤓ Queue all needed records** and the same checkboxes appear on
   the INTENDED-state panel (shared state, one `N of M word(s) selected`
   pill). An optional
-  **DEVID change** adds an identity A/B pair via **+ Queue DEVID A/B pair**
-  (takes effect at next cold boot); the field is never pre-filled with a
-  foreign demo value — it holds the loaded dump's own DEVID (decoded from
-  its DEVIDA/B records, chain 2 block 37/38) when the card carries one,
-  and starts empty with a placeholder otherwise.
+  **A100 rebrand** adds an identity A/B pair via **+ Queue DEVID A/B pair**
+  (takes effect at next cold boot). The normal path is the **SKU dropdown**
+  (task 69, default `A100 80GB PCIe (0x20B5)`): the button fetches
+  `/api/rebrand/plan?sku=…` and queues both records with the server's exact
+  words AND rows (first legal FF rows from the live layout via `ff_policy`,
+  DEVIDA then DEVIDB) — no typed hex. `custom…` reveals the advanced
+  fallback hex box; it is never pre-filled with a foreign demo value — it
+  holds the loaded dump's own DEVID (decoded from its DEVIDA/B records,
+  chain 2 block 37/38) when the card carries one, and starts empty with a
+  placeholder otherwise. Queuing a pair whose word is already in the queue
+  is refused with a note.
 - **TPC unlock proposals**: the planner also proposes the chain1 offs
   11–15 words (`OPT_TPC_GPC{g}_DISABLE`, live at global bit 187+8g — ray
   schema plane FF, word = bit//16), setting each GPC's TPC disable bits
@@ -1052,6 +1058,7 @@ unreadable the honest `BAR0 unreadable` error path is unchanged.
 | GET | `/api/gpus` | all GA100 GPUs with live Goldilocks state + serials; `default` = effective BDF (configured one if present, else first detected GA100, else `null`) + `default_note` on fallback |
 | GET | `/api/gpus/all` | every GPU on the host (nvidia-smi + GA100 PCI scan), driver per BDF |
 | GET | `/api/ff/layout` | FF region occupancy + policy zones |
+| GET | `/api/rebrand/plan?sku=80\|40` | A100 rebrand DEVID A/B pair plan (task 69): exact words (80GB `0x416A0942`/`0x416A0982`, 40GB `0x20F10942`/`0x20F10982`) + the first legal FF rows from the live layout, each placement validated through `ff_policy` (DEVIDA first, DEVIDB on the next legal row after it); `error` when the sku is unknown or fewer than 2 legal rows exist. Plans queue entries only — burning still goes through the queue |
 | GET | `/api/glitch/status` | campaign stats + log tail |
 | POST | `/api/glitch/start` | start campaign (`bdf`, `mode: classify\|burn`, `adaptive`, `min_v`/`max_v`, records, `no_revert` — default **true**: a Goldilocks result holds the window open; `ack_uncertain`) |
 | POST | `/api/glitch/stop` | stop campaign |
