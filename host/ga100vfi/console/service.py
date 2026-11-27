@@ -3112,7 +3112,16 @@ def driver_op_api(body):
         for m in MODULES:              # nvidia is MODULES[-1]; rmmod order is
             r = sh(["rmmod", m])       # drm, modeset, uvm, nvidia
             results.append(f"{m}: {r.splitlines()[-1] if r else 'ok'}")
-        return {"ok": True, "log": results, "state": driver_state()}
+        out = {"ok": True, "log": results, "state": driver_state()}
+        stuck = nvidia_modules_loaded()
+        if stuck:
+            # bench evidence (HP, 2026-11-27): rmmod can hang in D-state
+            # when the card link is degraded — name the stuck module and
+            # cold boot; retry-looping over a D-state rmmod compounds it.
+            out["note"] = ("still loaded: " + ", ".join(stuck) +
+                           " — rmmod can hang in D-state on a degraded "
+                           "link; cold boot the host, do not retry-loop")
+        return out
     if op == "load":
         r = sh(["modprobe", "nvidia"])
         return {"ok": not r or "already" in r.lower(),
@@ -3122,11 +3131,12 @@ def driver_op_api(body):
 
 # ---------------------------------------------------------------- vbios flash
 # Task 70: the post-DEVID flash phase, living beside the fuse gates. nvflash
-# FAILS with the nvidia driver bound — the gate below refuses while a driver
-# is bound to the device; the Unload driver action runs the same full unload
-# fuse work requires (sysfs unbind + rmmod of the nvidia modules).
-# (owner, 2026-11-27). The binary is VENDORED in the repo
-# (host/bin/nvflash); mock mode never executes it.
+# requires the nvidia kernel MODULES UNLOADED (nvidia, nvidia_uvm,
+# nvidia_modeset, nvidia_drm) — device-unbound alone is NOT enough (owner,
+# 2026-11-27). The Unload nvidia modules action runs the same full unload
+# fuse work requires (sysfs unbind + rmmod of the stack).
+# The binary is VENDORED in the repo (host/bin/nvflash); mock mode never
+# executes it.
 VBIOS_FRESH_S = 24 * 3600           # a backup newer than this counts as fresh
 VBIOS_PROMPT_ANSWERS = "y\n" * 16   # nvflash prompts; stdin is not interactive
 VBIOS_FLASH_TIMEOUT_S = 120
@@ -3183,6 +3193,18 @@ def vbios_backups_dir():
     return os.path.join(CFG["state_dir"], "vbios-backups")
 
 
+def nvidia_modules_loaded():
+    """nvidia kernel modules currently loaded on this host. nvflash needs
+    ALL of them OUT — device-unbound alone is not enough (owner,
+    2026-11-27). /sys/module is the same load state /api/driver reports
+    via lsmod, without a subprocess per poll. Mock mode reports none
+    (the mock card has no host stack); tests monkeypatch this to exercise
+    the guard."""
+    if CFG["mock"]:
+        return []
+    return [m for m in MODULES if os.path.exists(f"/sys/module/{m}")]
+
+
 def _rom_info(path):
     return {"name": os.path.basename(path), "path": path,
             "size": os.path.getsize(path), "md5": md5_of(path)}
@@ -3227,7 +3249,8 @@ def vbios_list_api():
     """GET /api/vbios/list — ROMs in the configured dir, saved backups
     (newest first), driver state summary, nvflash resolution."""
     if CFG["mock"]:
-        drv = {"bdf": CFG["bdf"], "bound": None, "mock": True}
+        drv = {"bdf": CFG["bdf"], "bound": None,
+               "loaded": nvidia_modules_loaded(), "mock": True}
     else:
         st = driver_state()
         drv = {k: st[k] for k in ("bdf", "bound", "loaded")}
@@ -3367,8 +3390,9 @@ def vbios_flash_api(body):
     """POST /api/vbios/flash — the end-to-end flash phase: fresh backup
     (refusing the flash if save/verify fails), optional --protectoff, then
     `nvflash -4 -5 <rom>`. Guards: confirm, rom exists, no campaign running,
-    driver NOT bound (nvflash fails with the driver bound — owner rule;
-    INVERTED from the first brief). Mock mode: canned outputs, no subprocess."""
+    NO nvidia kernel module loaded (nvflash needs the modules out, not
+    merely the device unbound — owner, 2026-11-27) and no driver bound.
+    Mock mode: canned outputs, no subprocess."""
     if not body.get("confirm"):
         return {"error": "confirm required — flashing rewrites the SPI VBIOS "
                          "(irreversible-ish; board-id mismatch from nvflash "
@@ -3382,11 +3406,17 @@ def vbios_flash_api(body):
     bdf, err = resolve_target(body.get("bdf"))
     if bdf is None:
         return {"error": err}
+    loaded = nvidia_modules_loaded()
+    if loaded:
+        return {"error": "nvidia kernel modules loaded: " + ", ".join(loaded) +
+                         " — nvflash requires them UNLOADED (unbinding the "
+                         "device is not enough); use 'Unload nvidia modules' "
+                         "on this card"}
     bound = driver_of(bdf)
     if bound:
-        return {"error": f"driver '{bound}' is bound to {bdf} — nvflash fails "
-                         "with the nvidia driver bound; unload the driver "
-                         "first (Unload driver button / Drivers tab)"}
+        return {"error": f"driver '{bound}' is bound to {bdf} — unload it "
+                         "from the device before flashing (Unload nvidia "
+                         "modules button / Drivers tab)"}
     if not CFG["mock"] and not nvflash_bin():
         return {"error": "nvflash not found — vendored host/bin/nvflash "
                          "missing and no nvflash_path/PATH entry"}

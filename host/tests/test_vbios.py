@@ -3,9 +3,10 @@
 
 Contract under test (service vbios_* APIs):
   a. mock-mode happy paths: /api/vbios/list, browse, backup, flash;
-  b. flash refuses without confirm, while a campaign runs, and while the
-     nvidia driver is BOUND (owner correction: nvflash FAILS with the
-     driver bound — flash requires it UNBOUND, same as fuse work);
+  b. flash refuses without confirm, while a campaign runs, while ANY
+     nvidia kernel module is LOADED (owner correction, 2026-11-27: nvflash
+     needs nvidia/nvidia_uvm/nvidia_modeset/nvidia_drm UNLOADED — device
+     unbound alone is not enough), and while a driver is bound to the card;
   c. the protectoff checkbox PREPENDS `nvflash --protectoff` before the
      flash command (explicit argv lists, no shell);
   d. backup verification rejects empty / all-00 / all-FF content;
@@ -190,14 +191,22 @@ class VbiosTest(unittest.TestCase):
         j = S.vbios_flash_api({"rom": self._rom, "confirm": True})
         self.assertIn("campaign running", j.get("error", ""))
 
+    def test_flash_refuses_module_loaded(self):
+        # owner correction (2026-11-27): nvflash requires the nvidia kernel
+        # MODULES unloaded — the device merely being unbound is NOT enough.
+        self._no_subprocess()
+        self._patch("nvidia_modules_loaded", lambda: ["nvidia_uvm"])
+        j = S.vbios_flash_api({"rom": self._rom, "confirm": True})
+        self.assertIn("nvidia_uvm", j.get("error", ""))
+        self.assertIn("UNLOADED", j.get("error", ""))
+        self.assertEqual(self._journal_events(), [])
+
     def test_flash_refuses_driver_bound(self):
-        # owner correction (INVERTED): nvflash FAILS with the nvidia driver
-        # bound — flash requires it UNBOUND, same as fuse work.
+        # a driver bound to the device (even a non-nvidia one) also refuses
         self._no_subprocess()
         self._patch("driver_of", lambda bdf: "nvidia")
         j = S.vbios_flash_api({"rom": self._rom, "confirm": True})
         self.assertIn("bound", j.get("error", ""))
-        self.assertIn("nvflash fails", j.get("error", ""))
         self.assertEqual(self._journal_events(), [])
 
     # ---- c/d/e. real-mode command order, journal-before-command ---------
@@ -206,6 +215,9 @@ class VbiosTest(unittest.TestCase):
         self._patch("resolve_target", lambda requested=None:
                     ("0000:41:00.0", None))
         self._patch("driver_of", lambda bdf: None)
+        # real mode reads /sys/module — pin it so the TEST host's own
+        # nvidia stack cannot flip the guard
+        self._patch("nvidia_modules_loaded", lambda: [])
         self._patch("card_serial", lambda bdf: ("12345", "test"))
         self._patch("vb_post_verify", lambda bdf: {"lspci": "x",
                                                    "nvidia_smi": "y",

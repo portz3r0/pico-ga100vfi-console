@@ -2510,14 +2510,15 @@ LIVEBOOT = r"""
       <div id="cq-decode" class="note"></div>
     </div>
     <div class="card" id="vb-card" style="margin-top:12px">
-      <h3>VBIOS flash <span class="note">(post-DEVID phase — nvflash runs with
-        the nvidia driver <b>UNBOUND</b> (it fails with the driver bound); a
-        board-id mismatch prompt from nvflash is <b>expected</b> on a rebranded
-        card and is auto-answered <code>y</code>. A verified backup of the
-        current VBIOS is always saved before a flash.)</span></h3>
+      <h3>VBIOS flash <span class="note">(post-DEVID phase — nvflash requires
+        the nvidia kernel <b>MODULES UNLOADED</b> (nvidia, nvidia_uvm,
+        nvidia_modeset, nvidia_drm — unbinding the device alone is not
+        enough); a board-id mismatch prompt from nvflash is <b>expected</b>
+        on a rebranded card and is auto-answered <code>y</code>. A verified
+        backup of the current VBIOS is always saved before a flash.)</span></h3>
       <div class="frow">
-        <span class="pill" id="vb-driver">driver: …</span>
-        <button class="btn danger" id="vb-unload" style="display:none">Unload driver</button>
+        <span class="pill" id="vb-driver">modules: …</span>
+        <button class="btn danger" id="vb-unload" style="display:none">Unload nvidia modules</button>
         <span class="pill" id="vb-nvflash">nvflash: …</span>
       </div>
       <div class="frow" style="margin-top:8px">
@@ -4006,11 +4007,12 @@ LIVEBOOT = r"""
   pollGlitch();
 
   // ---------- VBIOS flash card (task 70) ----------
-  // Post-DEVID flash phase beside the burn queue. nvflash FAILS with the
-  // nvidia driver bound — flash requires the driver UNBOUND (owner rule,
-  // same as fuse work). The ROM picker is a file-picker popup over
+  // Post-DEVID flash phase beside the burn queue. nvflash requires the
+  // nvidia kernel MODULES UNLOADED — device-unbound alone is not enough
+  // (owner, 2026-11-27). The ROM picker is a file-picker popup over
   // /api/vbios/browse; a verified backup is always saved before a flash.
   let vbRom = null;            // selected {path,size,md5}
+  let vbNvLoaded = [];         // loaded nvidia modules (nvflash needs none)
   let vbDriverBound = null;    // last known bound driver (null = none)
   function vbWarn(msg, cls) {
     const el = $("vb-warn"); el.textContent = msg;
@@ -4018,13 +4020,16 @@ LIVEBOOT = r"""
   }
   function vbGate() {
     const reason = !vbRom ? "choose a ROM first"
-      : vbDriverBound ? "driver '" + vbDriverBound + "' bound — unload it first (nvflash fails with the driver bound)"
+      : vbNvLoaded.length ? "modules loaded: " + vbNvLoaded.join(", ") +
+          " — nvflash requires them unloaded (unload below)"
+      : vbDriverBound ? "driver '" + vbDriverBound + "' bound — unload it first"
       : campaignRunning ? "campaign running — card busy"
       : "";
     const f = $("vb-flash");
     f.disabled = !!reason;
     f.title = reason || "backup (if not fresh) → nvflash -4 -5 " + vbRom.path;
-    $("vb-unload").style.display = vbDriverBound ? "" : "none";
+    $("vb-unload").style.display =
+      (vbNvLoaded.length || vbDriverBound) ? "" : "none";
     if (burnQueue.length) {   // warn, never refuse: flash is a separate phase
       $("vb-flash").title = (f.title ? f.title + " · " : "") +
         "note: burn queue holds " + burnQueue.length + " record(s) — flashing does not burn fuses";
@@ -4034,11 +4039,14 @@ LIVEBOOT = r"""
     try {
       const j = await jget("/api/vbios/list");
       vbDriverBound = (j.driver && j.driver.bound) || null;
+      vbNvLoaded = (j.driver && j.driver.loaded) || [];
       const dp = $("vb-driver");
-      dp.textContent = vbDriverBound
-        ? "driver: " + vbDriverBound + " BOUND — flash refused"
-        : "driver: unbound — flash allowed";
-      dp.className = "pill " + (vbDriverBound ? "badl" : "okl");
+      dp.textContent = (vbNvLoaded.length || vbDriverBound)
+        ? "modules: " + (vbNvLoaded.join(", ") || vbDriverBound) +
+          " — flash refused"
+        : "nvidia modules unloaded — flash allowed";
+      dp.className = "pill " +
+        ((vbNvLoaded.length || vbDriverBound) ? "badl" : "okl");
       const nv = j.nvflash || {};
       const np = $("vb-nvflash");
       np.textContent = nv.found
@@ -4108,7 +4116,8 @@ LIVEBOOT = r"""
   $("vb-unload").onclick = async () => {
     $("vb-log").textContent = "unloading nvidia stack…";
     const j = await jpost("/api/driver/op", {op: "unload", confirm: true});
-    $("vb-log").textContent = (j.log || [j.error || "done"]).join("\n");
+    $("vb-log").textContent = (j.log || [j.error || "done"]).join("\n") +
+      (j.note ? "\n" + j.note : "");
     vbRefresh();
     renderDrivers();
   };
