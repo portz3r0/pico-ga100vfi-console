@@ -4,9 +4,10 @@ accepts a bdf (else effective_bdf), reads the GPU's Goldilocks state
 SERVER-SIDE (the same 4-check pure-read approximation as gpu_state /
 /api/gpus) and refuses the 120 s token with the failing checks named when
 the GPU is not Goldilocks. The authoritative 8-point burn-window re-check
-at execution is unchanged. GUI: gb-arm disabled with the reason
-"selected GPU not Goldilocks — glitch first" until the current poll of the
-SELECTED GPU says goldilocks (sticky across dropdown changes).
+at execution is unchanged. GUI (task 68 rewrote this surface): the
+standalone gb-arm button is gone — the ONE burn trigger is bq-armburn on
+the Burn queue card, gated on the poll-driven burn-window verdict with the
+reason shown beside it (sticky across dropdown changes).
 """
 from __future__ import annotations
 
@@ -202,31 +203,40 @@ def test_mock_gpu_state_shape_unchanged():
 
 
 # ---------------------------------------------------------------- GUI gate
+# Task 68 (owner verdict on UX66 F2): the standalone Arm button and the
+# standalone burn button are gone — the ONE burn trigger on the page is
+# bq-armburn on the Burn queue card, gated on the poll-driven window state.
 
 def test_gui_disabled_reason_text_present():
-    assert "selected GPU not Goldilocks — glitch first" in GUI_SRC
+    for reason in ("queue empty — add records below",
+                   "campaign already running",
+                   "burn window not OPEN ("):
+        assert reason in GUI_SRC, reason
 
 
-def test_gui_arm_button_gated_on_selected_gpu_poll():
-    m = re.search(r'const ab = \$\("gb-arm"\);\s*\n\s*ab\.disabled = '
-                  r'!gpuGoldilocks;\s*\n\s*ab\.title = gpuGoldilocks \? "" : '
-                  r'"selected GPU not Goldilocks — glitch first";', GUI_SRC)
-    assert m, "gb-arm disabled-reason gate not found"
-    assert "gpuGoldilocks = !!(g && g.goldilocks);" in GUI_SRC, \
-        "gate must key off the SELECTED GPU's current poll"
+def test_gui_burn_trigger_gated_on_window_poll():
+    m = re.search(r'const reason = !burnQueue\.length[\s\S]*?:\s*"";', GUI_SRC)
+    assert m, "bq-armburn disabled-reason gate not found"
+    assert "!windowOk" in m.group(0), \
+        "the burn trigger must gate on the polled burn-window verdict"
+    assert "btn.disabled = !!reason;" in GUI_SRC
 
 
 def test_gui_gate_sticky_on_dropdown_change():
     m = re.search(r'\$\("gb-gpu"\)\.onchange = \(\) => \{.*?\};', GUI_SRC,
                   re.S)
-    assert m and "gpuGoldilocks = false; updateArmState();" in m.group(0), \
-        "dropdown change must reset the gate (no stale enable pre-poll)"
+    assert m and "payloadChecked = null;" in m.group(0) and \
+        "updateQueueCard();" in m.group(0), \
+        "dropdown change must clear the probe verdict and re-gate the trigger"
 
 
-def test_gui_arm_posts_selected_bdf():
-    m = re.search(r'jpost\("/api/arm",\s*\n?\s*\{phrase: [^}]+\}\)', GUI_SRC)
-    assert m and "bdf: targetBdf" in m.group(0), \
-        "arm request must carry the selected GPU's bdf"
+def test_gui_burn_trigger_posts_selected_bdf():
+    m = re.search(r'\$\("bq-armburn"\)\.onclick = async \(\) => \{[\s\S]*?\n  \};',
+                  GUI_SRC)
+    assert m and 'jpost("/api/burn/queue_start", body)' in m.group(0), \
+        "the burn trigger must POST /api/burn/queue_start"
+    assert "bdf: targetBdf || undefined" in GUI_SRC, \
+        "burn request must carry the selected GPU's bdf"
 
 
 def main():

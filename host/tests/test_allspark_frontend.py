@@ -96,6 +96,19 @@ def test_readouts_payload_shape_matches_renderers():
         assert {"register", "offset", "value", "effect", "source"} <= set(e)
 
 
+def test_single_burn_trigger():
+    # task 68 (owner verdict on UX66 F2): exactly ONE element on the page
+    # can start a burn — bq-armburn on the Burn queue card. The payload
+    # panel is a read-only row probe.
+    html = _html()
+    assert html.count('id="bq-armburn"') == 1, "bq-armburn must appear exactly once"
+    assert "Arm & burn queue" in html
+    assert "Row probe (read-only)" in html
+    for gone in ("gb-burnnow", "gb-arm", "gb-armstate", "gb-armphrase",
+                 "gb-windowstate", "Burn payload row ONLY", "gc-mode"):
+        assert gone not in html, f"removed burn UI still present: {gone}"
+
+
 def test_script_blocks_parse():
     if not os.path.exists(NODE):
         print("SKIP node --check (node not found)")

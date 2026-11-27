@@ -2357,7 +2357,7 @@ LIVEBOOT = r"""
       </div>
     </div>
     <div class="card" id="gb-burn" style="margin-top:12px">
-      <h3>Burn payload</h3>
+      <h3>Row probe (read-only)</h3>
       <div class="frow">
         <div class="field"><label>target row</label><input type="number" id="gb-row" placeholder="row — pick from Fuse Explorer or FF audit" min="0" max="487" style="width:170px"></div>
         <div class="field"><label>value source</label>
@@ -2375,11 +2375,7 @@ LIVEBOOT = r"""
       <div id="gb-previewresult" class="note" style="margin-top:6px"></div>
       <div id="gb-checkresult" class="note"></div>
       <div class="frow" style="margin-top:10px">
-        <div class="field"><label>arm phrase</label><input type="text" id="gb-armphrase" placeholder="type BURN" style="width:110px"></div>
-        <button class="btn danger" id="gb-arm">Arm (120 s)</button>
-        <span class="pill" id="gb-armstate">not armed</span>
-        <button class="btn danger" id="gb-burnnow" disabled title="burns ONLY the single payload row above — does NOT burn the queue; to burn the queue use 'Arm & burn queue' on the Burn queue card">Burn payload row ONLY (standalone)</button>
-        <span class="pill" id="gb-windowstate" title="read-only burn-window verdict from the live poller (window checks; EFP/WDATA_PLM auto-arm at burn)">window: …</span>
+        <span class="note">To burn: queue this row (or use Suggested burns) and use <b>Arm &amp; burn queue</b> below.</span>
         <span class="pill warnl" id="gb-editwarn" style="display:none">payload edited — re-check</span>
       </div>
     </div>
@@ -2474,11 +2470,6 @@ LIVEBOOT = r"""
         <button class="btn" id="gc-flash" title="Flash firmware into the Pico 2 from the console: sends 'b' to the selected port (firmware BOOTSEL reboot), waits for the RP2350 drive, writes the .uf2 stored on this host (firmware/build/pwmvid.uf2 — build it on a workstation and scp it over), then reads the firmware banner back and shows it. The board reboots into the new firmware by itself.">⚡ Flash Pico 2</button>
         <span class="note" id="gc-portnote"></span>
         <span class="note" id="gc-flashstate"></span>
-        <div class="field"><label>mode</label>
-          <select id="gc-mode">
-            <option value="classify">classify only — observe glitch states</option>
-            <option value="burn">burn payload on first Goldilocks</option>
-          </select></div>
         <div class="field"><label>Goldilocks window</label>
           <select id="gc-hold" title="keep the glitch window open when the campaign hits Goldilocks (skip the VRM revert). Misses/stops always revert.">
             <option value="hold" selected>hold open — no revert (default)</option>
@@ -2497,7 +2488,7 @@ LIVEBOOT = r"""
       <div class="frow">
         <button class="btn go" id="bq-armburn" disabled style="font-size:14px; padding:8px 18px">⚡ Arm &amp; burn queue (0)</button>
         <button class="btn" id="bq-check" title="read-only per-record preview (guards, FF decode, last-wins collisions, hazards) for every queued row — works any time, no window/arm/token needed">Check queue</button>
-        <span class="pill" id="bq-window" title="authoritative burn-window verdict from the live register poll (/api/live window checks) — the campaign HELD chip and the payload-panel pill show this SAME state">burn window: …</span>
+        <span class="pill" id="bq-window" title="authoritative burn-window verdict from the live register poll (/api/live window checks) — the campaign HELD chip shows this SAME state">burn window: …</span>
         <span class="note" id="bq-reason"></span>
       </div>
       <div id="queue-rows" class="queue-rows"></div>
@@ -2559,14 +2550,11 @@ LIVEBOOT = r"""
     </div>`;
 
   let armToken = null, armExpiry = 0, payloadChecked = null;
-  let armRefusal = null;          // sticky arm refusal text; cleared on phrase edit or successful arm
-  let armDieId = null;            // identity gate verdict from the arm response
-  let gpuGoldilocks = false;      // arm gate: current poll of the SELECTED GPU only
   let targetBdf = null;
   let windowOk = false;           // live burn-window verdict (poller / fresh check)
   // task 67 (UX66 F3): ONE authoritative burn-window state, computed once
   // per /api/live poll and consumed by every window widget (bq-window pill,
-  // gb-windowstate pill, campaign HELD chip). OPEN = all window checks
+  // campaign HELD chip). OPEN = all window checks
   // pass; FADING = DSOV still 0 but any other check fails (the decay the
   // hardware shows in minutes); closed otherwise.
   let windowState = {state: "n/a", bad: []};
@@ -2581,7 +2569,6 @@ LIVEBOOT = r"""
   function invalidateChecked() {
     if (!payloadChecked) return;
     payloadChecked = null;
-    $("gb-burnnow").disabled = true;
     $("gb-editwarn").style.display = "";
   }
 
@@ -3291,14 +3278,11 @@ LIVEBOOT = r"""
   function updateGpuState(j) {
     const g = (j.gpus || []).find(x => x.bdf === targetBdf);
     const pill = $("gb-gpustate");
-    // arm gate follows the SELECTED GPU's current poll only — no stale
-    // enable from a previous card (dropdown change resets this first).
-    gpuGoldilocks = !!(g && g.goldilocks);
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
     } else if (g.goldilocks) {
       // glitch-state approximation (4 read-only checks); the authoritative
-      // burn-window verdict is the separate gb-windowstate pill (/api/live).
+      // burn-window verdict is the Burn queue card's bq-window pill (/api/live).
       pill.textContent = "● Goldilocks — glitch window";
       pill.className = "pill okl";
     } else if (g.error) {
@@ -3310,11 +3294,11 @@ LIVEBOOT = r"""
     $("gb-gpuserial").innerHTML =
       (g.serial ? "SN " + esc(g.serial) : "no serial") +
       (g.driver ? " · driver " + esc(g.driver) : " · no driver");
-    updateArmState();
+    updateQueueCard();
   }
   $("gb-gpu").onchange = () => {
     targetBdf = $("gb-gpu").value; payloadChecked = null;
-    gpuGoldilocks = false; updateArmState();   // sticky: no stale enable pre-poll
+    updateQueueCard();
     $("gb-checkresult").innerHTML = "";
     $("gb-editwarn").style.display = "none";
     loadGpus();
@@ -3437,49 +3421,11 @@ LIVEBOOT = r"""
   };
   loadPorts();
 
-  function updateArmState() {
-    const el = $("gb-armstate");
-    const armed = armToken && Date.now() < armExpiry;
-    if (armed) {
-      armRefusal = null;
-      let t = "● armed " + Math.ceil((armExpiry - Date.now()) / 1000) + "s";
-      if (armDieId && armDieId.serial) {
-        // identity verdict rides the pill: serial in the label, the
-        // die-ID witness detail in the tooltip (row numbers, never values)
-        t += " · sn-" + armDieId.serial;
-        el.title = "identity: serial " + armDieId.serial +
-          " (" + (armDieId.serial_source || "?") + ")" +
-          (armDieId.checked_against
-            ? " · die-ID rows 8-15 match " + armDieId.checked_against
-            : " · die-ID recorded (no prior dump to compare)");
-        if (armDieId.note) el.title += " · " + armDieId.note;
-      }
-      el.textContent = t;
-      el.className = "pill okl";
-    } else {
-      armToken = null;
-      if (armRefusal) {
-        // B5: keep the refusal visible until the phrase is edited or an arm
-        // succeeds — the 1 s tick must not erase the only failure explanation.
-        el.textContent = armRefusal; el.className = "pill badl";
-      } else {
-        el.textContent = "not armed"; el.className = "pill";
-      }
-    }
-    // Burn gating keys off the burn WINDOW verdict (window checks only) —
-    // EFP/WDATA_PLM read 0 outside a burn by design; SENSE_CTRL opens them.
-    $("gb-burnnow").disabled = !payloadChecked || !armed || !windowOk;
-    // Arm is gated on the selected GPU's Goldilocks state (same 4-check
-    // pure-read the server re-runs at arm time — state can change between
-    // poll and arm, so the server refusal text still surfaces below).
-    const ab = $("gb-arm");
-    ab.disabled = !gpuGoldilocks;
-    ab.title = gpuGoldilocks ? "" : "selected GPU not Goldilocks — glitch first";
-    updateQueueCard();
-  }
-  // task 67 (UX66 F1/F6): the one-action burn button — label carries the
-  // queue size and, after a manual Arm, the remaining token seconds; the
-  // one-line refusal reason is visible next to it, not only in a tooltip.
+  // task 67 (UX66 F1/F6) + task 68 (owner verdict on UX66 F2): the ONE
+  // burn trigger on the page — label carries the queue size and, after a
+  // queue_start, the remaining token seconds; the one-line refusal reason
+  // is visible next to it, not only in a tooltip. The payload panel is a
+  // read-only row probe; it can no longer arm or burn.
   function updateQueueCard() {
     const btn = $("bq-armburn");
     if (!btn) return;
@@ -3489,14 +3435,16 @@ LIVEBOOT = r"""
     btn.textContent = label;
     const reason = !burnQueue.length ? "queue empty — add records below"
       : campaignRunning ? "campaign already running"
-      : !targetBdf ? "no GPU selected" : "";
+      : !targetBdf ? "no GPU selected"
+      : !windowOk ? "burn window not OPEN (" + windowState.state.toLowerCase() +
+                    ") — glitch into the window first" : "";
     btn.disabled = !!reason;
     btn.title = reason || "arm (Goldilocks + identity gate) and start the " +
       "burn campaign in ONE server call — irreversible OTP writes";
     const r = $("bq-reason");
     if (r) r.textContent = reason || r.textContent;   // keep success note when enabled
   }
-  setInterval(updateArmState, 1000);
+  setInterval(updateQueueCard, 1000);
 
   // Truthful burn-window indicator (UX66 F3): /api/live carries the
   // read-only window verdict computed by the server poller (window_ok +
@@ -3513,10 +3461,8 @@ LIVEBOOT = r"""
   }
   function renderWindowPills() {
     const v = windowPillView();
-    for (const id of ["gb-windowstate", "bq-window"]) {
-      const el = $(id);
-      if (el) { el.textContent = v.t; el.className = v.c; }
-    }
+    const el = $("bq-window");
+    if (el) { el.textContent = v.t; el.className = v.c; }
   }
   async function pollWindow() {
     try {
@@ -3536,25 +3482,10 @@ LIVEBOOT = r"""
       windowOk = windowState.state === "OPEN";
     } catch (e) {}
     renderWindowPills();
-    updateArmState();
+    updateQueueCard();
   }
   setInterval(pollWindow, 2000);
   pollWindow();
-
-  $("gb-arm").onclick = async () => {
-    // the shown dump (HIST) is the payload source when browsing history;
-    // empty means the server resolves this card's own newest saved dump
-    const j = await jpost("/api/arm",
-                          {phrase: $("gb-armphrase").value, bdf: targetBdf,
-                           dump: HIST ? HIST.dir : ""});
-    if (j.error) { const el = $("gb-armstate");
-      armRefusal = "⚠ " + j.error; armDieId = null;
-      el.textContent = armRefusal; el.className = "pill badl"; return; }
-    armToken = j.token; armExpiry = Date.now() + j.expires_in * 1000;
-    armDieId = j.die_id || null;
-    updateArmState();
-  };
-  $("gb-armphrase").oninput = () => { armRefusal = null; updateArmState(); };
 
   // ---- burn value source: typed hex, or grabbed from a dump row ----
   let payloadValue = null;        // set by the dump-row grab (verify target)
@@ -3658,7 +3589,6 @@ LIVEBOOT = r"""
   // ---- read-only burn preview: ga100_burn's default preview mode inside
   // the UI. Works ANY time — CMD_READ is gated by FUSECTRL_PLM, not EFP —
   // no window, no arm, no token, and the server path cannot write fuses.
-  let lastPreview = null;
   function currentPayload() {
     const fromDump = $("gb-srcmode").value === "dump";
     const rowStr = $("gb-row").value.trim();
@@ -3785,31 +3715,8 @@ LIVEBOOT = r"""
     try { j = await jpost("/api/burn/preview", {...p, bdf: targetBdf || ""}); }
     catch (e) { res.innerHTML = `<span class="bad">⚠ ${esc(String(e))}</span>`; return; }
     if (j.error) { res.innerHTML = `<span class="bad">⚠ ${esc(j.error)}</span>`; return; }
-    lastPreview = j;
     res.innerHTML = previewHtml(j);
   };
-
-  // predicted-vs-actual: preview after-word + collision verdict against
-  // the post-burn readback + post-burn last-wins scan; mismatch red.
-  function pvaRowHtml(name, predAfter, predWin, as) {
-    if (!as) return "";
-    const okRb = as.readback === predAfter, okWin = predWin === as.last_wins;
-    return `<tr><td>${esc(name)}</td>` +
-      `<td class="mono">${fmt(predAfter)}</td><td>${esc(predWin || "—")}</td>` +
-      `<td class="mono ${okRb ? "ok" : "bad"}">${fmt(as.readback)} ${okRb ? "✓" : "✗ MISMATCH"}</td>` +
-      `<td class="${okWin ? "ok" : "bad"}">${esc(as.last_wins)}${okWin ? " ✓" : " ✗ MISMATCH"}</td></tr>`;
-  }
-  function predictedVsActualHtml(j) {
-    if (!lastPreview || !j || !j.after_state) return "";
-    if (lastPreview.row !== j.row || lastPreview.value !== j.value) return "";
-    const pv = lastPreview.value >>> 0, pw = (lastPreview.collisions || {}).last_wins;
-    return `<div style="margin-top:8px"><b>Predicted vs Actual</b>` +
-      `<table><tr><th></th><th>predicted after</th><th>predicted last-wins</th>` +
-      `<th>actual readback</th><th>actual last-wins</th></tr>` +
-      pvaRowHtml("row " + j.row, pv, pw, j.after_state) +
-      (j.mirror ? pvaRowHtml("mirror row " + j.mirror.row, pv, pw, j.mirror.after_state) : "") +
-      `</table></div>`;
-  }
 
   $("gb-check").onclick = async () => {
     const res = $("gb-checkresult");
@@ -3822,11 +3729,11 @@ LIVEBOOT = r"""
     // stays authoritative): no burn target or value is ever assumed.
     if (rowStr === "" || !Number.isInteger(row)) {
       res.innerHTML = `<span class="bad">⚠ target row is empty — pick a row from the Fuse Explorer or the FF audit first; no default row is assumed</span>`;
-      payloadChecked = null; updateArmState(); return;
+      payloadChecked = null; updateQueueCard(); return;
     }
     if (value === "") {
       res.innerHTML = `<span class="bad">⚠ value is empty — type the hex word, or pick a non-blank source row in the dump</span>`;
-      payloadChecked = null; updateArmState(); return;
+      payloadChecked = null; updateQueueCard(); return;
     }
     res.innerHTML = "checking…";
     $("gb-editwarn").style.display = "none";
@@ -3841,7 +3748,7 @@ LIVEBOOT = r"""
          bad: wc.filter(g => !g.ok).map(g => g.name)};
     windowOk = windowState.state === "OPEN";
     renderWindowPills();
-    updateArmState();   // re-evaluate Burn gating against the fresh check
+    updateQueueCard();   // refresh the queue-card gate against the fresh check
     // window checks are hard pass/fail; arm_pending bits open at burn time
     // (SENSE_CTRL restores EFP, WDATA_SECURE=0 opens FUSEWDATA_PLM) — amber.
     const guards = (j.guards || []).map(g =>
@@ -3893,60 +3800,6 @@ LIVEBOOT = r"""
       (pending ? `<div class="guardlist">${pending}</div>` : "") +
       (pol && !pol.ok ? "" : `<div class="note" style="margin-top:6px">${esc(j.note || "")}</div>`);
     loadLayout();   // budget may have changed
-  };
-
-  // burn report: result line colored by outcome — VERIFY OK green,
-  // ALREADY BURNED amber (partial-run recovery, zero latching writes),
-  // ABORT /
-  // VERIFY FAIL / IMAGE VERIFY FAILED red. All server strings through esc().
-  function burnResultSpan(r) {
-    if (!r) return "";
-    const cls = r === "VERIFY OK" ? "ok"
-      : r === "ALREADY BURNED" ? "warn" : "bad";
-    return `<b class="${cls}">${esc(r)}</b>`;
-  }
-  function burnReportHtml(j) {
-    const m = j.mirror;
-    return `<div>burn result: ${burnResultSpan(j.result) || "—"}</div>` +
-      (m ? `<div>mirror result: ${burnResultSpan(m.result) || "—"}</div>` : "") +
-      `<pre>${esc(JSON.stringify(j, null, 1))}</pre>`;
-  }
-
-  $("gb-burnnow").onclick = async () => {
-    if (!payloadChecked) { alert("Check the payload first"); return; }
-    if (!windowOk) { alert("Burn window is not open — run a glitch campaign " +
-      "first (EFP/WDATA_PLM auto-arm at burn; the window itself must be open)"); return; }
-    if (!confirm("Irreversible OTP burn of row " + payloadChecked.row + " = " +
-                 payloadChecked.value + " on " + (payloadChecked.bdf || targetBdf) +
-                 "?\nBurns are permanent OTP writes — a wrong burn can BRICK your " +
-                 "GPU permanently. Verify with Preview first. No responsibility " +
-                 "is accepted by the developer.")) return;
-    let j = await jpost("/api/burn", {...payloadChecked, confirm: true, token: armToken});
-    // plane gate refusal: the record newly enables DEFECTIVE silicon in
-    // some plane it touches (block 8 = GPC + FBPA tail). Explicit,
-    // scary, per-burn override — same pattern as ack_uncertain.
-    if (j.error && j.plane && j.plane.blocking) {
-      if (confirm("PLANE GATE: " + j.plane.reason + "\nThis record newly " +
-                  "ENABLES dead silicon — the boot-stall / probe -EIO brick " +
-                  "mechanism. Burn anyway (ack_plane)?")) {
-        j = await jpost("/api/burn", {...payloadChecked, confirm: true,
-                                      token: armToken, ack_plane: true});
-      }
-    }
-    // journal uncertainty: an unresolved command_may_be_issued means a
-    // previous CMD_WRITE may have latched without readback — explicit
-    // user confirm required before proceeding (ack_uncertain).
-    if (j.journal_uncertain || (j.mirror && j.mirror.journal_uncertain)) {
-      if (confirm("UNCERTAIN BURN STATE — the burn journal has an unresolved " +
-                  "command_may_be_issued: a previous CMD_WRITE may have " +
-                  "latched without a readback. Inspect burn_journal.jsonl in " +
-                  "the state dir. Proceed anyway (ack_uncertain)?")) {
-        j = await jpost("/api/burn", {...payloadChecked, confirm: true,
-                                      token: armToken, ack_uncertain: true});
-      }
-    }
-    $("gb-checkresult").innerHTML = burnReportHtml(j) + predictedVsActualHtml(j);
-    loadLayout();   // a burn changes the zone — refresh the map
   };
 
   // campaign
@@ -4035,39 +3888,12 @@ LIVEBOOT = r"""
       "accepted by the developer.";
   }
   $("gc-start").onclick = async () => {
-    const mode = $("gc-mode").value;
-    const body = campaignBody(mode);
-    if (mode === "burn") {
-      if (!armToken) { alert("Arm first (type BURN) — burn mode requires it"); return; }
-      let recs;
-      if (burnQueue.length) {
-        // queue mode: every queued record burns in ONE window (the service
-        // replays records[] in row order on the first Goldilocks hit)
-        recs = queueRecords();
-        if (!recs) return;
-      } else {
-        if (!payloadChecked) { alert("Set + Check the burn payload first (burn mode)"); return; }
-        if (payloadChecked.bdf && payloadChecked.bdf !== targetBdf) {
-          alert("Burn payload was checked on " + payloadChecked.bdf +
-                " but the target is " + targetBdf + " — re-check first"); return;
-        }
-        recs = [{row: payloadChecked.row, value: payloadChecked.value,
-                 old: payloadChecked.old, mirror: payloadChecked.mirror,
-                 bdf: targetBdf}];
-      }
-      body.records = recs;
-      body.token = armToken;
-      if (!confirm(burnQueue.length
-        ? burnQueueConfirmText(recs)
-        : "Start glitching and BURN the payload on first Goldilocks?\n" +
-          "target " + targetBdf + " · row " + payloadChecked.row + " ← " +
-          payloadChecked.value + " (mirror: " + payloadChecked.mirror + ")\n" +
-          "OTP burns are IRREVERSIBLE. The campaign ends only when every burn " +
-          "verifies OK; a burn ABORT is not final — attempts keep firing.\n" +
-          "Burns are permanent OTP writes — a wrong burn can BRICK your GPU " +
-          "permanently. Verify with Preview first. No responsibility is " +
-          "accepted by the developer.")) return;
-    } else if (!confirm("Start glitch campaign?\n" +
+    // task 68 (owner verdict on UX66 F2): the campaign card starts classify
+    // campaigns only — burning happens EXCLUSIVELY through "Arm & burn
+    // queue" on the Burn queue card (the standalone /api/burn endpoint
+    // remains for API/recovery use, not as a page trigger).
+    const body = campaignBody("classify");
+    if (!confirm("Start glitch campaign?\n" +
         "the pico on port " + $("gc-port").value + " dips NVVDD on " +
         (targetBdf || "the configured BDF") + " to " + body.v_dip + " mV — " +
         "each attempt reboots the GPU.")) return;
@@ -4091,8 +3917,7 @@ LIVEBOOT = r"""
     $("bq-reason").textContent = "burn campaign started — " + j.records +
       " record(s), arm token " + j.token_ttl + " s (consumed at start)";
     armToken = j.token; armExpiry = Date.now() + j.token_ttl * 1000;
-    armRefusal = null; armDieId = null;
-    updateArmState();
+    updateQueueCard();
     pollGlitch();
   };
   // task 67 (UX66 F5-lite): per-record pre-flight over the EXISTING
