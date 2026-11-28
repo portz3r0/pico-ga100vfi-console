@@ -2585,6 +2585,13 @@ LIVEBOOT = r"""
   let armToken = null, armExpiry = 0, payloadChecked = null;
   let targetBdf = null;
   let windowOk = false;           // live burn-window verdict (poller / fresh check)
+  let goldilocksNow = false;      // /api/gpus 4-check state — the SAME gate
+                                  // the server's arm_api enforces; the 9-check
+                                  // burn-window pill stays informational
+                                  // (FUSECTRL_PLM decays seconds after
+                                  // Goldilocks on some cards, but the
+                                  // in-process burn re-checks it at the
+                                  // millisecond it matters)
   // task 67 (UX66 F3): ONE authoritative burn-window state, computed once
   // per /api/live poll and consumed by every window widget (bq-window pill,
   // campaign HELD chip). OPEN = all window checks
@@ -3335,6 +3342,7 @@ LIVEBOOT = r"""
   function updateGpuState(j) {
     const g = (j.gpus || []).find(x => x.bdf === targetBdf);
     const pill = $("gb-gpustate");
+    goldilocksNow = !!(g && g.goldilocks);
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
     } else if (g.goldilocks) {
@@ -3493,8 +3501,7 @@ LIVEBOOT = r"""
     const reason = !burnQueue.length ? "queue empty — add records below"
       : campaignRunning ? "campaign already running"
       : !targetBdf ? "no GPU selected"
-      : !windowOk ? "burn window not OPEN (" + windowState.state.toLowerCase() +
-                    ") — glitch into the window first" : "";
+      : !goldilocksNow ? "GPU not Goldilocks — glitch into the window first" : "";
     btn.disabled = !!reason;
     btn.title = reason || "arm (Goldilocks + identity gate) and start the " +
       "burn campaign in ONE server call — irreversible OTP writes";
