@@ -2484,6 +2484,7 @@ LIVEBOOT = r"""
         <button class="btn danger" id="gc-stop" disabled>■ Stop</button>
         <button class="btn" id="gc-revert" disabled title="hand PMBus control back — closes a held window without a cold boot">⟲ Revert VRM</button>
         <span class="pill" id="gc-state">idle</span>
+        <label class="note" style="margin-left:10px;user-select:none" title="keep pinned to the newest line; uncheck to read older lines freely"><input type="checkbox" id="gc-autoscroll" checked> autoscroll</label>
       </div>
       <div class="chips" id="gc-chips"></div>
       <div class="logbox" id="gc-log">— campaign log —</div>
@@ -3918,7 +3919,9 @@ LIVEBOOT = r"""
     if ((j.log || []).length) {
       const logEl = $("gc-log");
       logEl.textContent = j.log.join("\n");
-      logEl.scrollTop = logEl.scrollHeight;
+      // autoscroll only while the owner opts in — a pinned-to-bottom log
+      // is unreadable mid-campaign (every 2 s poll yanked the view down)
+      if ($("gc-autoscroll").checked) logEl.scrollTop = logEl.scrollHeight;
     }
     if (j.error && !j.running) $("gc-log").textContent =
       ($("gc-log").textContent + "\nERROR: " + j.error).trim();
