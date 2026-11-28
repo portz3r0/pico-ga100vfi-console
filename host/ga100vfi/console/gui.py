@@ -3498,8 +3498,10 @@ LIVEBOOT = r"""
         label(p) + `</option>`).join("") ||
         `<option value="" disabled selected>no pico detected</option>`;
       $("gc-portnote").textContent = j.note || "";
-      $("gc-start").disabled = !portOk;
-      $("gc-start").title = portOk ? "" : "no pico detected — ⟳ rescan";
+      $("gc-start").disabled = !portOk || goldilocksNow;
+      $("gc-start").title = !portOk ? "no pico detected — ⟳ rescan"
+        : goldilocksNow ? "card is already Goldilocks — burn now via "
+          + "Arm & burn queue" : "";
     } catch (e) {}
   }
   $("gc-ports-refresh").onclick = loadPorts;
@@ -3928,7 +3930,11 @@ LIVEBOOT = r"""
       }
     }
     $("gc-stop").disabled = !j.running;
-    $("gc-start").disabled = !!j.running || !portOk;
+    $("gc-start").disabled = !!j.running || !portOk || goldilocksNow;
+    $("gc-start").title = goldilocksNow && !j.running
+      ? "card is already Goldilocks — glitching it is pointless (the "
+        + "campaign would fire zero shots); burn now via Arm & burn queue"
+      : "";
     $("gc-revert").disabled = !!j.running || !j.window_held;
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));
