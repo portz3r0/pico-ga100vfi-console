@@ -395,3 +395,9 @@ work of [dalzyu](https://github.com/dalzyu). If this project helped you,
 consider donating to the original developer:
 
 <https://buymeacoffee.com/dalzy>
+
+The Fuse Console, its GUI and the unlock work in this fork are maintained by
+[razk](https://github.com/portz3r0) — if the console made your surgery easier,
+you can buy me a coffee:
+
+<https://buymeacoffee.com/razk>
