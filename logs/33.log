@@ -1,7 +1,0 @@
-TASK 33 complete:
-- docs/USER-GUIDE.md rewritten against 9b3581a: card-less boot/empty states, three states + stock.json provenance, Saved dumps browser, INTENDED Proposed burns panel (selection, ALREADY PRESENT/SUPERSEDED, concrete rows), per-block last-wins placement, Advanced unlocks caveats, guarded capture, BAR auto-enable, bundle provenance; stale rows (ascending-zone queue, no-selection Suggested burns) corrected.
-- 3 fresh mock-console screenshots (console-proposed-burns/advanced-unlocks/saved-dumps.png), all vision-checked; unchanged views not re-shot.
-- Gates: label gate 254 spans / 0 misses (task-17 script); py_compile + node --check clean; 9 image refs resolve; 4 CONSOLE.md anchors valid; fingerprint dda39a2011d5 UNCHANGED (version.py hashes only version/fusedump/service/gui — docs excluded).
-- Commit 12d7b10 pushed fork v33:main (no force), ls-remote verified; local main fast-forwarded; worktree removed; primary tree untouched.
-- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/33-userguide-refresh.md (feature→file:line table, gate output, shot notes, stale-fix list, mock /api/full-saves observation).
-GUIDE_DONE

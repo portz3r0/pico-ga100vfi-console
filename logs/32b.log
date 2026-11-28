@@ -1,8 +1,0 @@
-Diff reviewed clean (no debug leftovers, ids stable); fingerprint dda39a2011d5 + VERSION 0.3.0 confirmed live.
-Suites re-run by me: t31 22/22, t32 34/34, t27 22/22, t28 13/13, t30 20/20 (t30 script unchanged; t27/t28 expectation updates justified in evidence).
-docs/CONSOLE.md updated (selection model, LAST-WINS already-present semantics, badges, no-op warn, indicator-table row) + stale USER-GUIDE line corrected.
-Evidence written: /home/raza/nvidia/pico-ga100vfi/evidence/32-burn-selection.md (also committed in worktree; evidence/ is tracked there).
-Committed 9b3581a on v32 "console: per-burn selection with last-wins-aware already-present marking" (4 files).
-Push fork v32:main FAILED — no credentials (HTTPS prompt unavailable, no gh CLI, SSH key denied by GitHub); per task, branch v32 + worktree /tmp/v32 left in place; no force used.
-All test servers (:56627/:56628/:56629) killed; primary tree untouched; no AI2 writes.
-SELECTION_DONE

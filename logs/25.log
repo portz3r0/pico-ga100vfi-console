@@ -1,8 +1,0 @@
-Task 25 done — burn-form fields now derive targets from the loaded dump or stay empty.
-- gui.py: gb-row/gb-value/cq-row/cq-value start empty with placeholders; Check + Add-custom refuse empty client-side (server still authoritative); gb-srcrow defaults to the loaded dump's first blank FF row (≥222), recomputed on every dump change; new "first free FF row" button (cq-firstfree); DEVID field derived from the card's own DEVIDA/B records, foreign 0x20B5 demo gone. No Explorer row-click prefill existed (grep-verified); ids stable; planner untouched; no VERSION bump; CONSOLE.md updated.
-- Gates: py_compile + imports + node --check OK; fingerprint 534621eb4f5c → 67159c634301 @ v0.3.0; mock console clean (derives its own srcrow 295 / DEVID 0x20C2).
-- Playwright (seeded 2-serial state dir, first blank 222 vs 240): 23/23 assertions PASS incl. no demo strings in served page, 240/220 defaults follow the selected card, empty-row Check refusal visible, hint button fills right row. Servers killed.
-- Commit d551f0b on v25; main fast-forwarded; worktree removed; primary tree untouched.
-- Push fork v25:main NOT done: no GitHub https credentials on this box (ls-remote confirms fork still at e90afc0).
-- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/25-burn-form-defaults.md
-FORMDONE

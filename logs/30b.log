@@ -1,7 +1,0 @@
-Task 30 finished in /tmp/v30; all gates green, shipped locally.
-
-- Kept predecessor's advanced_unlocks.py (verified byte-for-byte vs razk-batch1/2.bin via evidence/30-verify-records.py: 19 FF + 3 direct + 2 IFF steps ALL_ASSERTS_OK; DEVID blk37/38 delta documented); fixed a page-killing TDZ bug (renderAdvanced before `let ffLayout`); concrete PROPOSED rows via shared assignRows; __ADVANCED__ filled in build_html; CONSOLE.md updated.
-- Gates: py_compile/imports/node --check clean; Playwright t30 20/20 (real-shape dense fixture: proposed rows == queue rows, advanced card badges/provenance/manual-path flags, +queue exact rows), regressions t27 20/20, t28 13/13; mock OK; fingerprint 972778473048 ≠ d3f7dbb5526d, v0.3.0; servers killed.
-- Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/30-advanced-unlocks.md (+ decode/verify scripts).
-- Commit 85b8984 on v30; push fork v30:main FAILED — no GitHub credentials on this box (honest, as tasks 27/28); ls-remote confirms fork/main still 1c62ac0; local main fast-forwarded to 85b8984; worktree /tmp/v30 removed; primary tree untouched (fuse-console, dirty pwmvid.c intact).
-ADVANCED_DONE

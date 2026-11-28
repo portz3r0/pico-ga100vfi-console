@@ -1,7 +1,0 @@
-Task 27 done — commit d03b5be on branch v27, local main fast-forwarded, worktree removed, primary tree untouched.
-Proposal panel now names "row N → 0xWORD" (+ "+ mirror row M") per word via one shared client allocator (assignRows) used by queueRecords, the queue display and the panel; exhausted zone shows "NO FREE FF ROW — free space first" + header warning; already-in-dump line kept.
-Service: zone math extracted (ff_layout_from_occupied/_from_rows) and embedded as ff_layout in /api/dumps/get, so rows are named card-less with burn-time-identical bounds.
-Fixed a latent allocator bug: consecutive mirror entries always failed after the first pair (odd cursor returned null); documented in evidence.
-Gates: py_compile + imports + node --check clean; Playwright 20/20 PASS incl. per-record proposal==queue row equality (A ["246+247","248+249","250+251","252+253"], B mirror on/off, C one pair then exhausted); mock OK, fingerprint 79af91be6b30 ≠ dc8893ae122e, v0.3.0; servers killed.
-Push blocked: no GitHub creds this session (ls-remote fork main still 1b487b2); owner must run `git push fork v27:main` (no force). Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/27-proposed-rows.md
-ROWS_DONE

@@ -1,8 +1,0 @@
-Fixed assignRows in gui.py: occupancy now excludes value-blank rows (0x0/0xFFFFFFFF); it was the only key-presence site (queue/proposals/records all route through it).
-Real-shape fixture from /tmp/newcard.json (488 keys, 71 occupied + 195 blank FF rows, burn_zone [297,459] embedded as production serves it).
-BEFORE (d03b5be page): 4× "NO FREE FF ROW", zero rows — bug reproduced. AFTER: 13/13 — concrete rows 297–300 (mirror off, at burn_zone start) / 298+299…304+305 (mirror on), zero NO FREE strings, queue==proposed, sparse fixture unchanged.
-Task 27 suite 20/20; py_compile/imports/node --check clean; mock fine; fingerprint d3f7dbb5526d (was 79af91be6b30), v0.3.0; no VERSION bump, no doc change needed.
-Commit 1c62ac0 on v28; local main fast-forwarded; worktree removed; primary tree untouched; servers killed.
-Push to fork FAILED — no GitHub credentials on this box; ls-remote confirms fork/main still d03b5be; commit awaits credentialed push.
-Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/28-occupancy-value.md
-OCCUPANCY_DONE

@@ -1,8 +1,0 @@
-Fixed: bound capture panel now has "Collapse ▴" (sets ga100.boundCollapsed, shows slim #boundbar "Fuse capture available (driver bound) — last dump <age>. [Expand ▾]"); Expand clears the flag and rebuilds the panel via fetchLive; consent view got a Cancel that hides #boundconsent only; boundHide (driver-unbound path) hides panel and bar. gui.py only, VERSION stays 0.3.0.
-Verified: py_compile + imports OK; node --check on extracted 124 KB script block passed; mock console on :58363 served page contains Collapse/Expand/Cancel/boundbar/ga100.boundCollapsed (grep counts 1/1/1/1/3), /api/live OK, server killed.
-Fingerprint c3218843a4d8 -> 7c42414320a6 (version_info, version 0.3.0).
-Commit 7e5f4aa "console: collapse/expand for driver-bound capture panel + consent cancel" pushed fork v12:main (no force); ls-remote confirms fork/main=7e5f4aa; local main moved to v12; worktree /tmp/v12 removed; primary tree untouched.
-Note: push needed the GITHUB_TOKEN from ~/.hermes/.env via a throwaway credential helper (no gh/credential helper configured in this shell).
-Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/12-panel-collapse.md
-UI-only change — not hardware-verified (no card involved).
-COLLAPSE_DONE

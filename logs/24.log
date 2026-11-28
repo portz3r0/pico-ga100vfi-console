@@ -1,7 +1,0 @@
-Task 24 complete. Summary:
-
-- A: bar0.ensure_mem_decode sets PCI COMMAND mem-enable (bit 1) only behind require_ga100, idempotent, one log line, honest error path kept; wired into probe() + card_serial() BAR0 mappings.
-- B: first full dump per serial seeds dumps/sn-<S>/stock.json (O_EXCL, never overwritten, provenance line); new GET /api/stock; gui "Pre-glitch"→"Stock state" everywhere, stock view renders the card's OWN stock.json via the same extraction as NOW; 0x86/0x01/0xFF template deleted; no-baseline shows now-state + first-record note. Docs CONSOLE.md + USER-GUIDE updated.
-- Gates: py_compile/imports/node --check OK; unit 16/16 (temp config file, never a real device; stock written-once; /api/stock null-with-reason card-less); Playwright 20/20 (stock values 0x02/0x200/0x03 render vs now 0x00, zero "pre-glitch"/"0x86"/"29 TPC" in served HTML); mock console renders, fingerprint 534621eb4f5c ≠ 7d8215668817, v0.3.0.
-- Ship: commit e90afc0 on v24, main fast-forwarded 1932647→e90afc0, worktree removed, primary tree untouched. PUSH BLOCKED: no GitHub credentials this session (ls-remote fork main still 1932647); owner must run `git push fork v24:main`. Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/24-stock-baseline.md
-STOCK_DONE

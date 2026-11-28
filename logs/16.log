@@ -1,6 +1,0 @@
-gui.py CSS: .app cap 1140px → min(1780px, 100%); siderail 380/320 → 360/300px; .content +width:100%. Center column ~530px → ~1150px at 1780px viewport; 1200px shrink, 860px stack, centering, frozen rails untouched.
-Gates: py_compile + import OK; mock :8797 → / 200 (155183 B), /api/live 200, served page greps confirm new cap + 360/300 rail values, livebar ×1 (no escape breakage); node --check OK; server killed.
-Fingerprint ee5f139b2847 → 8bf8e2a2ed3f, version still 0.3.0.
-Shipped: ce7a6f1 pushed fork main 4028120..ce7a6f1 (no force), ls-remote verified, local main fast-forwarded, worktree removed; primary tree untouched (pwmvid.c still dirty).
-Evidence: /home/raza/nvidia/pico-ga100vfi/evidence/16-wide-content.md
-WIDE_DONE
