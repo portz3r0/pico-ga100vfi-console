@@ -514,6 +514,8 @@ HTML = r"""<!DOCTYPE html>
          title="Download console logs + dumps + interpretation trace as one tar.gz — attach it when reporting an issue">Support bundle</a>
       <button class="topbadge" id="coldbootbtn" style="cursor:pointer;border:1px solid var(--border,#555);background:none;color:inherit;font:inherit"
          title="Full power-off 15 s then RTC re-power — the only true card cold cycle (a warm reboot keeps the card powered)">⏻ Cold reboot 15 s</button>
+      <button class="topbadge" id="abtn" style="cursor:pointer;border:1px solid var(--border,#555);background:none;color:inherit;font:inherit"
+         title="Session history: every console action (campaigns, burns, driver ops, reboots, flashes) with its outcome — persisted across restarts">📜 Activity</button>
       <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
     </div>
   </header>
@@ -1744,6 +1746,12 @@ __LIVEBOOT__
     <div class="chips"><span class="pill warnl" id="rb-phase">issuing…</span><span class="pill" id="rb-elapsed">0 s</span></div>
     <div class="logbox" id="rb-log" style="margin-top:8px"></div>
     <div class="note" style="margin-top:6px">Pings the host every 2 s; this window reloads the console automatically when it is back.</div>
+  </div>
+</div>
+<div id="activity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99;align-items:center;justify-content:center">
+  <div class="card" style="min-width:520px;max-width:760px">
+    <h3>📜 Activity — session history <span class="note">(every console action + outcome, persisted; click outside to close)</span></h3>
+    <div class="logbox" id="ab-log" style="margin-top:8px;max-height:60vh;overflow:auto"></div>
   </div>
 </div>
 </body>
@@ -4324,6 +4332,30 @@ LIVEBOOT = r"""
     renderDrivers();
   };
   $("coldbootbtn").onclick = () => coldReboot();
+  // ---- Activity modal: session history of every console action ----
+  {
+    const m = $("activity-modal");
+    let timer = null;
+    const draw = async () => {
+      try {
+        const j = await jget("/api/actions");
+        const a = j.actions || [];
+        $("ab-log").textContent = a.length
+          ? a.join("\n") : "no actions recorded yet";
+        const el = $("ab-log"); el.scrollTop = el.scrollHeight;
+      } catch (e) {}
+    };
+    $("abtn").onclick = () => {
+      m.style.display = "flex"; draw();
+      timer = setInterval(draw, 4000);
+    };
+    m.onclick = ev => {
+      if (ev.target === m) {
+        m.style.display = "none";
+        if (timer) { clearInterval(timer); timer = null; }
+      }
+    };
+  }
   function coldReboot() {
     if (!confirm("Cold reboot: host powers OFF for 15 s (RTC wake), then "
         + "boots.\nThis power-cycles the CARD — a warm reboot does not. "

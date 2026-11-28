@@ -2409,6 +2409,38 @@ def glog(line):
     print(f"{ts}  {line}", flush=True)
 
 
+def ulog(action):
+    """User-action audit trail: every POST is a deliberate human action —
+    persist it with its outcome (state dir + journald). The owner asked
+    for a per-session history of everything done in the console."""
+    line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {action}"
+    try:
+        with open(os.path.join(CFG["state_dir"], "user_actions.log"),
+                  "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    print("USER-ACTION  " + line, flush=True)
+
+
+def user_actions_api():
+    p = os.path.join(CFG["state_dir"], "user_actions.log")
+    try:
+        with open(p) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    return {"actions": lines[-400:]}
+
+
+def _compact(obj, n):
+    try:
+        s = json.dumps(obj, default=str, sort_keys=True)
+    except Exception:
+        s = str(obj)
+    return s[:n]
+
+
 def load_campaign_log():
     """Seed GLITCH['log'] from the persisted campaign log (called once at
     startup, before any worker thread runs)."""
@@ -4458,6 +4490,9 @@ class Handler(BaseHTTPRequestHandler):
                     {"tail": dmesg_tail(),
                      "ts": datetime.now().isoformat(timespec="seconds")},
                     default=str), "application/json")
+            elif path == "/api/actions":
+                self._send(200, json.dumps(user_actions_api()),
+                           "application/json")
             elif path == "/api/bound_dump/preflight":
                 code, payload = bound_dump_preflight()
                 self._send(code, json.dumps(payload, default=str),
@@ -4524,10 +4559,15 @@ class Handler(BaseHTTPRequestHandler):
                 resp = vbios_flash_api(body)
             elif path == "/api/bound_dump":
                 code, resp = bound_dump_api()
+                ulog(f"POST {path} -> HTTP {code} "
+                     + _compact(resp.get("error") or "ok", 140))
                 return self._send(code, json.dumps(resp, default=str),
                                   "application/json")
             else:
                 resp = {"error": "not found"}
+            err = resp.get("error") if isinstance(resp, dict) else None
+            ulog(f"POST {path} {_compact(body, 120)} -> "
+                 + (f"ERROR {err}" if err else _compact(resp, 160)))
             self._send(200, json.dumps(resp, default=str), "application/json")
         except BrokenPipeError:
             pass
