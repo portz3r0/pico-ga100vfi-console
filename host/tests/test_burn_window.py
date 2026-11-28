@@ -74,6 +74,12 @@ def good_bar(over=None):
     return FakeBar(over)
 
 
+# burn_execute grew a required bdf arg (multi-GPU) and checks driver_of;
+# unit tests have no sysfs card, so stub the bind check.
+S.driver_of = lambda bdf: None
+TEST_BDF = "0000:ff:ff.f"
+
+
 # ---------------------------------------------------------------- tests
 
 def test_burn_window_passes_with_reference_good_values():
@@ -104,7 +110,7 @@ def test_burn_execute_proceeds_to_cmd_write():
     """(c) window good but EFP=0/PLM closed statically -> arm opens it, burn runs."""
     bar = good_bar()
     bar.rows[306] = 0x00010000
-    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000)
+    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000, TEST_BDF)
     assert bar.cmd_write_seen, rep
     assert rep["result"] == "VERIFY OK", rep
     assert bar.sense_count == 1
@@ -117,7 +123,7 @@ def test_bad_window_aborts_with_zero_sense():
     ok, checks = S.burn_window(bar.rd)
     assert not ok
     assert [c["name"] for c in checks if not c["ok"]] == ["CRC_STATUS"]
-    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000)
+    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000, TEST_BDF)
     assert rep["result"].startswith("ABORT"), rep
     assert bar.sense_count == 0          # never SENSE into a bad window
     assert not bar.cmd_write_seen
@@ -149,6 +155,36 @@ def test_campaign_burn_verdict_decision():
                                         "VERIFY OK"]) is False
     assert S.burn_campaign_final(recs, ["VERIFY OK"]) is False   # partial run
     assert S.burn_campaign_final(recs, []) is False
+
+
+def test_plm_bit4_decay_burns_but_pill_stays_closed():
+    """…075 reality: FUSECTRL_PLM re-locks bit 4 seconds after Goldilocks.
+    The strict window (live pill) must read CLOSED, while the burn
+    execution path (cmd bits 0-1 writable) proceeds to CMD_WRITE."""
+    bar = good_bar({S.FUSECTRL_PLM: 0xFFFFFFEF})
+    ok_strict, checks = S.burn_window(bar.rd)
+    assert not ok_strict                       # pill: closed
+    assert [c["name"] for c in checks if not c["ok"]] == ["FUSECTRL_PLM"]
+    ok_relaxed, _ = S.burn_window(bar.rd, plm_cmd_bits=True)
+    assert ok_relaxed                          # burn verdict: open
+    bar.rows[306] = 0x00010000                 # old-value match for the burn
+    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000,
+                         TEST_BDF)
+    assert bar.cmd_write_seen, rep             # burns without another glitch
+    assert rep["result"] == "VERIFY OK", rep
+
+
+def test_plm_cmd_bits_locked_still_aborts():
+    """If the PLM locks the COMMAND bits themselves (0x3), the burn must
+    still abort with zero SENSE — the relaxation is only for bit 4+."""
+    bar = good_bar({S.FUSECTRL_PLM: 0xFFFFFFFC})
+    ok, _ = S.burn_window(bar.rd, plm_cmd_bits=True)
+    assert not ok
+    rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000,
+                         TEST_BDF)
+    assert rep["result"].startswith("ABORT"), rep
+    assert bar.sense_count == 0
+    assert not bar.cmd_write_seen
 
 
 def main():

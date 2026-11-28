@@ -896,21 +896,40 @@ def read_row_via(rd, wr, row):
     raise RuntimeError(f"CMD_READ timeout row {row}")
 
 
-def burn_window(rd):
+def burn_window(rd, plm_cmd_bits=False):
     """Static burn window, mirroring ga100_burn.check_window. READ-ONLY.
     EFP / FUSEWDATA_PLM are deliberately NOT checked here — arm_window
     opens them at burn time (SENSE_CTRL restores EFP; clearing
-    WDATA_SECURE opens FUSEWDATA_PLM). Returns (ok, checks)."""
+    WDATA_SECURE opens FUSEWDATA_PLM). Returns (ok, checks).
+
+    plm_cmd_bits=True relaxes ONLY the FUSECTRL_PLM check to "command
+    bits (0-1) writable": on …075 the PLM re-locks bit 4 seconds after
+    Goldilocks (evidence c2b9c1a), so the strict 0xFFFFFFFF verdict is
+    unattainable at burn time even while the card sits in Goldilocks.
+    Burns only ever write FUSECTRL bits 0-1 (CMD_READ/WRITE/SENSE), and
+    the PLM lock is per-bit, so a locked bit 4 cannot block the burn;
+    the readback verify still catches any hardware rejection. The live
+    window pill stays STRICT (plm_cmd_bits=False) — it reports the
+    window, not the burn verdict."""
     checks = []
 
     def chk(name, off, want):
         v = rd(off)
         checks.append({"name": name, "value": v, "want": want, "ok": v == want})
 
+    def chk_plm(name, off):
+        v = rd(off)
+        if plm_cmd_bits:
+            checks.append({"name": name, "value": v, "want": "cmd bits open",
+                           "ok": (v & 0x3) == 0x3})
+        else:
+            checks.append({"name": name, "value": v, "want": 0xFFFFFFFF,
+                           "ok": v == 0xFFFFFFFF})
+
     chk("DSOV", DSOV, 0)
     chk("CRC_STATUS", CRC_STATUS, 0x55)
     chk("LOADER_120060", LOADER_120060, 0)
-    chk("FUSECTRL_PLM", FUSECTRL_PLM, 0xFFFFFFFF)
+    chk_plm("FUSECTRL_PLM", FUSECTRL_PLM)
     chk("PRIV_MASK", PRIV_MASK, 0xFFFFFFFF)
     chk("DEBUGCTRL", DEBUGCTRL, 0)
     chk("SWIFF", SWIFF, 0)
@@ -1004,8 +1023,11 @@ def arm_window(rd, wr):
     SENSE_CTRL (FUSECTRL=CMD_SENSE) restores EFP (PROGRAM_EN); it is issued
     AT MOST ONCE per burn attempt (no-retry rule) and ONLY from real burn
     execution — never from probe / poller / burn_check / fusedump paths.
-    Returns (ok, checks) with the window checks first, arm checks appended."""
-    ok, checks = burn_window(rd)
+    Returns (ok, checks) with the window checks first, arm checks appended.
+    FUSECTRL_PLM is checked relaxed (cmd bits only): the …075 PLM re-lock
+    of bit 4 seconds after Goldilocks must not veto a burn the hardware
+    still accepts (see burn_window docstring)."""
+    ok, checks = burn_window(rd, plm_cmd_bits=True)
     if not ok:
         return False, checks          # never SENSE into a bad window
     if rd(EFP) != 1:
@@ -1016,7 +1038,7 @@ def arm_window(rd, wr):
             checks.append({"name": "SENSE idle", "value": rd(FUSECTRL),
                            "want": "idle", "ok": False})
             return False, checks
-        ok, rechecks = burn_window(rd)   # SENSE can disturb the window
+        ok, rechecks = burn_window(rd, plm_cmd_bits=True)   # SENSE can disturb the window
         checks.extend(rechecks)
         if not ok:
             return False, checks          # failed re-check is fatal
@@ -2006,7 +2028,7 @@ def burn_preview(rd, row, value, mirror):
     if plane["blocking"]:
         predicted = ((predicted + " · ") if predicted else "") \
             + "⚠ PLANE GATE: " + plane["reason"]
-    window_ok, window_checks = burn_window(rd)
+    window_ok, window_checks = burn_window(rd, plm_cmd_bits=True)
     arm_pending = [{"name": n, "value": rd(o), "want": w, "ok": None,
                     "note": "auto-armed at burn via SENSE_CTRL"}
                    for n, o, w in ARM_PENDING]
@@ -2533,7 +2555,7 @@ def campaign_worker(params, records):
         try:
             with card_lock:
                 with Bar0(bdf) as bar:
-                    wok, _ = burn_window(bar.rd32)
+                    wok, _ = burn_window(bar.rd32, plm_cmd_bits=True)
                     if wok:
                         if records:
                             glog(">>> burn window already OPEN — burning "
