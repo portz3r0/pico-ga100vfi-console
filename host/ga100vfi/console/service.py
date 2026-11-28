@@ -3199,26 +3199,44 @@ def driver_op_api(body):
     return {"error": f"unknown op {op!r}"}
 
 
+WAKEALARM = "/sys/class/rtc/rtc0/wakealarm"
+
+
 def system_reboot_api(body):
-    """POST /api/system/reboot — cold-cycle the host: full power-off
+    """POST /api/system/reboot cold-cycle the host: full power-off
     (S5) for off_s seconds, then the RTC alarm re-powers it. A warm
     `reboot` never power-cycles the card; a degraded card needs a REAL
-    cold cycle (bench rule). rtcwake -p is the in-OS cold cycle (BIOS
-    must allow RTC wake; AC required). Falls back to a warm reboot if
-    rtcwake is unavailable. Fire-and-return: the power drops before the
-    child would exit, so waiting on it would hang the response."""
+    cold cycle (bench rule). Mechanism (owner's pick): write the wake
+    epoch to /sys/class/rtc/rtc0/wakealarm, then `systemctl poweroff`
+    — no rtcwake dependency (util-linux rtcwake has no -p; -S exists
+    but the sysfs path is what we verified on this bench). BIOS must
+    allow RTC wake; AC required. On any failure fall back to a warm
+    reboot and say so."""
     off = min(max(int(body.get("off_s", 15)), 5), 3600)
+    err = ""
     try:
-        subprocess.Popen(["rtcwake", "-p", "-s", str(off)])
-        return {"ok": True, "mode": f"poweroff-{off}s-rtc-wake",
+        # clear any stale alarm, arm the new one, verify it stuck
+        with open(WAKEALARM, "w") as f:
+            f.write("0\n")
+        wake = int(time.time()) + off
+        with open(WAKEALARM, "w") as f:
+            f.write(f"{wake}\n")
+        with open(WAKEALARM) as f:
+            got = f.read().strip()
+        if got != str(wake):
+            raise OSError(f"wakealarm readback {got!r} != {wake}")
+        subprocess.Popen(["systemctl", "poweroff"])
+        return {"ok": True, "mode": f"poweroff-{off}s-wakealarm",
+                "wake_epoch": wake,
                 "note": f"host powers off now, back up in ~{off}s + boot"}
     except OSError as e:
-        try:
-            subprocess.Popen(["systemctl", "reboot"])
-            return {"ok": True, "mode": "warm-reboot-fallback",
-                    "rtcwake_error": str(e)}
-        except OSError as e2:
-            return {"error": f"rtcwake: {e}; reboot: {e2}"}
+        err = str(e)
+    try:
+        subprocess.Popen(["systemctl", "reboot"])
+        return {"ok": True, "mode": "warm-reboot-fallback",
+                "wakealarm_error": err[:200]}
+    except OSError as e2:
+        return {"error": f"wakealarm: {err}; reboot: {e2}"}
 
 
 # ---------------------------------------------------------------- vbios flash

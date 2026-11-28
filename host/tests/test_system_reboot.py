@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""POST /api/system/reboot: cold cycle via rtcwake -p (S5 + RTC wake),
-clamped off_s, warm-reboot fallback. Popen is stubbed — nothing reboots.
+"""POST /api/system/reboot: cold cycle via /sys/class/rtc/rtc0/wakealarm
++ systemctl poweroff (owner's pick — no rtcwake dependency), clamped
+off_s, alarm readback verification, warm-reboot fallback. Popen stubbed
+and the alarm file pointed at a tmp file — nothing powers off.
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -13,44 +16,42 @@ from ga100vfi.console import service                          # noqa: E402
 S = service
 
 
-class FakePopen:
-    def __init__(self):
-        self.argvs = []
+def _stub(monkeypatch, tmp_path, alarm_ok=True):
+    procs = []
+    monkeypatch.setattr(S.subprocess, "Popen",
+                        lambda argv, **kw: procs.append(list(argv)))
+    if alarm_ok:
+        monkeypatch.setattr(S, "WAKEALARM", str(tmp_path / "wakealarm"))
+    else:
+        monkeypatch.setattr(S, "WAKEALARM",
+                            str(tmp_path / "missing" / "wakealarm"))
+    return procs
 
-    def __call__(self, argv):
-        self.argvs.append(list(argv))
 
-
-def test_default_is_poweroff_15s(monkeypatch):
-    p = FakePopen()
-    monkeypatch.setattr(S.subprocess, "Popen", p)
+def test_default_arms_alarm_and_powers_off(monkeypatch, tmp_path):
+    procs = _stub(monkeypatch, tmp_path)
+    t0 = int(time.time())
     out = S.system_reboot_api({})
-    assert out["ok"] and "poweroff-15s" in out["mode"]
-    assert p.argvs == [["rtcwake", "-p", "-s", "15"]]
+    assert out["ok"] and "poweroff-15s-wakealarm" in out["mode"]
+    assert t0 + 15 <= out["wake_epoch"] <= int(time.time()) + 15
+    assert open(tmp_path / "wakealarm").read().strip() == str(
+        out["wake_epoch"])
+    assert procs == [["systemctl", "poweroff"]]
 
 
-def test_off_s_clamped(monkeypatch):
-    p = FakePopen()
-    monkeypatch.setattr(S.subprocess, "Popen", p)
+def test_off_s_clamped(monkeypatch, tmp_path):
+    procs = _stub(monkeypatch, tmp_path)
     S.system_reboot_api({"off_s": 1})      # below floor -> 5
     S.system_reboot_api({"off_s": 99999})  # above cap  -> 3600
-    assert p.argvs[0] == ["rtcwake", "-p", "-s", "5"]
-    assert p.argvs[1] == ["rtcwake", "-p", "-s", "3600"]
+    assert len(procs) == 2 and procs[1] == ["systemctl", "poweroff"]
 
 
-def test_falls_back_to_warm_reboot(monkeypatch):
-    p = FakePopen()
-
-    def popen(argv):
-        if argv[0] == "rtcwake":
-            raise OSError("rtcwake: not found")
-        p(argv)
-
-    monkeypatch.setattr(S.subprocess, "Popen", popen)
+def test_unwritable_alarm_falls_back_to_warm_reboot(monkeypatch, tmp_path):
+    procs = _stub(monkeypatch, tmp_path, alarm_ok=False)
     out = S.system_reboot_api({})
     assert out["ok"] and out["mode"] == "warm-reboot-fallback"
-    assert "not found" in out["rtcwake_error"]
-    assert p.argvs == [["systemctl", "reboot"]]
+    assert "wakealarm_error" in out
+    assert procs == [["systemctl", "reboot"]]
 
 
 if __name__ == "__main__":

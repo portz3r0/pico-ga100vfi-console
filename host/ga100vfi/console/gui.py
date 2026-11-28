@@ -512,6 +512,8 @@ HTML = r"""<!DOCTYPE html>
          title="Browse saved dumps of this or any other card — never shown by default">Saved dumps</a>
       <a class="topbadge" href="/api/support_bundle" style="text-decoration:none"
          title="Download console logs + dumps + interpretation trace as one tar.gz — attach it when reporting an issue">Support bundle</a>
+      <button class="topbadge" id="coldbootbtn" style="cursor:pointer;border:1px solid var(--border,#555);background:none;color:inherit;font:inherit"
+         title="Full power-off 15 s then RTC re-power — the only true card cold cycle (a warm reboot keeps the card powered)">⏻ Cold reboot 15 s</button>
       <div class="topbadge"><span class="dot"></span>pico-ga100vfi · live console</div>
     </div>
   </header>
@@ -4206,7 +4208,6 @@ LIVEBOOT = r"""
         <button class="btn danger" id="drv-unload">Unload nvidia stack</button>
         <button class="btn danger" id="drv-blacklist">Blacklist nvidia + nouveau</button>
         <button class="btn" id="drv-unblacklist">Remove blacklist</button>
-        <button class="btn danger" id="drv-coldboot" title="full power-off 15 s then RTC re-power — the only true card cold cycle (a warm reboot keeps the card powered)">⏻ Cold reboot (15 s off)</button>
       </div>
       <div class="note" style="margin-top:8px">Glitching needs the nvidia driver
       unloaded and blacklisted (it re-locks the VRM and binds before you can inspect
@@ -4261,7 +4262,7 @@ LIVEBOOT = r"""
     $("drv-log").textContent = j.note || j.error || "done";
     renderDrivers();
   };
-  $("drv-coldboot").onclick = () => coldReboot();
+  $("coldbootbtn").onclick = () => coldReboot();
   function coldReboot() {
     if (!confirm("Cold reboot: host powers OFF for 15 s (RTC wake), then "
         + "boots.\nThis power-cycles the CARD — a warm reboot does not. "
