@@ -157,16 +157,17 @@ def test_campaign_burn_verdict_decision():
     assert S.burn_campaign_final(recs, []) is False
 
 
-def test_plm_bit4_decay_burns_but_pill_stays_closed():
+def test_plm_bit4_decay_universal_gate_open_strict_only_on_request():
     """…075 reality: FUSECTRL_PLM re-locks bit 4 seconds after Goldilocks.
-    The strict window (live pill) must read CLOSED, while the burn
-    execution path (cmd bits 0-1 writable) proceeds to CMD_WRITE."""
+    The UNIVERSAL gate (default) reads OPEN — burns only write FUSECTRL
+    cmd bits 0-1. The historical strict verdict is available only when a
+    caller explicitly asks (plm_cmd_bits=False)."""
     bar = good_bar({S.FUSECTRL_PLM: 0xFFFFFFEF})
-    ok_strict, checks = S.burn_window(bar.rd)
-    assert not ok_strict                       # pill: closed
-    assert [c["name"] for c in checks if not c["ok"]] == ["FUSECTRL_PLM"]
-    ok_relaxed, _ = S.burn_window(bar.rd, plm_cmd_bits=True)
-    assert ok_relaxed                          # burn verdict: open
+    ok_universal, checks = S.burn_window(bar.rd)
+    assert ok_universal                        # universal gate: open
+    ok_strict, schecks = S.burn_window(bar.rd, plm_cmd_bits=False)
+    assert not ok_strict                       # strict on request: closed
+    assert [c["name"] for c in schecks if not c["ok"]] == ["FUSECTRL_PLM"]
     bar.rows[306] = 0x00010000                 # old-value match for the burn
     rep = S.burn_execute(bar.rd, bar.wr, 306, 0x00010041, 0x00010000,
                          TEST_BDF)

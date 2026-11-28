@@ -3602,14 +3602,6 @@ LIVEBOOT = r"""
         // that is a different fact, shown on the GPU badge, not a window.)
         windowState = {state: "closed",
                        bad: checks.filter(c => !c.ok).map(c => c.name)};
-        // …075 re-locks FUSECTRL_PLM bit-4 seconds after Goldilocks; the
-        // burn execution guard only needs the cmd bits (0-1), so a
-        // PLM-only failure is still BURNABLE — the pill must say OPEN.
-        // Any other failing check (or PLM cmd bits locked alongside)
-        // stays closed.
-        if (windowState.bad.length === 1 &&
-            windowState.bad[0] === "FUSECTRL_PLM")
-          windowState = {state: "OPEN", bad: ["FUSECTRL_PLM"]};
       }
       windowOk = windowState.state === "OPEN";
     } catch (e) {}

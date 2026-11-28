@@ -44,16 +44,12 @@ class FakeCard:
         return FakeRep()
 
 
-class FakeBarCtx:
-    def __enter__(self):
-        return object()
-
-    def __exit__(self, *a):
-        return False
-
-
-def _run(monkey, state, burn=None):
-    monkey.setattr(S, "gpu_state", lambda bdf: dict(state))
+def _run(monkey, gate_ok, gate_checks=None, burn=None):
+    monkey.setattr(S, "burn_window",
+                   lambda rd, plm_cmd_bits=True:
+                   (gate_ok, gate_checks if gate_checks is not None else
+                    ([{"name": "DSOV", "value": 1, "want": 0, "ok": False}]
+                     if not gate_ok else [])))
     monkey.setattr(S, "CFG", {**S.CFG, "mock": False, "bdf": TEST_BDF})
     monkey.setattr(G, "Card", FakeCard)
     monkey.setattr(B, "Bar0", lambda bdf: FakeBarCtx())
@@ -69,7 +65,17 @@ def _run(monkey, state, burn=None):
     return S.GLITCH["stats"], list(S.GLITCH["log"])
 
 
-def test_goldilocks_burns_with_zero_glitch_shots(monkeypatch):
+class FakeBarCtx:
+    rd32 = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_gate_open_burns_with_zero_glitch_shots(monkeypatch):
     burned = []
 
     def burn(bar, records, bdf, params, stats):
@@ -77,31 +83,40 @@ def test_goldilocks_burns_with_zero_glitch_shots(monkeypatch):
         stats["goldilocks"] = True
         stats["burned"] = [r["row"] for r in records]
 
-    stats, log = _run(monkeypatch, GOLDI, burn=burn)
-    assert burned, "already-Goldilocks card must burn immediately"
+    stats, log = _run(monkeypatch, True, burn=burn)
+    assert burned, "open gate must burn immediately"
     assert FakeCard.last.attempts == 0, "no glitch shot may be fired"
     assert stats["attempts"] == 0
-    assert any("Goldilocks (live pill) — burning" in l for l in log), log
+    assert any("burn gate OPEN — burning" in l for l in log), log
 
 
-def test_not_goldilocks_enters_glitch_loop(monkeypatch):
+def test_gate_closed_enters_glitch_loop(monkeypatch):
     def burn(*a):
-        raise AssertionError("must not burn a non-Goldilocks card")
+        raise AssertionError("must not burn with the gate closed")
 
-    stats, log = _run(monkeypatch, NOT_GOLDI, burn=burn)
+    stats, log = _run(monkeypatch, False, burn=burn)
     assert FakeCard.last.attempts == 1, "one glitch shot expected"
     assert stats["attempts"] == 1
-    assert any("not Goldilocks per live pill (dsov)" in l for l in log), log
+    assert any("gate closed (DSOV)" in l for l in log), log
 
 
-def test_precheck_uses_pill_not_burn_window():
-    """Source-level: the pre-shot gate consults gpu_state, and burn_window
-    is NOT called before the attempt loop (it stays the execution guard)."""
+def test_gate_open_but_burn_abort_does_not_reglitch(monkeypatch):
+    # the 4th-round bug: gate said go, burn aborted, loop re-glitched
+    def burn(bar, records, bdf, params, stats):
+        pass    # aborts: goldilocks stays False
+
+    stats, log = _run(monkeypatch, True, burn=burn)
+    assert FakeCard.last.attempts == 0, "must NOT re-glitch after abort"
+    assert any("NOT re-glitching" in l for l in log), log
+
+
+def test_precheck_uses_the_universal_gate():
+    """Source-level: the pre-shot gate calls burn_window (the universal
+    gate the burn itself executes)."""
     import inspect
     src = inspect.getsource(S.campaign_worker)
     pre = src.split("for n in range(")[0]
-    assert "gpu_state(bdf)" in pre
-    assert "burn_window(" not in pre
+    assert "burn_window(bar.rd32)" in pre
 
 
 if __name__ == "__main__":

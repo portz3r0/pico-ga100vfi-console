@@ -896,21 +896,20 @@ def read_row_via(rd, wr, row):
     raise RuntimeError(f"CMD_READ timeout row {row}")
 
 
-def burn_window(rd, plm_cmd_bits=False):
-    """Static burn window, mirroring ga100_burn.check_window. READ-ONLY.
+def burn_window(rd, plm_cmd_bits=True):
+    """THE universal burn gate — one check, every consumer (live pill,
+    campaign pre-check, burn preview, arm, in-loop burn). READ-ONLY.
     EFP / FUSEWDATA_PLM are deliberately NOT checked here — arm_window
     opens them at burn time (SENSE_CTRL restores EFP; clearing
     WDATA_SECURE opens FUSEWDATA_PLM). Returns (ok, checks).
 
-    plm_cmd_bits=True relaxes ONLY the FUSECTRL_PLM check to "command
-    bits (0-1) writable": on …075 the PLM re-locks bit 4 seconds after
-    Goldilocks (evidence c2b9c1a), so the strict 0xFFFFFFFF verdict is
-    unattainable at burn time even while the card sits in Goldilocks.
-    Burns only ever write FUSECTRL bits 0-1 (CMD_READ/WRITE/SENSE), and
-    the PLM lock is per-bit, so a locked bit 4 cannot block the burn;
-    the readback verify still catches any hardware rejection. The live
-    window pill stays STRICT (plm_cmd_bits=False) — it reports the
-    window, not the burn verdict."""
+    FUSECTRL_PLM is judged on "command bits (0-1) writable": on …075 the
+    PLM re-locks bit 4 seconds after Goldilocks (evidence c2b9c1a), so
+    the strict 0xFFFFFFFF verdict is unattainable at burn time even
+    while the card sits in Goldilocks and burns execute fine — burns
+    only ever write FUSECTRL bits 0-1 and the PLM lock is per-bit; the
+    readback verify still catches any hardware rejection. A caller that
+    wants the historical strict verdict passes plm_cmd_bits=False."""
     checks = []
 
     def chk(name, off, want):
@@ -1105,7 +1104,12 @@ def burn_execute(rd, wr, row, value, old, bdf, journal=None,
     ok, checks = arm_window(rd, wr)
     rep["guards"] = checks
     if not ok:
-        rep["result"] = "ABORT — guard failure (no Goldilocks window)"
+        # name the failing checks — an abort without a cause is how this
+        # bug hid for four rounds (2026-11-28)
+        bad = [f"{c['name']}(got {c.get('value')!r} want {c.get('want')!r})"
+               for c in checks if not c["ok"]]
+        rep["result"] = ("ABORT — guard failure (no Goldilocks window): "
+                         + (", ".join(bad) or "arm checks failed"))
         return rep
     saved_en = rd(EN_SW_OVERRIDE)
     wr(EN_SW_OVERRIDE, 0)                     # EN cleared for reads
@@ -2615,36 +2619,42 @@ def campaign_worker(params, records):
                  f"{params.get('min_v', 300)}-{params.get('max_v', 380)} mV "
                  f"(seed delay {delay} µs, pw {pw} µs; fixed v_dip ignored)")
         prechecked = False
-        # Owner rule (asked repeatedly): if the card is ALREADY Goldilocks,
-        # Arm&burn must burn straight away — no glitch shots. The gate here
-        # is the SAME live-pill Goldilocks (gpu_state 4-check) that the Arm
-        # button and the UI pill use; the stricter 9-point burn_window is
-        # NOT consulted here because a card can be Goldilocks per the pill
-        # yet fail an auxiliary window check and then get needlessly
-        # glitched. burn_window stays the authoritative execution guard
-        # inside every burn.
+        # ONE universal gate everywhere (owner verdict after 4 rounds):
+        # the pre-shot decision uses the SAME burn_window the burn itself
+        # executes — if it says open, the burn WILL run; if the burn
+        # aborts anyway, the loop must not re-glitch a card the gate
+        # says is ready (that loop was the bug).
         try:
-            st = gpu_state(bdf)   # pure read, no SENSE, no writes
-            if st.get("goldilocks"):
-                with card_lock:
-                    with Bar0(bdf) as bar:
+            with card_lock:
+                with Bar0(bdf) as bar:
+                    wok, wchecks = burn_window(bar.rd32)
+                    if wok:
                         if records:
-                            glog(">>> Goldilocks (live pill) — burning "
+                            glog(">>> burn gate OPEN — burning "
                                  "now, no glitch shot fired")
                             _burn_records_in_window(bar, records, bdf,
                                                     params, stats)
                             prechecked = bool(stats["goldilocks"])
+                            if not prechecked:
+                                # gate said go, burn still aborted:
+                                # retrying glitch shots cannot help —
+                                # the abort line names the failing check
+                                glog(">>> burn aborted under the same "
+                                     "gate that opened it — NOT "
+                                     "re-glitching; see abort lines "
+                                     "above (failing check named)")
+                                prechecked = True
                         else:
-                            glog(">>> Goldilocks (live pill) — no glitch "
+                            glog(">>> burn gate OPEN — no glitch "
                                  "shots needed; holding the window")
                             stats["goldilocks"] = True
                             prechecked = True
-            else:
-                why = st.get("error") or ", ".join(failing_checks(st))
-                glog(f"not Goldilocks per live pill ({why}) — "
-                     "starting glitch attempts")
+                    else:
+                        bad = [c["name"] for c in wchecks if not c["ok"]]
+                        glog("gate closed (" + ", ".join(bad) +
+                             ") — starting glitch attempts")
         except Exception as e:
-            glog(f"pre-shot Goldilocks check failed ({e}) — "
+            glog(f"pre-shot gate check failed ({e}) — "
                  "starting glitch attempts")
         for n in range(1, (0 if prechecked
                            else params.get("max_attempts", 100)) + 1):
