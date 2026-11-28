@@ -61,9 +61,13 @@ class FakeBar:
                 self.regs[S.FUSERDATA] = self.rows.get(self.regs[S.FUSEADDR], 0)
             self.regs[S.FUSECTRL] = IDLE   # every command returns to idle
         elif off == S.WDATA_SECURE:
-            self.regs[off] = val
-            if val == 0:
-                self.regs[S.FUSEWDATA_PLM] = 0xFFFFFFFF
+            # …075 hardware: shadow registers are writable ONLY while
+            # EN_SW_OVERRIDE=1 — a write with EN=0 is silently ignored
+            # (root cause of the 4-round FUSEWDATA_PLM abort, 17:53:35)
+            if self.regs.get(S.EN_SW_OVERRIDE) == 1:
+                self.regs[off] = val
+                if val == 0:
+                    self.regs[S.FUSEWDATA_PLM] = 0xFFFFFFFF
         elif off == S.GPIO_TRIGGER:
             self.regs[off] = val & ~1          # bit0 self-clears when the
         else:                                  # GPIO update lands

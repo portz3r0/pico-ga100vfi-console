@@ -1062,8 +1062,25 @@ def arm_window(rd, wr):
     checks.append({"name": "PROGRAM_DIS", "value": pdis, "want": 0, "ok": pdis == 0})
     if efp != 1 or pdis != 0:
         return False, checks
+    # WDATA_SECURE / SBFE are shadow registers: host-writable ONLY under
+    # EN_SW_OVERRIDE (same rule the PROGRAM_DIS block above documents).
+    # Writing them with EN restored to 0 is SILENTLY IGNORED on …075 —
+    # FUSEWDATA_PLM then stays 0xFFFFFF8F and every burn aborts (root
+    # cause of the 4-round "guard failure", named at last 17:53:35).
+    en2 = rd(EN_SW_OVERRIDE)
+    if en2 != 1:
+        wr(EN_SW_OVERRIDE, 1)
+        time.sleep(0.05)
     wr(WDATA_SECURE, 0)                   # opens FUSEWDATA_PLM
     wr(SBFE, 0)
+    ws = rd(WDATA_SECURE)
+    if en2 != 1:
+        wr(EN_SW_OVERRIDE, en2)
+        time.sleep(0.05)
+    checks.append({"name": "WDATA_SECURE", "value": ws, "want": 0,
+                   "ok": ws == 0})
+    if ws != 0:
+        return False, checks
     plm = rd(FUSEWDATA_PLM)
     checks.append({"name": "FUSEWDATA_PLM", "value": plm, "want": 0xFFFFFFFF,
                    "ok": plm == 0xFFFFFFFF})
