@@ -3511,7 +3511,8 @@ LIVEBOOT = r"""
     const reason = !burnQueue.length ? "queue empty — add records below"
       : campaignRunning ? "campaign already running"
       : !targetBdf ? "no GPU selected"
-      : !goldilocksNow ? "GPU not Goldilocks — glitch into the window first" : "";
+      : !(windowOk || goldilocksNow)
+        ? "GPU not Goldilocks — glitch into the window first" : "";
     btn.disabled = !!reason;
     btn.title = reason || "arm (Goldilocks + identity gate) and start the " +
       "burn campaign in ONE server call — irreversible OTP writes";
@@ -4009,6 +4010,7 @@ LIVEBOOT = r"""
       renderQueue();
     }
     btn.disabled = false;
+    updateQueueCard();   // owner: re-evaluate Arm & burn after green verdicts
   };
   $("gc-stop").onclick = () => jpost("/api/glitch/stop", {});  // stop reverts; the 2 s window poll will show closed
   $("gc-revert").onclick = async () => {

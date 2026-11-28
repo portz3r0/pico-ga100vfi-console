@@ -2431,6 +2431,48 @@ def burn_campaign_final(records, results):
         r in ("VERIFY OK", "ALREADY BURNED") for r in results)
 
 
+def _burn_records_in_window(bar, records, bdf, params, stats):
+    """Burn queued records on an OPEN window (bar must be an open Bar0).
+    Shared by the in-loop goldilocks path AND the pre-shot path (window
+    already held from a previous campaign — no needless glitch shot).
+    Sets stats['burned'], stats['burn_aborts'], and stats['goldilocks']
+    only when the whole campaign verifies final."""
+    glog(">>> burning records now (same process, no further restore)")
+    results = []
+    burned_ok = []
+    journal = _journal_path()
+    for rec in records:
+        rrep = burn_execute(
+            bar.rd32, bar.wr32,
+            rec["row"], rec["value"],
+            rec.get("old", 0), bdf=bdf,
+            journal=journal,
+            ack_uncertain=bool(params.get("ack_uncertain")))
+        res = rrep.get("result")
+        glog(f"    row {rec['row']}: {res}")
+        stats["burned"].append({"row": rec["row"], "result": res})
+        results.append(res)
+        if res in ("VERIFY OK", "ALREADY BURNED"):
+            burned_ok.append((rec["row"], rec["value"]))
+        elif str(res).startswith("ABORT"):
+            stats["burn_aborts"] += 1
+    # Only an all-success burn is final; an ABORT is logged, not counted,
+    # and the caller's loop keeps firing attempts (re-glitch).
+    if burn_campaign_final(records, results):
+        # M4: multi-record burn — re-read the whole burned image twice
+        # (ref read_rows(passes=2) == final_rows) before claiming/holding.
+        if len(burned_ok) >= 2 and not burn_image_verify(
+                bar.rd32, bar.wr32, burned_ok):
+            stats["image_verify"] = "IMAGE VERIFY FAILED"
+            glog(">>> IMAGE VERIFY FAILED — burned rows do not match "
+                 "the intended image; NOT holding the window")
+        else:
+            stats["goldilocks"] = True
+    else:
+        glog(">>> burn not final — not holding the window; "
+             "continuing attempts")
+
+
 def campaign_worker(params, records):
     stats = {"attempts": 0, "valid": 0, "lost": 0, "nack": 0,
              "poisoned": 0,
@@ -2481,7 +2523,36 @@ def campaign_worker(params, records):
             glog(f"adaptive: 3D (v_dip, delay, pw) CRC-guided search over "
                  f"{params.get('min_v', 300)}-{params.get('max_v', 380)} mV "
                  f"(seed delay {delay} µs, pw {pw} µs; fixed v_dip ignored)")
-        for n in range(1, params.get("max_attempts", 100) + 1):
+        prechecked = False
+        # Owner-verified behavior for BOTH modes: check the live window
+        # BEFORE firing anything. Already open => burn immediately (burn
+        # mode) or end holding the window (classify) — a glitch shot into
+        # an open window is a needless VRM dip. burn_window is read-only
+        # (9 checks, no SENSE, no writes); the burn itself re-runs every
+        # execution guard.
+        try:
+            with card_lock:
+                with Bar0(bdf) as bar:
+                    wok, _ = burn_window(bar.rd32)
+                    if wok:
+                        if records:
+                            glog(">>> burn window already OPEN — burning "
+                                 "now, no glitch shot fired")
+                            _burn_records_in_window(bar, records, bdf,
+                                                    params, stats)
+                            prechecked = bool(stats["goldilocks"])
+                        else:
+                            glog(">>> burn window already OPEN — no glitch "
+                                 "shots needed; holding the window")
+                            stats["goldilocks"] = True
+                            prechecked = True
+                    else:
+                        glog("window not open — starting glitch attempts")
+        except Exception as e:
+            glog(f"pre-shot window check failed ({e}) — "
+                 "starting glitch attempts")
+        for n in range(1, (0 if prechecked
+                           else params.get("max_attempts", 100)) + 1):
             if glitch_stop.is_set():
                 glog("STOPPED by user")
                 break
@@ -2554,53 +2625,9 @@ def campaign_worker(params, records):
                             if v.passed:
                                 _log_goldilocks(bdf, bar, att, n, v_dip, params)
                                 if records:
-                                    glog(">>> GOLDILOCKS — burning records now "
-                                         "(same process, no further restore)")
-                                    results = []
-                                    burned_ok = []
-                                    journal = _journal_path()
-                                    for rec in records:
-                                        rrep = burn_execute(
-                                            bar.rd32, bar.wr32,
-                                            rec["row"], rec["value"],
-                                            rec.get("old", 0), bdf=bdf,
-                                            journal=journal,
-                                            ack_uncertain=bool(
-                                                params.get("ack_uncertain")))
-                                        res = rrep.get("result")
-                                        glog(f"    row {rec['row']}: {res}")
-                                        stats["burned"].append(
-                                            {"row": rec["row"], "result": res})
-                                        results.append(res)
-                                        if res in ("VERIFY OK",
-                                                   "ALREADY BURNED"):
-                                            burned_ok.append((rec["row"],
-                                                              rec["value"]))
-                                        elif str(res).startswith("ABORT"):
-                                            stats["burn_aborts"] += 1
-                                    # Only an all-success burn is final; an
-                                    # ABORT is logged, not counted, and the
-                                    # loop keeps firing attempts (re-glitch).
-                                    if burn_campaign_final(records, results):
-                                        # M4: multi-record burn — re-read the
-                                        # whole burned image twice (ref
-                                        # read_rows(passes=2) == final_rows)
-                                        # before claiming/holding the window.
-                                        if len(burned_ok) >= 2 and not \
-                                                burn_image_verify(bar.rd32,
-                                                                  bar.wr32,
-                                                                  burned_ok):
-                                            stats["image_verify"] = \
-                                                "IMAGE VERIFY FAILED"
-                                            glog(">>> IMAGE VERIFY FAILED — "
-                                                 "burned rows do not match "
-                                                 "the intended image; NOT "
-                                                 "holding the window")
-                                        else:
-                                            stats["goldilocks"] = True
-                                    else:
-                                        glog(">>> burn not final — not holding "
-                                             "the window; continuing attempts")
+                                    glog(">>> GOLDILOCKS")
+                                    _burn_records_in_window(bar, records,
+                                                            bdf, params, stats)
                                 else:
                                     stats["goldilocks"] = True
                 except Exception as e:
