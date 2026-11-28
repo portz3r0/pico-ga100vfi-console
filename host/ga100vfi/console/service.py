@@ -2395,6 +2395,40 @@ def glog(line):
     with glitch_lock:
         GLITCH["log"].append(f"{ts}  {line}")
         del GLITCH["log"][:-400]
+    # persist across restarts: the log is campaign HISTORY, and console
+    # restarts (deploys!) must not erase it (owner: "a campaign log
+    # should already exist"). Dated in the file; today's lines render
+    # bare-time again on reload.
+    try:
+        with open(os.path.join(CFG["state_dir"], "campaign.log"), "a") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d')} {ts}  {line}\n")
+    except OSError:
+        pass
+
+
+def load_campaign_log():
+    """Seed GLITCH['log'] from the persisted campaign log (called once at
+    startup, before any worker thread runs)."""
+    p = os.path.join(CFG["state_dir"], "campaign.log")
+    try:
+        with open(p) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    def _disp(ln):
+        parts = ln.split("  ", 1)
+        if len(parts) == 2 and parts[0].startswith(today):
+            return parts[0][11:] + "  " + parts[1]
+        return ln
+    GLITCH["log"] = [_disp(l) for l in lines[-400:]]
+    if len(lines) > 2000:                 # keep the file bounded
+        try:
+            with open(p, "w") as f:
+                f.write("\n".join(lines[-2000:]) + "\n")
+        except OSError:
+            pass
 
 
 def vrm_unlock(card, retries=15):
@@ -3870,6 +3904,17 @@ def pico_flash_api(body):
     toolchain: build the .uf2 on a workstation and drop it at
     <repo>/firmware/build/pwmvid.uf2 (or the state dir)."""
     port = str(body.get("port") or "/dev/ttyACM0")
+    # Owner rule: never flash while the card is Goldilocks — the BOOTSEL
+    # reboot drops the VRM hand-off and the held window with it.
+    bdf, _ = resolve_target()
+    if bdf:
+        try:
+            if gpu_state(bdf).get("goldilocks"):
+                return {"error": "card is Goldilocks — flashing the pico "
+                                 "reboots it and drops the VRM hand-off; "
+                                 "revert or power-cycle first"}
+        except Exception:
+            pass
     uf2 = str(body.get("uf2") or "").strip()
     cands = ([uf2] if uf2 else []) + [
         os.path.join(CFG.get("state_dir") or "/tmp", "pwmvid.uf2"),
@@ -4623,6 +4668,7 @@ def main(argv=None) -> int:
     s, e = (int(x) for x in a.rows.split("-"))
     CFG["rows"] = list(range(s, e + 1))
     os.makedirs(dumps_dir(), exist_ok=True)
+    load_campaign_log()
     prepare_html()
 
     t = threading.Thread(target=poller, args=(a.poll,), daemon=True)

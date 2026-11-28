@@ -3507,6 +3507,12 @@ LIVEBOOT = r"""
   $("gc-ports-refresh").onclick = loadPorts;
   $("gc-flash").onclick = async () => {
     const b = $("gc-flash"), st = $("gc-flashstate");
+    if (goldilocksNow) {   // click race between render ticks: refuse
+      st.className = "bad";
+      st.textContent = "⚠ card is Goldilocks — flashing the pico would "
+        + "drop the VRM hand-off; revert or power-cycle first";
+      return;
+    }
     b.disabled = true; st.className = "note";
     st.textContent = "rebooting pico into BOOTSEL, writing uf2… (~15 s)";
     try {
@@ -3557,17 +3563,15 @@ LIVEBOOT = r"""
   // renders from it — no second source of truth.
   function windowPillView() {
     const s = windowState.state;
-    if (s === "OPEN") return {t: "burn window: OPEN", c: "pill okl"};
+    // OPEN with a leftover bad name = PLM-only re-lock: burnable (the
+    // execution guard needs only the FUSECTRL cmd bits), so it says OPEN
+    // — "closed" must mean CANNOT burn, nothing else (owner, 3x).
+    if (s === "OPEN") return {t: "burn window: OPEN" +
+        (windowState.bad.length ? " — PLM re-lock, burns allowed" : ""),
+        c: "pill okl"};
     if (s === "n/a") return {t: "burn window: n/a", c: "pill warnl"};
-    // …075 behaviour: FUSECTRL_PLM bit-4 re-locks seconds after
-    // Goldilocks — the strict pill closes, but burns only need the
-    // FUSECTRL cmd bits (0-1) and the execution guard allows it. Say
-    // so, or "closed" next to "holding the window" reads as a fault.
-    const plmOnly = windowState.bad.length === 1 &&
-                    windowState.bad[0] === "FUSECTRL_PLM";
-    return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : "") +
-            (plmOnly ? " — PLM re-lock, burns still allowed" : ""),
-            c: plmOnly ? "pill warnl" : "pill"};
+    return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : ""),
+            c: "pill"};
   }
   function renderWindowPills() {
     const v = windowPillView();
@@ -3590,6 +3594,14 @@ LIVEBOOT = r"""
         // that is a different fact, shown on the GPU badge, not a window.)
         windowState = {state: "closed",
                        bad: checks.filter(c => !c.ok).map(c => c.name)};
+        // …075 re-locks FUSECTRL_PLM bit-4 seconds after Goldilocks; the
+        // burn execution guard only needs the cmd bits (0-1), so a
+        // PLM-only failure is still BURNABLE — the pill must say OPEN.
+        // Any other failing check (or PLM cmd bits locked alongside)
+        // stays closed.
+        if (windowState.bad.length === 1 &&
+            windowState.bad[0] === "FUSECTRL_PLM")
+          windowState = {state: "OPEN", bad: ["FUSECTRL_PLM"]};
       }
       windowOk = windowState.state === "OPEN";
     } catch (e) {}
@@ -3939,6 +3951,18 @@ LIVEBOOT = r"""
     // is an in-memory campaign EVENT that a console restart wipes, while
     // the unlocked state survives in hardware until revert/power-cycle.
     $("gc-revert").disabled = !!j.running || !(j.window_held || goldilocksNow);
+    // Flashing reboots the pico — it drops the PMBus/VRM hand-off, and a
+    // Goldilocks card would lose its held window mid-flash (owner rule:
+    // only flash when the card is NOT Goldilocks).
+    const fb = $("gc-flash");
+    if (fb) {
+      if (!fb.dataset.t0) fb.dataset.t0 = fb.title;
+      fb.disabled = !!j.running || goldilocksNow;
+      fb.title = goldilocksNow && !j.running
+        ? "card is Goldilocks — flashing reboots the pico and drops the "
+          + "VRM hand-off (window lost); revert or power-cycle first"
+        : fb.dataset.t0;
+    }
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));
     st.className = "pill " + (j.running || j.result === "goldilocks" ? "okl" :
