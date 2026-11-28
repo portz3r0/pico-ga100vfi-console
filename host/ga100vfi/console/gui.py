@@ -655,6 +655,14 @@ function defectKey(name) {
 // the proposed-burns panel can read it during first paint, before the
 // live-boot script loads; the live-boot script uses this same binding.
 var burnQueue = [];
+// the queue is the owner's prepared work — a page refresh must not wipe it
+// (Goldilocks survives the reload, so the queue must too). Restored here,
+// before first paint; persisted on every renderQueue().
+try {
+  const _q = JSON.parse(localStorage.getItem("ga100.burnQueue") || "[]");
+  if (Array.isArray(_q)) burnQueue = _q.filter(
+    q => q && (typeof q.word === "string" || typeof q.word === "number"));
+} catch (e) {}
 // pristine copy of the server seed (the current card's own dump, or the
 // empty STUB) — "Back to current" restores the default face from it.
 const SEED = JSON.parse(document.getElementById("dumpdata").textContent);
@@ -3031,6 +3039,8 @@ LIVEBOOT = r"""
     });
   }
   function renderQueue() {
+    try { localStorage.setItem("ga100.burnQueue",
+                               JSON.stringify(burnQueue)); } catch (e) {}
     // task 30: proposed rows (suggested card + advanced card) are computed
     // over the CURRENT queue — keep them in step with every queue change.
     // task 35c: the INTENDED-state panel too (its rows now offset the queue).
