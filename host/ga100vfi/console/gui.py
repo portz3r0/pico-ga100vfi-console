@@ -3935,7 +3935,10 @@ LIVEBOOT = r"""
       ? "card is already Goldilocks — glitching it is pointless (the "
         + "campaign would fire zero shots); burn now via Arm & burn queue"
       : "";
-    $("gc-revert").disabled = !!j.running || !j.window_held;
+    // Revert is valid whenever the card sits unlocked/held — window_held
+    // is an in-memory campaign EVENT that a console restart wipes, while
+    // the unlocked state survives in hardware until revert/power-cycle.
+    $("gc-revert").disabled = !!j.running || !(j.window_held || goldilocksNow);
     const st = $("gc-state");
     st.textContent = j.running ? "● running" : (j.result || (j.error ? "error" : "idle"));
     st.className = "pill " + (j.running || j.result === "goldilocks" ? "okl" :
