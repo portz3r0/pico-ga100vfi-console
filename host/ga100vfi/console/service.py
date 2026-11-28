@@ -3199,6 +3199,28 @@ def driver_op_api(body):
     return {"error": f"unknown op {op!r}"}
 
 
+def system_reboot_api(body):
+    """POST /api/system/reboot — cold-cycle the host: full power-off
+    (S5) for off_s seconds, then the RTC alarm re-powers it. A warm
+    `reboot` never power-cycles the card; a degraded card needs a REAL
+    cold cycle (bench rule). rtcwake -p is the in-OS cold cycle (BIOS
+    must allow RTC wake; AC required). Falls back to a warm reboot if
+    rtcwake is unavailable. Fire-and-return: the power drops before the
+    child would exit, so waiting on it would hang the response."""
+    off = min(max(int(body.get("off_s", 15)), 5), 3600)
+    try:
+        subprocess.Popen(["rtcwake", "-p", "-s", str(off)])
+        return {"ok": True, "mode": f"poweroff-{off}s-rtc-wake",
+                "note": f"host powers off now, back up in ~{off}s + boot"}
+    except OSError as e:
+        try:
+            subprocess.Popen(["systemctl", "reboot"])
+            return {"ok": True, "mode": "warm-reboot-fallback",
+                    "rtcwake_error": str(e)}
+        except OSError as e2:
+            return {"error": f"rtcwake: {e}; reboot: {e2}"}
+
+
 # ---------------------------------------------------------------- vbios flash
 # Task 70: the post-DEVID flash phase, living beside the fuse gates. nvflash
 # requires the nvidia kernel MODULES UNLOADED (nvidia, nvidia_uvm,
@@ -4428,6 +4450,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = pico_flash_api(body)
             elif path == "/api/driver/op":
                 resp = driver_op_api(body)
+            elif path == "/api/system/reboot":
+                resp = system_reboot_api(body)
             elif path == "/api/vbios/backup":
                 resp = vbios_backup_api()
             elif path == "/api/vbios/flash":

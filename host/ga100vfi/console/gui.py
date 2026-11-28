@@ -1728,6 +1728,14 @@ if (sticktopEl && window.ResizeObserver) {
 }
 __LIVEBOOT__
 </script>
+<div id="reboot-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99;align-items:center;justify-content:center">
+  <div class="card" style="min-width:340px;max-width:440px">
+    <h3>⏻ Cold reboot</h3>
+    <div class="chips"><span class="pill warnl" id="rb-phase">issuing…</span><span class="pill" id="rb-elapsed">0 s</span></div>
+    <div class="logbox" id="rb-log" style="margin-top:8px"></div>
+    <div class="note" style="margin-top:6px">Pings the host every 2 s; this window reloads the console automatically when it is back.</div>
+  </div>
+</div>
 </body>
 </html>
 """
@@ -4198,6 +4206,7 @@ LIVEBOOT = r"""
         <button class="btn danger" id="drv-unload">Unload nvidia stack</button>
         <button class="btn danger" id="drv-blacklist">Blacklist nvidia + nouveau</button>
         <button class="btn" id="drv-unblacklist">Remove blacklist</button>
+        <button class="btn danger" id="drv-coldboot" title="full power-off 15 s then RTC re-power — the only true card cold cycle (a warm reboot keeps the card powered)">⏻ Cold reboot (15 s off)</button>
       </div>
       <div class="note" style="margin-top:8px">Glitching needs the nvidia driver
       unloaded and blacklisted (it re-locks the VRM and binds before you can inspect
@@ -4252,6 +4261,59 @@ LIVEBOOT = r"""
     $("drv-log").textContent = j.note || j.error || "done";
     renderDrivers();
   };
+  $("drv-coldboot").onclick = () => coldReboot();
+  function coldReboot() {
+    if (!confirm("Cold reboot: host powers OFF for 15 s (RTC wake), then "
+        + "boots.\nThis power-cycles the CARD — a warm reboot does not. "
+        + "Continue?")) return;
+    const modal = $("reboot-modal"), ph = $("rb-phase"),
+          el = $("rb-elapsed"), lg = $("rb-log");
+    const rl = m => lg.textContent =
+      (lg.textContent ? lg.textContent + "\n" : "") + m;
+    const setPhase = (t, c) => { ph.textContent = t; ph.className = "pill " + c; };
+    modal.style.display = "flex"; lg.textContent = "";
+    const t0 = Date.now();
+    const timer = setInterval(
+      () => el.textContent = Math.round((Date.now() - t0) / 1000) + " s",
+      1000);
+    let sawDown = false, done = false;
+    function pingLoop() {
+      if (done) return;
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), 2500);
+      fetch("/api/driver", {signal: ctl.signal}).then(r => {
+        clearTimeout(to);
+        if (r.ok && sawDown) {
+          done = true; clearInterval(timer);
+          setPhase("host is BACK", "okl");
+          rl("console reachable — reloading in 3 s");
+          setTimeout(() => location.reload(), 3000);
+        } else {
+          if (!sawDown) rl("still up (power drop pending?)…");
+          setTimeout(pingLoop, 2000);
+        }
+      }).catch(() => {
+        clearTimeout(to);
+        if (!sawDown) {
+          sawDown = true;
+          setPhase("OFF — RTC wake ~15 s + boot", "warnl");
+          rl("host is down, waiting for it to come back…");
+        }
+        setTimeout(pingLoop, 2000);
+      });
+    }
+    rl("POST /api/system/reboot …");
+    jpost("/api/system/reboot", {off_s: 15}).then(j => {
+      if (j.error) { rl("error: " + j.error); setPhase("failed", "badl");
+                     clearInterval(timer); return; }
+      rl("mode: " + j.mode);
+      setPhase("powering off…", "warnl");
+      setTimeout(pingLoop, 1500);
+    }).catch(() => {   // power dropped before the response arrived — normal
+      setPhase("powering off…", "warnl");
+      setTimeout(pingLoop, 1500);
+    });
+  }
   renderDrivers();
 
   // ---------- GPU pane ----------
