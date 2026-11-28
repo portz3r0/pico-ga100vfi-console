@@ -3374,6 +3374,13 @@ LIVEBOOT = r"""
       if (windowOk) {
         pill.textContent = "● Goldilocks — burn window OPEN";
         pill.className = "pill okl";
+      } else if (windowState.bad.length === 1 &&
+                 windowState.bad[0] === "FUSECTRL_PLM") {
+        // …075 re-locks PLM bit-4 seconds after Goldilocks — the card IS
+        // Goldilocks and burns are allowed (cmd-bit guard); do not tell
+        // the owner to glitch an already-Goldilocks card.
+        pill.textContent = "● Goldilocks — PLM re-lock, burns allowed";
+        pill.className = "pill okl";
       } else {
         pill.textContent = "● unlocked — window closed (glitch to open)";
         pill.className = "pill warnl";
