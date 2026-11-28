@@ -3376,7 +3376,11 @@ def md5_of(path):
 
 def nvflash_info():
     """Path + md5 + version line of the resolved nvflash. Version is cached
-    per path and NEVER executed in mock mode."""
+    per path and NEVER executed in mock mode. Also never executed while the
+    nvidia module is ABSENT: nvflash links NVML, which self-loads nvidia.ko
+    via direct syscall — on a degraded card that probe was the boot-panic
+    loader (and it hangs 15 s here instead). The version is informational;
+    skip the exec, say why."""
     nv = nvflash_bin()
     if not nv:
         return {"found": False, "path": None}
@@ -3384,10 +3388,15 @@ def nvflash_info():
     if CFG["mock"]:
         info["mock"] = True
         return info
-    if nv not in _nvflash_version_cache:
+    if not os.path.exists("/sys/module/nvidia"):
+        info["version"] = ("not queried — driver not loaded "
+                           "(nvflash would auto-load it)")
+    elif nv not in _nvflash_version_cache:
         out = sh([nv, "--version"], timeout=15) or ""
         _nvflash_version_cache[nv] = out.splitlines()[0] if out else ""
-    info["version"] = _nvflash_version_cache[nv]
+        info["version"] = _nvflash_version_cache[nv]
+    else:
+        info["version"] = _nvflash_version_cache[nv]
     try:
         info["md5"] = md5_of(nv)
     except OSError:
