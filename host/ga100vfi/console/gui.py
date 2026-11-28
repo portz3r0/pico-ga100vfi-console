@@ -2457,7 +2457,7 @@ LIVEBOOT = r"""
         <div class="field"><label>gap µs</label><input type="number" id="gc-gap" value="150"></div>
         <div class="field"><label>delay</label><input type="number" id="gc-delay" value="117"></div>
         <div class="field"><label>t_dip µs</label><input type="number" id="gc-tdip" value="-60" title="dip timing vs PEX_RST release; -60 = our proven regime, +50 = The Lab in-window claim (unverified here)"></div>
-        <div class="field"><label>Cooldown s</label><input type="number" id="gc-cooldown" value="10" step="1" min="0" max="120"></div>
+        <div class="field"><label>Cooldown s</label><input type="number" id="gc-cooldown" value="1" step="1" min="0" max="120"></div>
         <div class="field"><label>max attempts</label><input type="number" id="gc-max" value="100"></div>
         <div class="field"><label>v_dip strategy</label>
           <select id="gc-strategy">

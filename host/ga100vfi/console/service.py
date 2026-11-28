@@ -2579,7 +2579,7 @@ def campaign_worker(params, records):
                 glog("STOPPED by user")
                 break
             stats["attempts"] = n
-            cooldown = float(params.get("cooldown_s", 10.0))
+            cooldown = float(params.get("cooldown_s", 1.0))
             if not vrm_unlock(card):
                 glog("VRM unlock failed — stopping")
                 break
@@ -2747,7 +2747,7 @@ def glitch_start(body):
         "max_attempts": min(int(body.get("max_attempts", 100)), 2000),
         # Mandatory inter-shot VRM rest (see campaign_worker loop tail);
         # clamped 0-120 s. Echoed back in /api/glitch/status params.
-        "cooldown_s": min(max(float(body.get("cooldown_s", 10.0)), 0.0),
+        "cooldown_s": min(max(float(body.get("cooldown_s", 1.0)), 0.0),
                           120.0),
         "port": body.get("port", "/dev/ttyACM0"),
         # Goldilocks keeps the window open unless the caller explicitly asks
