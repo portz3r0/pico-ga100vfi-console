@@ -3540,8 +3540,15 @@ LIVEBOOT = r"""
     const s = windowState.state;
     if (s === "OPEN") return {t: "burn window: OPEN", c: "pill okl"};
     if (s === "n/a") return {t: "burn window: n/a", c: "pill warnl"};
-    return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : ""),
-            c: "pill"};
+    // …075 behaviour: FUSECTRL_PLM bit-4 re-locks seconds after
+    // Goldilocks — the strict pill closes, but burns only need the
+    // FUSECTRL cmd bits (0-1) and the execution guard allows it. Say
+    // so, or "closed" next to "holding the window" reads as a fault.
+    const plmOnly = windowState.bad.length === 1 &&
+                    windowState.bad[0] === "FUSECTRL_PLM";
+    return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : "") +
+            (plmOnly ? " — PLM re-lock, burns still allowed" : ""),
+            c: plmOnly ? "pill warnl" : "pill"};
   }
   function renderWindowPills() {
     const v = windowPillView();
