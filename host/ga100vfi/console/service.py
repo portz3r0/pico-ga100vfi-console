@@ -2404,6 +2404,9 @@ def glog(line):
             f.write(f"{datetime.now().strftime('%Y-%m-%d')} {ts}  {line}\n")
     except OSError:
         pass
+    # journald holds a second copy (the old log was memory-only and was
+    # lost with the process; never again)
+    print(f"{ts}  {line}", flush=True)
 
 
 def load_campaign_log():
