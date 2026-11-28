@@ -2595,8 +2595,10 @@ LIVEBOOT = r"""
   // task 67 (UX66 F3): ONE authoritative burn-window state, computed once
   // per /api/live poll and consumed by every window widget (bq-window pill,
   // campaign HELD chip). OPEN = all window checks
-  // pass; FADING = DSOV still 0 but any other check fails (the decay the
-  // hardware shows in minutes); closed otherwise.
+  // Truthful burn-window indicator: OPEN = every live window check passes,
+  // closed = anything fails (binary by owner decision — decay simply shows
+  // as OPEN flipping to closed on the next 2 s poll). ONE poll computes
+  // windowState; every window widget renders from it — no second truth.
   let windowState = {state: "n/a", bad: []};
   let campaignRunning = false;    // gates Arm & burn while a campaign owns the card
   let burnResults = null;         // row -> result from stats.burned (null = no burn campaign seen)
@@ -3346,10 +3348,15 @@ LIVEBOOT = r"""
     if (!g) {
       pill.textContent = "no GA100 detected"; pill.className = "pill warnl";
     } else if (g.goldilocks) {
-      // glitch-state approximation (4 read-only checks); the authoritative
-      // burn-window verdict is the Burn queue card's bq-window pill (/api/live).
-      pill.textContent = "● Goldilocks — glitch window";
-      pill.className = "pill okl";
+      // 4-check privilege unlock (dsov/crc/priv/fpf) — survives Revert VRM
+      // until power cycle. It is NOT the burn window; label it honestly.
+      if (windowOk) {
+        pill.textContent = "● Goldilocks — burn window OPEN";
+        pill.className = "pill okl";
+      } else {
+        pill.textContent = "● unlocked — window closed (glitch to open)";
+        pill.className = "pill warnl";
+      }
     } else if (g.error) {
       pill.textContent = "⚠ " + g.error; pill.className = "pill badl";
     } else {
@@ -3370,6 +3377,9 @@ LIVEBOOT = r"""
     loadLayout();
   };
   loadGpus();   // refreshed on demand + when the Glitch tab is shown
+  // goldilocksNow gates the Arm & burn button; the window state changes
+  // outside any tab interaction (campaigns, decay, reverts) — poll it.
+  setInterval(loadGpus, 3000);
 
   // ---- FF placement policy (row map + budget + live row hint) ----
   let ffLayout = null;
@@ -3517,8 +3527,6 @@ LIVEBOOT = r"""
   function windowPillView() {
     const s = windowState.state;
     if (s === "OPEN") return {t: "burn window: OPEN", c: "pill okl"};
-    if (s === "FADING") return {t: "burn window: FADING (" + windowState.bad.join(", ") + ")",
-                                c: "pill warnl"};
     if (s === "n/a") return {t: "burn window: n/a", c: "pill warnl"};
     return {t: "burn window: closed" + (windowState.bad.length ? " (" + windowState.bad.join(", ") + ")" : ""),
             c: "pill"};
@@ -3537,10 +3545,12 @@ LIVEBOOT = r"""
         windowState = {state: "OPEN", bad: []};
       } else {
         const checks = j.window_checks || [];
-        // DSOV still 0 with other checks failing = the window is decaying
-        // (minutes-scale hardware drift), not closed — say so.
-        const dsovOk = checks.some(c => c.name === "DSOV" && c.ok);
-        windowState = {state: dsovOk ? "FADING" : "closed",
+        // Binary by owner decision: the live check IS the truth — all
+        // window checks pass = OPEN, anything fails = CLOSED. The 2 s
+        // poll shows decay as OPEN->closed; no third state. (The card's
+        // 4-check privilege unlock survives Revert until power cycle —
+        // that is a different fact, shown on the GPU badge, not a window.)
+        windowState = {state: "closed",
                        bad: checks.filter(c => !c.ok).map(c => c.name)};
       }
       windowOk = windowState.state === "OPEN";
@@ -3808,8 +3818,7 @@ LIVEBOOT = r"""
     // the shared windowState (one variable), never fork a second truth.
     const wc = j.guards || [];
     windowState = j.window_ok ? {state: "OPEN", bad: []}
-      : {state: wc.some(g => g.name === "DSOV" && g.ok) ? "FADING" : "closed",
-         bad: wc.filter(g => !g.ok).map(g => g.name)};
+      : {state: "closed", bad: wc.filter(g => !g.ok).map(g => g.name)};
     windowOk = windowState.state === "OPEN";
     renderWindowPills();
     updateQueueCard();   // refresh the queue-card gate against the fresh check
@@ -3894,7 +3903,7 @@ LIVEBOOT = r"""
     // not a live state — the chip says so and shows the LIVE window state
     // from the same windowState the Burn queue pill renders.
     const held = j.window_held
-      ? `<span class="pill ${windowState.state === "OPEN" ? "okl" : windowState.state === "FADING" ? "warnl" : ""}">campaign ended holding the window — ${esc(windowPillView().t)}</span>` : "";
+      ? `<span class="pill ${windowState.state === "OPEN" ? "okl" : "warnl"}">campaign ended holding the window — ${esc(windowPillView().t)}</span>` : "";
     $("gc-chips").innerHTML =
       `<span class="pill">attempts <b>${s.attempts || 0}</b></span>` +
       `<span class="pill">valid <b>${s.valid || 0}</b></span>` +
@@ -4001,7 +4010,7 @@ LIVEBOOT = r"""
     }
     btn.disabled = false;
   };
-  $("gc-stop").onclick = () => jpost("/api/glitch/stop", {});
+  $("gc-stop").onclick = () => jpost("/api/glitch/stop", {});  // stop reverts; the 2 s window poll will show closed
   $("gc-revert").onclick = async () => {
     if (!confirm("Revert VRM now — hand PMBus control back? This closes any\n" +
                  "held Goldilocks window. Do it only after you are done with\n" +
