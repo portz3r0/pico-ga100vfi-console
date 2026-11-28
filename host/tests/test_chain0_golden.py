@@ -51,10 +51,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ga100vfi.advanced_unlocks import ADVANCED_UNLOCKS, enc_ff  # noqa: E402
 from ga100vfi.console.service import ff_fields_for              # noqa: E402
 
-PLAN_A = "/home/raza/nvidia/GPU1/razk-batch1.bin"
-PLAN_B = "/home/raza/nvidia/GPU2/razk-batch2.bin"
-DUMP_A = ("/home/raza/ga100-fuse-view/dumps/sn-1322321006870/"
-          "20261124-112031/dump.json")
+PLAN_A = os.path.expanduser("~/nvidia/GPU1/razk-batch1.bin")
+PLAN_B = os.path.expanduser("~/nvidia/GPU2/razk-batch2.bin")
+DUMP_A = os.path.expanduser("~/ga100-fuse-view/dumps/sn-1322321006870/"
+                            "20261124-112031/dump.json")
 
 HEADER = struct.Struct("<8sII")
 FRAME = struct.Struct("<4sI32s")

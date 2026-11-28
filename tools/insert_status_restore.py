@@ -11,11 +11,13 @@ Targets (see evidence/112, 114):
     STATUS_OPT_FBP 0x820D38 <- 0x852     (factory: FBP 1,4,7,11)
     STATUS_FBPA    0x820C18 <- 0xC0330C  (factory + defective bits 22,23)
 """
+import os
 import shutil
 import sys
 
-PATH = ("/home/raza/cmpunlocker-0.5/driver/.build/open-gpu-kernel-modules-610.43.03"
-        "/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c")
+PATH = os.path.expanduser(
+    "~/cmpunlocker-0.5/driver/.build/open-gpu-kernel-modules-610.43.03"
+    "/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c")
 BAK = PATH + ".bak-status-restore"
 
 src = open(PATH, "r").read()

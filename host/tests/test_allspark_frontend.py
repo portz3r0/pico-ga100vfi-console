@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ga100vfi.console import gui as G                                      # noqa: E402
 from ga100vfi.console import service as S                                  # noqa: E402
 
-NODE = os.environ.get("NODE", "/home/raza/.hermes/node/bin/node")
+NODE = os.environ.get("NODE") or os.path.expanduser("~/.hermes/node/bin/node")
 
 
 def _html():

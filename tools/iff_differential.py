@@ -11,9 +11,10 @@ step for the IFF format (plan gate B1/B2).
 """
 import glob
 import json
+import os
 import sys
 
-BASE = '/home/raza/nvidia/ga100-public-tools'
+BASE = os.path.expanduser('~/nvidia/ga100-public-tools')
 
 
 def load_all():

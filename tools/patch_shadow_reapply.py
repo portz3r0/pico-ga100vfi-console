@@ -9,11 +9,13 @@ The _kgspCreateSignatureMemdesc hook now:
 Writes are harmless without a window (hardware rejects them at DSOV=1, evidence/114/115).
 Idempotent. Backup kept as kernel_gsp.c.bak-shadow-reapply.
 """
+import os
 import shutil
 import sys
 
-PATH = ("/home/raza/cmpunlocker-0.5/driver/.build/open-gpu-kernel-modules-610.43.03"
-        "/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c")
+PATH = os.path.expanduser(
+    "~/cmpunlocker-0.5/driver/.build/open-gpu-kernel-modules-610.43.03"
+    "/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c")
 BAK = PATH + ".bak-shadow-reapply"
 
 src = open(PATH, "r").read()

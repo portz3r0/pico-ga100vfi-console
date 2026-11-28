@@ -25,9 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _HOST = os.path.normpath(os.path.join(_HERE, "..", "host"))
 if not os.path.isdir(os.path.join(_HOST, "ga100vfi")):
     for _cand in (
-        "/home/raza/nvidia/pico-ga100vfi/host",
-        "/home/raza/pico-ga100vfi/host",
         os.path.expanduser("~/nvidia/pico-ga100vfi/host"),
+        os.path.expanduser("~/pico-ga100vfi/host"),
     ):
         if os.path.isdir(os.path.join(_cand, "ga100vfi")):
             _HOST = _cand

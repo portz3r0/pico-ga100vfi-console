@@ -8,7 +8,8 @@ against OUR card instead of the reference snapshot.
 import json, mmap, os, struct, sys
 
 BDF = sys.argv[1] if len(sys.argv) > 1 else "0000:3b:00.0"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "/home/raza/nvidia/pico-ga100vfi/evidence/56-our-defects.json"
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser(
+    "~/nvidia/pico-ga100vfi/evidence/56-our-defects.json")
 
 REGS = [
     ("PMC_BOOT_0", 0x000000),
