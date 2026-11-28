@@ -13,7 +13,7 @@ S = service
 
 
 def test_ulog_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setattr(S.CFG, "state_dir", str(tmp_path))
+    monkeypatch.setitem(S.CFG, "state_dir", str(tmp_path))
     S.ulog('POST /api/arm {"phrase":"BURN"} -> {"token":"x"}')
     S.ulog("POST /api/revert {} -> ERROR campaign running")
     out = S.user_actions_api()
@@ -25,7 +25,7 @@ def test_ulog_roundtrip(monkeypatch, tmp_path):
 
 
 def test_user_actions_api_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(S.CFG, "state_dir", str(tmp_path / "nope"))
+    monkeypatch.setitem(S.CFG, "state_dir", str(tmp_path / "nope"))
     assert S.user_actions_api() == {"actions": []}
 
 
