@@ -3135,12 +3135,25 @@ def driver_op_api(body):
         if not confirm:
             return {"error": "confirm required"}
         with open(BLACKLIST_FILE, "w") as f:
+            # install-lines, not just blacklist-lines: a boot-time loader
+            # on the HP bench modprobes nvidia EXPLICITLY, which ignores
+            # plain blacklist entries (observed 2026-11-28: driver loaded
+            # 13 s after boot despite the blacklist — and a loaded driver
+            # + dead card hangs the kernel's device_shutdown on warm
+            # reboot). /bin/false blocks explicit loads too; the Load
+            # button below bypasses the wall via --ignore-install.
             f.write("# written by ga100vfi console\n"
                     "blacklist nvidia\nblacklist nvidia_drm\n"
                     "blacklist nvidia_modeset\nblacklist nvidia_uvm\n"
-                    "blacklist nouveau\n")
-        return {"ok": True, "note": "blacklist active — prevents autoload at boot; "
-                "manual modprobe still works. Unload now or reboot to apply."}
+                    "blacklist nouveau\n"
+                    "install nvidia /bin/false\n"
+                    "install nvidia_drm /bin/false\n"
+                    "install nvidia_modeset /bin/false\n"
+                    "install nvidia_uvm /bin/false\n"
+                    "install nouveau /bin/false\n")
+        return {"ok": True, "note": "blacklist active — autoload AND "
+                "explicit modprobe blocked at boot; the Load action still "
+                "loads on demand. Unload now or reboot to apply."}
     if op == "unblacklist":
         try:
             os.remove(BLACKLIST_FILE)
@@ -3172,9 +3185,13 @@ def driver_op_api(body):
                            "link; cold boot the host, do not retry-loop")
         return out
     if op == "load":
-        r = sh(["modprobe", "nvidia"])
+        # --ignore-install: the blacklist file walls off nvidia with
+        # install-lines too (boot loaders modprobe it explicitly); the
+        # console's Load action is the sanctioned way through.
+        r = sh(["modprobe", "--ignore-install", "nvidia"])
         return {"ok": not r or "already" in r.lower(),
-                "log": [f"modprobe nvidia: {r or 'ok'}"], "state": driver_state()}
+                "log": [f"modprobe --ignore-install nvidia: {r or 'ok'}"],
+                "state": driver_state()}
     return {"error": f"unknown op {op!r}"}
 
 
