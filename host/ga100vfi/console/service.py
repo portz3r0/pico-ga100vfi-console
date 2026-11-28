@@ -2546,32 +2546,36 @@ def campaign_worker(params, records):
                  f"{params.get('min_v', 300)}-{params.get('max_v', 380)} mV "
                  f"(seed delay {delay} µs, pw {pw} µs; fixed v_dip ignored)")
         prechecked = False
-        # Owner-verified behavior for BOTH modes: check the live window
-        # BEFORE firing anything. Already open => burn immediately (burn
-        # mode) or end holding the window (classify) — a glitch shot into
-        # an open window is a needless VRM dip. burn_window is read-only
-        # (9 checks, no SENSE, no writes); the burn itself re-runs every
-        # execution guard.
+        # Owner rule (asked repeatedly): if the card is ALREADY Goldilocks,
+        # Arm&burn must burn straight away — no glitch shots. The gate here
+        # is the SAME live-pill Goldilocks (gpu_state 4-check) that the Arm
+        # button and the UI pill use; the stricter 9-point burn_window is
+        # NOT consulted here because a card can be Goldilocks per the pill
+        # yet fail an auxiliary window check and then get needlessly
+        # glitched. burn_window stays the authoritative execution guard
+        # inside every burn.
         try:
-            with card_lock:
-                with Bar0(bdf) as bar:
-                    wok, _ = burn_window(bar.rd32, plm_cmd_bits=True)
-                    if wok:
+            st = gpu_state(bdf)   # pure read, no SENSE, no writes
+            if st.get("goldilocks"):
+                with card_lock:
+                    with Bar0(bdf) as bar:
                         if records:
-                            glog(">>> burn window already OPEN — burning "
+                            glog(">>> Goldilocks (live pill) — burning "
                                  "now, no glitch shot fired")
                             _burn_records_in_window(bar, records, bdf,
                                                     params, stats)
                             prechecked = bool(stats["goldilocks"])
                         else:
-                            glog(">>> burn window already OPEN — no glitch "
+                            glog(">>> Goldilocks (live pill) — no glitch "
                                  "shots needed; holding the window")
                             stats["goldilocks"] = True
                             prechecked = True
-                    else:
-                        glog("window not open — starting glitch attempts")
+            else:
+                why = st.get("error") or ", ".join(failing_checks(st))
+                glog(f"not Goldilocks per live pill ({why}) — "
+                     "starting glitch attempts")
         except Exception as e:
-            glog(f"pre-shot window check failed ({e}) — "
+            glog(f"pre-shot Goldilocks check failed ({e}) — "
                  "starting glitch attempts")
         for n in range(1, (0 if prechecked
                            else params.get("max_attempts", 100)) + 1):
