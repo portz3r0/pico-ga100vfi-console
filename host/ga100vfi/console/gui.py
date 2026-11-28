@@ -3935,6 +3935,10 @@ LIVEBOOT = r"""
     st.className = "pill " + (j.running || j.result === "goldilocks" ? "okl" :
                               j.error ? "badl" : "");
     const s = j.stats || {};
+    // the goldilocks chip is the LIVE card state (loadGpus 4-check), not
+    // the last campaign's stat — a console restart zeroes campaign stats
+    // while the card is still Goldilocks, and "no" on an unlocked card is
+    // a lie the owner already caught twice.
     // UX66 F3: window_held is a campaign EVENT ("it chose not to revert"),
     // not a live state — the chip says so and shows the LIVE window state
     // from the same windowState the Burn queue pill renders.
@@ -3945,8 +3949,8 @@ LIVEBOOT = r"""
       `<span class="pill">valid <b>${s.valid || 0}</b></span>` +
       `<span class="pill">lost <b>${s.lost || 0}</b></span>` +
       `<span class="pill">nack <b>${s.nack || 0}</b></span>` +
-      `<span class="pill">dsov=0 <b>${s.dsov_zero || 0}</b></span>` +
-      `<span class="pill ${s.goldilocks ? "okl" : ""}">goldilocks <b>${s.goldilocks ? "YES" : "no"}</b></span>` +
+      `<span class="pill">dsov=0 hits <b>${s.dsov_zero || 0}</b></span>` +
+      `<span class="pill ${goldilocksNow ? "okl" : ""}">goldilocks <b>${goldilocksNow ? "YES" : "no"}</b></span>` +
       (s.burn_aborts ? `<span class="pill warnl">burn aborts <b>${s.burn_aborts}</b> (not final — attempts keep firing)</span>` : "") +
       (s.image_verify ? `<span class="pill badl">${esc(s.image_verify)} — window NOT held</span>` : "") +
       held;
