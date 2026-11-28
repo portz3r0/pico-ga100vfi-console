@@ -4325,28 +4325,34 @@ LIVEBOOT = r"""
   };
   $("coldbootbtn").onclick = () => coldReboot();
   // ---- Activity modal: session history of every console action ----
+  // NB: the modal HTML sits AFTER this script in the document — resolve
+  // the elements at CLICK time, never at parse time (null at startup).
   {
-    const m = $("activity-modal");
     let timer = null;
     const draw = async () => {
+      const el = $("ab-log");
+      if (!el) return;
       try {
         const j = await jget("/api/actions");
         const a = j.actions || [];
-        $("ab-log").textContent = a.length
-          ? a.join("\n") : "no actions recorded yet";
-        const el = $("ab-log"); el.scrollTop = el.scrollHeight;
+        el.textContent = a.length ? a.join("\n") : "no actions recorded yet";
+        el.scrollTop = el.scrollHeight;
       } catch (e) {}
     };
     $("abtn").onclick = () => {
+      const m = $("activity-modal");
+      if (!m) return;
       m.style.display = "flex"; draw();
+      if (timer) clearInterval(timer);
       timer = setInterval(draw, 4000);
     };
-    m.onclick = ev => {
-      if (ev.target === m) {
+    document.addEventListener("click", ev => {
+      const m = $("activity-modal");
+      if (m && m.style.display !== "none" && ev.target === m) {
         m.style.display = "none";
         if (timer) { clearInterval(timer); timer = null; }
       }
-    };
+    });
   }
   function coldReboot() {
     if (!confirm("Cold reboot: host powers OFF for 15 s (RTC wake), then "
